@@ -1,13 +1,13 @@
 [project]
-name = "claude-runner"
+name = "tmux-mcp"
 version = "0.1.0"
-description = "MCP server that runs Claude Code CLI commands as subprocesses — for autonomous marketplace install testing, scripted Claude invocations, and agent-driven Claude Code automation."
+description = "MCP server that attaches to and drives existing tmux sessions — list, send keys, capture panes, run commands. Maintains a registry of named sessions with metadata."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Eidos AGI", email = "daniel@eidosagi.com" }]
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["mcp", "claude-code", "agent", "subprocess", "automation", "testing"]
+keywords = ["mcp", "tmux", "agent", "automation", "terminal", "session"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -19,7 +19,8 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development",
-    "Topic :: Software Development :: Testing",
+    "Topic :: System :: Shells",
+    "Topic :: Terminals",
 ]
 dependencies = [
     "mcp>=1.2.0",
@@ -33,19 +34,19 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/eidos-agi/claude-runner"
-Repository = "https://github.com/eidos-agi/claude-runner"
-Issues = "https://github.com/eidos-agi/claude-runner/issues"
+Homepage = "https://github.com/eidos-agi/tmux-mcp"
+Repository = "https://github.com/eidos-agi/tmux-mcp"
+Issues = "https://github.com/eidos-agi/tmux-mcp/issues"
 
 [project.scripts]
-claude-runner = "claude_runner.server:main"
+tmux-mcp = "tmux_mcp.server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/claude_runner"]
+packages = ["src/tmux_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

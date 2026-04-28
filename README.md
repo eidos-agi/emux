@@ -1,81 +1,114 @@
-# claude-runner
+# tmux-mcp
 
-> An MCP server that runs `claude` CLI commands as subprocesses. For agents who need to autonomously test marketplace installs, run scripted Claude invocations, or verify CLI behavior without a human in the loop.
+> An MCP server that attaches to and drives **existing** tmux sessions. Lists live sessions, sends keystrokes, captures pane content, runs commands. Maintains a registry of named sessions with metadata so an agent can refer to them by friendly name.
 
 ## What it does
 
-Exposes one MCP tool, `claude_run`, that spawns the `claude` Code CLI as a subprocess, captures stdout/stderr/returncode, and returns a structured JSON result. Optionally refreshes a marketplace cache before running the main command.
+Six MCP tools for operating on tmux sessions:
 
-This is **Tier 1**: one-shot, capturable commands. No PTY. No tmux. No interactive driving. (Tier 2 — interactive driving via tmux — is deferred until a use case demands it.)
+| Tool | What it does |
+|---|---|
+| `tmux_sessions()` | List all live tmux sessions on the host, plus the registered-name registry (with stale flagging) |
+| `tmux_register(name, session, description?, tags?)` | Save a friendly name → underlying tmux session mapping with metadata |
+| `tmux_unregister(name)` | Remove a registry entry. Does NOT touch tmux itself |
+| `tmux_send(target, keys, enter=True, by_registry_name=False)` | Send keystrokes to a session |
+| `tmux_capture(target, lines=200, by_registry_name=False)` | Read the visible pane + scrollback |
+| `tmux_run(target, command, wait_seconds=2.0, capture_lines=200, by_registry_name=False)` | Convenience: send + wait + capture in one call |
 
 ## Why it exists
 
-When the `eidos-marketplace` adds a new plugin, the round-trip install test (`claude plugins install <plugin>@<marketplace>`) needs a fresh Claude Code session to verify. Doing this manually breaks the agent-driven workflow. `claude-runner` lets an agent run that test itself and observe the result.
+Two motivating problems:
 
-It also surfaces a common, silent failure: when a marketplace's local cache is stale, `marketplace add` succeeds but `install` fails with `Plugin not found`. `claude-runner`'s `refresh_marketplace` parameter runs `claude plugins marketplace update <name>` first, so cache staleness can't silently break tests.
+**1. Round-trip testing of marketplace plugins.** When `eidos-marketplace` adds a plugin, verifying the install path requires a fresh Claude Code session. Doing this manually breaks autonomous workflows. Running `claude plugins install` in a known tmux session lets an agent see the result.
+
+**2. Agent-driven session steering.** An agent in one Claude Code session may need to inspect, prompt, or steer a Claude Code (or any other) session running in another tmux pane — for handoff, for debate, for dogfooding, for monitoring a long-running task. tmux-mcp gives that capability without the agent owning the session lifecycle.
+
+## Design principles
+
+- **Existing sessions only.** Never spawns new sessions, never kills them. The user owns the session lifecycle; this MCP just observes and drives.
+- **Registry is metadata only.** Live state always comes from `tmux list-sessions`. If a registered session no longer exists, the registry entry is marked `stale: true` but not auto-deleted — the user decides whether to re-register or unregister.
+- **Best-effort capture.** tmux output may include ANSI escapes; the caller is responsible for parsing if they need clean text.
+- **No magic, no recursion guards.** If you `tmux_send` a `claude` invocation into a pane that already has a Claude Code session running tmux-mcp, you get the recursion you asked for. Be deliberate.
 
 ## Install
 
-Via uvx (no pre-install needed):
+Via uvx (no pre-install):
 
 ```bash
-uvx --from claude-runner claude-runner
+uvx --from tmux-mcp tmux-mcp
 ```
 
 In a Claude Code marketplace plugin, the `.mcp.json` looks like:
 
 ```json
-{"claude-runner": {"command": "uvx", "args": ["--from", "claude-runner", "claude-runner"]}}
+{"tmux-mcp": {"command": "uvx", "args": ["--from", "tmux-mcp", "tmux-mcp"]}}
 ```
 
-For local development:
+Local development:
 
 ```bash
-git clone https://github.com/eidos-agi/claude-runner
-cd claude-runner
+git clone https://github.com/eidos-agi/tmux-mcp
+cd tmux-mcp
 uv sync
+uv pip install -e ".[dev]"
+uv run pytest
 ```
 
-## Usage
+## Registry storage
 
-The MCP exposes one tool:
+The registry is a JSON file at `~/.config/tmux-mcp/registry.json` (override with `$TMUX_MCP_REGISTRY`). Format:
 
+```json
+{
+  "claude-prod": {
+    "session": "main",
+    "description": "production claude session",
+    "tags": ["prod", "claude"],
+    "registered_at": 1777399684
+  },
+  "test-shell": {
+    "session": "scratch",
+    "description": "scratch tmux for testing installs",
+    "tags": ["test"],
+    "registered_at": 1777399700
+  }
+}
 ```
-claude_run(
-  args: list[str],                     # arguments passed to `claude` (e.g. ["plugins", "install", "cept@eidos-marketplace"])
-  timeout: int = 300,                  # seconds; first uvx fetch can be slow, allow headroom
-  refresh_marketplace: str | None = None,  # if set, runs `claude plugins marketplace update <name>` first
-  cwd: str | None = None,              # working directory for the subprocess
-) -> dict
-```
 
-Returns a JSON-serializable dict:
+Hand-edit it if you want; the format is stable.
 
-- On success: `{"ok": true, "returncode": 0, "stdout": "...", "stderr": "...", "elapsed_seconds": 1.7}`
-- On non-zero exit: `{"ok": false, "returncode": 1, "stdout": "...", "stderr": "...", "elapsed_seconds": 0.3}`
-- On timeout: `{"ok": false, "error": "timeout", "stdout_partial": "...", "stderr_partial": "...", "hint": "..."}`
-- On missing `claude` binary: `{"ok": false, "error": "command_not_found", "hint": "..."}`
-
-When `refresh_marketplace` is set, the result also includes a `refresh: {ok, elapsed_seconds}` block.
-
-### Example: verify a marketplace plugin install
+## Example
 
 ```python
-result = await claude_run(
-    args=["plugins", "install", "cept@eidos-marketplace"],
-    refresh_marketplace="eidos-marketplace",
-    timeout=180,
+# Register a session you've created externally
+await tmux_register(
+    name="claude-prod",
+    session="main",  # the actual tmux session name
+    description="production claude session",
+    tags=["prod", "claude"],
 )
-assert result["ok"], result
-```
 
-This refreshes the marketplace cache, then runs the install, then returns the structured result.
+# Drive it
+await tmux_send(target="claude-prod", keys="claude plugins list", by_registry_name=True)
+await asyncio.sleep(1)
+result = await tmux_capture(target="claude-prod", by_registry_name=True)
+print(result["content"])
+
+# Or in one shot
+result = await tmux_run(
+    target="claude-prod",
+    command="claude plugins marketplace update eidos-marketplace",
+    wait_seconds=3,
+    by_registry_name=True,
+)
+```
 
 ## What it does NOT do
 
-- **No interactive sessions.** It cannot drive a long-running `claude` REPL, send slash commands mid-session, or capture streaming output. That's Tier 2 (deferred).
-- **No PTY emulation.** Output is captured via `subprocess.run`'s pipes. ANSI sequences in the output are passed through untouched. If you need a terminal-rendered view, that's also Tier 2.
-- **No recursion guards.** If you run `claude_run(args=["chat"])` from inside a Claude Code session that has `claude-runner` loaded, the child session also has `claude-runner`. Be deliberate about this.
+- **Doesn't spawn tmux sessions.** Use `tmux new-session` yourself; this MCP is read/drive only.
+- **Doesn't strip ANSI.** Capture content includes the raw bytes from tmux. Strip with `re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)` if you need clean output.
+- **Doesn't proxy MCP from inside the tmux session.** If the tmux session is running its own MCP server, this tool only sees stdin/stdout text — not the structured MCP messages.
+- **Doesn't long-poll.** `tmux_run`'s `wait_seconds` is a fixed sleep. For commands that may take a while, prefer `tmux_send` followed by polling `tmux_capture` until you see the prompt return.
 
 ## License
 
