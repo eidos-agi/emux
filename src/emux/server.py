@@ -1,4 +1,4 @@
-"""tmux-mcp server.
+"""emux MCP server.
 
 Exposes MCP tools for attaching to and driving existing tmux sessions: list
 live sessions, send keys, capture panes, run commands. Maintains a registry
@@ -28,12 +28,13 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("tmux-mcp")
+mcp = FastMCP("emux")
 
 
 REGISTRY_PATH = Path(
-    os.environ.get("TMUX_MCP_REGISTRY")
-    or (Path.home() / ".config" / "tmux-mcp" / "registry.json")
+    os.environ.get("EMUX_REGISTRY")
+    or os.environ.get("TMUX_MCP_REGISTRY")  # back-compat with prior name
+    or (Path.home() / ".config" / "emux" / "registry.json")
 )
 
 
@@ -321,10 +322,13 @@ async def tmux_run(
     }
 
 
-def main() -> None:
-    """Entry point for the `tmux-mcp` console script."""
+def run_mcp_server() -> None:
+    """Start the emux MCP server (stdio transport).
+
+    Invoked by `emux mcp`. The CLI dispatcher in `emux.cli` calls this.
+    """
     mcp.run()
 
 
 if __name__ == "__main__":
-    main()
+    run_mcp_server()

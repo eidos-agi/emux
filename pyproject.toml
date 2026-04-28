@@ -1,13 +1,13 @@
 [project]
-name = "tmux-mcp"
+name = "emux"
 version = "0.1.0"
-description = "MCP server that attaches to and drives existing tmux sessions — list, send keys, capture panes, run commands. Maintains a registry of named sessions with metadata."
+description = "Eidos mux — pick up where you left off in tmux. TUI picker for registered sessions + an MCP server for agent-driven attach/send/capture."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Eidos AGI", email = "daniel@eidosagi.com" }]
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["mcp", "tmux", "agent", "automation", "terminal", "session"]
+keywords = ["mcp", "tmux", "agent", "automation", "terminal", "session", "tui"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -34,19 +34,19 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/eidos-agi/tmux-mcp"
-Repository = "https://github.com/eidos-agi/tmux-mcp"
-Issues = "https://github.com/eidos-agi/tmux-mcp/issues"
+Homepage = "https://github.com/eidos-agi/emux"
+Repository = "https://github.com/eidos-agi/emux"
+Issues = "https://github.com/eidos-agi/emux/issues"
 
 [project.scripts]
-tmux-mcp = "tmux_mcp.server:main"
+emux = "emux.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/tmux_mcp"]
+packages = ["src/emux"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

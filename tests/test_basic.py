@@ -13,25 +13,25 @@ import json
 
 
 def test_import():
-    import tmux_mcp
-    assert tmux_mcp.__version__ == "0.1.0"
+    import emux
+    assert emux.__version__ == "0.1.0"
 
 
 def test_server_module_loads():
-    from tmux_mcp import server
+    from emux import server
     assert server.mcp is not None
-    assert server.mcp.name == "tmux-mcp"
+    assert server.mcp.name == "emux"
 
 
 def test_resolve_tmux_returns_string_or_none():
-    from tmux_mcp.server import _resolve_tmux
+    from emux.server import _resolve_tmux
     result = _resolve_tmux()
     assert result is None or isinstance(result, str)
 
 
 def test_registry_round_trip(tmp_path, monkeypatch):
     """Registry persists through disk and reloads correctly."""
-    from tmux_mcp import server
+    from emux import server
     registry_path = tmp_path / "registry.json"
     monkeypatch.setattr(server, "REGISTRY_PATH", registry_path)
 
@@ -51,13 +51,13 @@ def test_registry_round_trip(tmp_path, monkeypatch):
 
 
 def test_load_registry_returns_empty_when_missing(tmp_path, monkeypatch):
-    from tmux_mcp import server
+    from emux import server
     monkeypatch.setattr(server, "REGISTRY_PATH", tmp_path / "does-not-exist.json")
     assert server._load_registry() == {}
 
 
 def test_load_registry_handles_corrupt_file(tmp_path, monkeypatch):
-    from tmux_mcp import server
+    from emux import server
     bad = tmp_path / "registry.json"
     bad.write_text("this is not json")
     monkeypatch.setattr(server, "REGISTRY_PATH", bad)
@@ -65,7 +65,7 @@ def test_load_registry_handles_corrupt_file(tmp_path, monkeypatch):
 
 
 def test_tmux_sessions_handles_missing_tmux(monkeypatch):
-    from tmux_mcp import server
+    from emux import server
     monkeypatch.setattr(server, "_resolve_tmux", lambda: None)
     result = asyncio.run(server.tmux_sessions())
     assert result["ok"] is False
@@ -74,7 +74,7 @@ def test_tmux_sessions_handles_missing_tmux(monkeypatch):
 
 
 def test_tmux_send_handles_missing_tmux(monkeypatch):
-    from tmux_mcp import server
+    from emux import server
     monkeypatch.setattr(server, "_resolve_tmux", lambda: None)
     result = asyncio.run(server.tmux_send(target="nope", keys="echo hi"))
     assert result["ok"] is False
@@ -82,7 +82,7 @@ def test_tmux_send_handles_missing_tmux(monkeypatch):
 
 
 def test_tmux_capture_handles_missing_tmux(monkeypatch):
-    from tmux_mcp import server
+    from emux import server
     monkeypatch.setattr(server, "_resolve_tmux", lambda: None)
     result = asyncio.run(server.tmux_capture(target="nope"))
     assert result["ok"] is False
@@ -90,7 +90,7 @@ def test_tmux_capture_handles_missing_tmux(monkeypatch):
 
 
 def test_register_and_unregister_round_trip(tmp_path, monkeypatch):
-    from tmux_mcp import server
+    from emux import server
     monkeypatch.setattr(server, "REGISTRY_PATH", tmp_path / "registry.json")
     monkeypatch.setattr(server, "_live_sessions", lambda: [])
 
@@ -112,7 +112,7 @@ def test_register_and_unregister_round_trip(tmp_path, monkeypatch):
 
 
 def test_unregister_unknown_returns_error(tmp_path, monkeypatch):
-    from tmux_mcp import server
+    from emux import server
     monkeypatch.setattr(server, "REGISTRY_PATH", tmp_path / "registry.json")
     result = asyncio.run(server.tmux_unregister("never-registered"))
     assert result["ok"] is False
@@ -121,7 +121,7 @@ def test_unregister_unknown_returns_error(tmp_path, monkeypatch):
 
 def test_send_by_registry_name_resolves(tmp_path, monkeypatch):
     """tmux_send with by_registry_name=True looks up the underlying session."""
-    from tmux_mcp import server
+    from emux import server
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(json.dumps({
         "alpha": {"session": "real-session-x", "description": None, "tags": [], "registered_at": 0}
@@ -143,7 +143,7 @@ def test_send_by_registry_name_resolves(tmp_path, monkeypatch):
 
 
 def test_send_by_registry_name_unknown_returns_error(tmp_path, monkeypatch):
-    from tmux_mcp import server
+    from emux import server
     monkeypatch.setattr(server, "REGISTRY_PATH", tmp_path / "registry.json")
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
     result = asyncio.run(server.tmux_send(target="not-here", keys="x", by_registry_name=True))

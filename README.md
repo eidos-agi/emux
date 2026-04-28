@@ -1,62 +1,127 @@
-# tmux-mcp
+# emux
 
-> An MCP server that attaches to and drives **existing** tmux sessions. Lists live sessions, sends keystrokes, captures pane content, runs commands. Maintains a registry of named sessions with metadata so an agent can refer to them by friendly name.
+> **Eidos mux.** Pick up where you left off in tmux. A TUI session picker for humans + an MCP server for agents — same registry, same sessions, same operating model.
 
 ## What it does
 
-Six MCP tools for operating on tmux sessions:
+Two front-ends over one shared registry of named tmux sessions:
 
-| Tool | What it does |
-|---|---|
-| `tmux_sessions()` | List all live tmux sessions on the host, plus the registered-name registry (with stale flagging) |
-| `tmux_register(name, session, description?, tags?)` | Save a friendly name → underlying tmux session mapping with metadata |
-| `tmux_unregister(name)` | Remove a registry entry. Does NOT touch tmux itself |
-| `tmux_send(target, keys, enter=True, by_registry_name=False)` | Send keystrokes to a session |
-| `tmux_capture(target, lines=200, by_registry_name=False)` | Read the visible pane + scrollback |
-| `tmux_run(target, command, wait_seconds=2.0, capture_lines=200, by_registry_name=False)` | Convenience: send + wait + capture in one call |
+```
+emux              → TUI picker. Lists registered + live sessions.
+                    Pick one → tmux attach. Stale entries flagged.
+
+emux mcp          → MCP server. Six tools for agents to drive
+                    sessions: list, register, send, capture, run.
+
+emux ls           → Print registered + live sessions (non-interactive,
+                    CI-friendly).
+emux register     → Register a session under a friendly name.
+emux unregister   → Drop a registered name. Doesn't touch tmux.
+```
+
+The registry persists at `~/.config/emux/registry.json` (override via `$EMUX_REGISTRY`).
 
 ## Why it exists
 
-Two motivating problems:
+Two motivating problems, one tool:
 
-**1. Round-trip testing of marketplace plugins.** When `eidos-marketplace` adds a plugin, verifying the install path requires a fresh Claude Code session. Doing this manually breaks autonomous workflows. Running `claude plugins install` in a known tmux session lets an agent see the result.
+**For humans:** "Which tmux session was I working in?" After ten sessions accumulate, remembering which one had the long-running build, which one had the Claude Code chat with useful context, which one was a throwaway — that's the friction. emux's TUI shows the registered names with descriptions ("production claude session", "test-shell", "long backfill") and stale flags (sessions you registered but tmux has since reaped). Pick one, you're attached. No remembering tmux session ids.
 
-**2. Agent-driven session steering.** An agent in one Claude Code session may need to inspect, prompt, or steer a Claude Code (or any other) session running in another tmux pane — for handoff, for debate, for dogfooding, for monitoring a long-running task. tmux-mcp gives that capability without the agent owning the session lifecycle.
+**For agents:** When an agent in one Claude Code session needs to inspect, prompt, or steer a session running in another tmux pane — for handoff, debate, monitoring, or autonomous round-trip testing of marketplace installs — it needs structured access to send keys and read the result. emux's MCP server gives that without the agent owning session lifecycle.
 
-## Design principles
-
-- **Existing sessions only.** Never spawns new sessions, never kills them. The user owns the session lifecycle; this MCP just observes and drives.
-- **Registry is metadata only.** Live state always comes from `tmux list-sessions`. If a registered session no longer exists, the registry entry is marked `stale: true` but not auto-deleted — the user decides whether to re-register or unregister.
-- **Best-effort capture.** tmux output may include ANSI escapes; the caller is responsible for parsing if they need clean text.
-- **No magic, no recursion guards.** If you `tmux_send` a `claude` invocation into a pane that already has a Claude Code session running tmux-mcp, you get the recursion you asked for. Be deliberate.
+The registry is the same surface for both. Register once interactively, drive forever from agents. Or vice versa.
 
 ## Install
 
 Via uvx (no pre-install):
 
 ```bash
-uvx --from tmux-mcp tmux-mcp
+uvx --from emux emux                  # TUI picker
+uvx --from emux emux mcp              # MCP server
 ```
 
 In a Claude Code marketplace plugin, the `.mcp.json` looks like:
 
 ```json
-{"tmux-mcp": {"command": "uvx", "args": ["--from", "tmux-mcp", "tmux-mcp"]}}
+{"emux": {"command": "uvx", "args": ["--from", "emux", "emux", "mcp"]}}
 ```
 
 Local development:
 
 ```bash
-git clone https://github.com/eidos-agi/tmux-mcp
-cd tmux-mcp
+git clone https://github.com/eidos-agi/emux
+cd emux
 uv sync
 uv pip install -e ".[dev]"
 uv run pytest
 ```
 
-## Registry storage
+## TUI picker
 
-The registry is a JSON file at `~/.config/tmux-mcp/registry.json` (override with `$TMUX_MCP_REGISTRY`). Format:
+Running `emux` with no arguments opens a numbered list of choices:
+
+```
+emux v0.1.0 — pick a session to attach
+
+   1  claude-prod   → main           live    — production claude session  #prod #claude
+   2  test-shell    → scratch        live    — scratch tmux for testing   #test
+   3  long-build    → backfill       STALE — tmux session gone   — overnight ETL run
+   4  experiments   unregistered live tmux session
+   5  (register new)  register a new session by typing name + tmux session id
+
+  pick [1-5], or q to quit:
+```
+
+- **Registered + live** entries attach immediately on selection (`tmux attach -t <session>`).
+- **Stale** registered entries explain that the underlying tmux session is gone; you can pick again, unregister it, or re-register against a live session.
+- **Live but unregistered** entries offer to register them inline before attaching.
+- **(register new)** prompts for `name`, `session id`, optional `description`, and tags, then optionally attaches.
+
+The TUI is intentionally minimal: stdlib `input()`, no external TUI library. Works in any terminal, including remote SSH, dumb terminals, and CI shells.
+
+## MCP server
+
+Six tools, exposed via `emux mcp`:
+
+| Tool | What it does |
+|---|---|
+| `tmux_sessions()` | List live tmux sessions + registry (with stale flag) |
+| `tmux_register(name, session, description?, tags?)` | Save friendly-name → session mapping with metadata |
+| `tmux_unregister(name)` | Remove from registry; doesn't touch tmux |
+| `tmux_send(target, keys, enter, by_registry_name)` | Send keystrokes |
+| `tmux_capture(target, lines, by_registry_name)` | Read pane + scrollback |
+| `tmux_run(target, command, wait_seconds, ...)` | Convenience: send + sleep + capture |
+
+Example: agent drives a registered session.
+
+```python
+await tmux_register(
+    name="claude-prod",
+    session="main",
+    description="production claude session",
+    tags=["prod", "claude"],
+)
+
+result = await tmux_run(
+    target="claude-prod",
+    command="claude plugins marketplace update eidos-marketplace",
+    wait_seconds=3,
+    by_registry_name=True,
+)
+print(result["content"])  # tmux pane contents after the command
+```
+
+## Design principles
+
+- **Existing sessions only.** Never spawns, never kills tmux sessions. Lifecycle is the user's. emux just observes and drives.
+- **Registry is metadata only.** Live state always comes from `tmux list-sessions`. Stale entries are flagged, not auto-deleted — the user decides.
+- **One registry for both surfaces.** TUI and MCP read and write the same JSON. Register interactively, drive from an agent. Or the reverse.
+- **Stdlib TUI.** No `prompt_toolkit`, no `textual`, no `rich`. The picker is `input()` + a numbered list. Keeps install footprint tiny and works in every terminal.
+- **No magic, no recursion guards.** Sending `claude` keystrokes into a session that's already running emux's MCP gives you the recursion you asked for. Be deliberate.
+
+## Storage
+
+Registry JSON at `~/.config/emux/registry.json` (override via `$EMUX_REGISTRY`). Format:
 
 ```json
 {
@@ -64,51 +129,19 @@ The registry is a JSON file at `~/.config/tmux-mcp/registry.json` (override with
     "session": "main",
     "description": "production claude session",
     "tags": ["prod", "claude"],
-    "registered_at": 1777399684
-  },
-  "test-shell": {
-    "session": "scratch",
-    "description": "scratch tmux for testing installs",
-    "tags": ["test"],
-    "registered_at": 1777399700
+    "registered_at": 1777400000
   }
 }
 ```
 
-Hand-edit it if you want; the format is stable.
-
-## Example
-
-```python
-# Register a session you've created externally
-await tmux_register(
-    name="claude-prod",
-    session="main",  # the actual tmux session name
-    description="production claude session",
-    tags=["prod", "claude"],
-)
-
-# Drive it
-await tmux_send(target="claude-prod", keys="claude plugins list", by_registry_name=True)
-await asyncio.sleep(1)
-result = await tmux_capture(target="claude-prod", by_registry_name=True)
-print(result["content"])
-
-# Or in one shot
-result = await tmux_run(
-    target="claude-prod",
-    command="claude plugins marketplace update eidos-marketplace",
-    wait_seconds=3,
-    by_registry_name=True,
-)
-```
+For backwards compatibility with the prior name (`tmux-mcp`), `$TMUX_MCP_REGISTRY` is also honored if `$EMUX_REGISTRY` is unset.
 
 ## What it does NOT do
 
-- **Doesn't spawn tmux sessions.** Use `tmux new-session` yourself; this MCP is read/drive only.
-- **Doesn't strip ANSI.** Capture content includes the raw bytes from tmux. Strip with `re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)` if you need clean output.
-- **Doesn't proxy MCP from inside the tmux session.** If the tmux session is running its own MCP server, this tool only sees stdin/stdout text — not the structured MCP messages.
-- **Doesn't long-poll.** `tmux_run`'s `wait_seconds` is a fixed sleep. For commands that may take a while, prefer `tmux_send` followed by polling `tmux_capture` until you see the prompt return.
+- **Doesn't spawn tmux sessions.** Use `tmux new-session` yourself; emux is read/drive only.
+- **Doesn't strip ANSI.** Capture content includes raw bytes from tmux. Strip with `re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)` if you need clean output.
+- **Doesn't proxy MCP from inside tmux.** If the tmux session is running its own MCP server, emux only sees the stdin/stdout text — not the structured MCP messages.
+- **Doesn't long-poll.** `tmux_run`'s `wait_seconds` is a fixed sleep. For long commands, prefer `tmux_send` + polling `tmux_capture` until you see the prompt return.
 
 ## License
 
