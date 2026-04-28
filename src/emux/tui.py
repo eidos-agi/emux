@@ -214,7 +214,7 @@ def run_tui() -> dict[str, Any] | None:
         from textual.binding import Binding
         from textual.containers import Horizontal, Vertical, VerticalScroll
         from textual.theme import Theme as TextualTheme
-        from textual.widgets import Footer, Header, ListItem, ListView, Static
+        from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
     except ImportError as e:
         print(f"emux: textual is required for the TUI ({e}).", file=sys.stderr)
         print("       install with: uv pip install 'textual>=0.40.0'", file=sys.stderr)
@@ -222,22 +222,26 @@ def run_tui() -> dict[str, Any] | None:
 
     groups = _build_groups()
 
-    # Flatten into the order the ListView will render. Each entry remembers its
-    # ordinal position among selectable items so number keys can target them.
-    selectable: list[dict[str, Any]] = []
-    flat_render: list[tuple[str, dict[str, Any] | None]] = []  # (kind, payload)
-    for group_key in ("registered_live", "registered_stale", "unregistered_live", "actions"):
-        items = groups[group_key]
-        if not items:
-            continue
-        flat_render.append(("header", {"key": group_key, "count": len(items)}))
-        for item in items:
-            selectable.append(item)
-            flat_render.append(("item", item))
-
-    if not selectable:
-        # Nothing to pick; return None so caller can show a friendly message.
+    # Empty-state guard: if there are no selectable items at all, bail so the
+    # caller can show a friendly message instead of an empty TUI.
+    has_anything = any(
+        groups[k] for k in ("registered_live", "registered_stale", "unregistered_live", "actions")
+    )
+    if not has_anything:
         return None
+
+    def _matches(item: dict[str, Any], needle: str) -> bool:
+        """Case-insensitive substring match across name + session + description + tags."""
+        if not needle:
+            return True
+        haystack = " ".join([
+            str(item.get("name", "")),
+            str(item.get("session", "")),
+            str(item.get("description") or ""),
+            " ".join(str(t) for t in (item.get("tags") or [])),
+            str(item.get("label", "")),  # for register_new
+        ]).lower()
+        return needle in haystack
 
     THEME_DEFS = [
         TextualTheme(
@@ -315,8 +319,11 @@ def run_tui() -> dict[str, Any] | None:
         Screen { layout: horizontal; }
         #nav-pane    { width: 40%; border-right: heavy $primary; padding: 1; background: $surface; }
         #preview-pane { width: 60%; padding: 1 2; overflow-y: auto; }
-        ListView { height: 100%; }
-        ListItem { padding: 0; height: 1; }
+        #filter      { dock: top; margin-bottom: 1; }
+        Input        { border: tall $accent; }
+        Input:focus  { border: tall $primary; }
+        ListView     { height: 1fr; }
+        ListItem     { padding: 0; height: 1; }
         ListView > ListItem.--highlight { background: $primary 25%; }
         """
 
@@ -328,34 +335,80 @@ def run_tui() -> dict[str, Any] | None:
             Binding("r", "register", "Register"),
             Binding("u", "unregister", "Unregister"),
             Binding("R", "rescan", "Rescan"),
+            Binding("ctrl+l", "focus_filter", "Filter"),
             Binding("t", "cycle_theme", "Theme"),
             Binding("q", "quit", "Quit"),
             Binding("escape", "quit", "Quit"),
         ]
 
+        def _build_list_items(self, needle: str = "") -> list[ListItem]:
+            """Build the list items currently visible, applying the filter.
+
+            Group headers only render when at least one item in their group
+            matches. Numbering restarts from 1 on every filter change, so the
+            number-key shortcuts always target the *visible* top-N rows.
+            """
+            items: list[ListItem] = []
+            num = 1
+            for group_key in ("registered_live", "registered_stale", "unregistered_live", "actions"):
+                bucket = groups[group_key]
+                matching = [it for it in bucket if _matches(it, needle)]
+                if not matching:
+                    continue
+                items.append(GroupHeader(group_key, len(matching)))
+                for it in matching:
+                    items.append(SessionRow(num, it))
+                    num += 1
+            return items
+
         def compose(self) -> ComposeResult:
             yield Header()
-            list_items: list[ListItem] = []
-            num = 1
-            for kind, payload in flat_render:
-                if payload is None:
-                    continue
-                if kind == "header":
-                    list_items.append(GroupHeader(payload["key"], payload["count"]))
-                else:
-                    list_items.append(SessionRow(num, payload))
-                    num += 1
             with Horizontal():
                 with Vertical(id="nav-pane"):
-                    yield ListView(*list_items, id="nav-list")
+                    yield Input(placeholder="filter…  (type to narrow; Ctrl-L to refocus)", id="filter")
+                    yield ListView(*self._build_list_items(""), id="nav-list")
                 with VerticalScroll(id="preview-pane"):
                     yield Static(id="preview", markup=True)
             yield Footer()
+
+        def _refilter(self, needle: str) -> None:
+            lv = self.query_one("#nav-list", ListView)
+            lv.clear()
+            for item in self._build_list_items(needle):
+                lv.append(item)
+            # Highlight the first selectable row of the new list, if any.
+            for i, list_item in enumerate(lv.children):
+                if isinstance(list_item, SessionRow):
+                    lv.index = i
+                    self.query_one("#preview", Static).update(_build_preview_for(list_item.payload))
+                    return
+            self.query_one("#preview", Static).update("[dim]no matches[/dim]")
+
+        def on_input_changed(self, event: Any) -> None:
+            if getattr(event.input, "id", None) != "filter":
+                return
+            self._refilter(event.value.strip().lower())
+
+        def on_input_submitted(self, event: Any) -> None:
+            """Pressing Enter in the filter input attaches to the first match."""
+            if getattr(event.input, "id", None) != "filter":
+                return
+            lv = self.query_one("#nav-list", ListView)
+            for list_item in lv.children:
+                if isinstance(list_item, SessionRow):
+                    lv.focus()
+                    self.action_primary()
+                    return
+
+        def action_focus_filter(self) -> None:
+            self.query_one("#filter", Input).focus()
 
         def on_mount(self) -> None:
             for t in THEME_DEFS:
                 self.register_theme(t)
             self.theme = THEME_DEFS[0].name
+            # Filter input gets initial focus so the user can just type to narrow.
+            self.query_one("#filter", Input).focus()
             lv = self.query_one("#nav-list", ListView)
             # Find the first selectable row and highlight it.
             for i, list_item in enumerate(lv.children):
