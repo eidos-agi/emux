@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Any
 
 from . import __version__
 from .server import (
@@ -28,71 +27,6 @@ from .server import (
     _save_registry,
     run_mcp_server,
 )
-
-
-def _print_table(rows: list[tuple[str, str, str]]) -> None:
-    """Print a 3-column aligned table: # · NAME · DETAIL."""
-    if not rows:
-        return
-    w0 = max(len(r[0]) for r in rows)
-    w1 = max(len(r[1]) for r in rows)
-    for r in rows:
-        print(f"  {r[0]:>{w0}}  {r[1]:<{w1}}  {r[2]}")
-
-
-def _build_picker_choices() -> list[dict[str, Any]]:
-    """Build the ordered list of choices for the TUI picker.
-
-    Each choice: {label, kind: 'registered'|'live'|'register-new', session?, name?, detail}.
-    """
-    registry = _load_registry()
-    live = _live_sessions()
-    live_names = {s["name"] for s in live}
-
-    choices: list[dict[str, Any]] = []
-
-    # 1. Registered sessions, ordered by registration time (newest first).
-    for name, entry in sorted(
-        registry.items(),
-        key=lambda kv: -int(kv[1].get("registered_at", 0)),
-    ):
-        session = entry["session"]
-        is_stale = session not in live_names
-        desc = entry.get("description") or ""
-        tags = entry.get("tags") or []
-        tag_str = " ".join(f"#{t}" for t in tags)
-        status = "STALE — tmux session gone" if is_stale else "live"
-        detail_parts = [f"→ {session}", status]
-        if desc:
-            detail_parts.append(f"— {desc}")
-        if tag_str:
-            detail_parts.append(tag_str)
-        choices.append({
-            "kind": "registered",
-            "name": name,
-            "session": session,
-            "is_stale": is_stale,
-            "detail": "  ".join(detail_parts),
-        })
-
-    # 2. Live sessions not yet in the registry.
-    registered_sessions = {entry["session"] for entry in registry.values()}
-    for s in live:
-        if s["name"] not in registered_sessions:
-            attached = " (attached)" if s.get("attached") else ""
-            choices.append({
-                "kind": "live",
-                "session": s["name"],
-                "detail": f"unregistered live tmux session{attached}",
-            })
-
-    # 3. Always-available action: register a new entry by hand.
-    choices.append({
-        "kind": "register-new",
-        "detail": "register a new session by typing name + tmux session id",
-    })
-
-    return choices
 
 
 def _attach_to_session(session: str) -> None:
@@ -135,68 +69,48 @@ def _interactive_register(default_name: str | None = None) -> tuple[str, str] | 
 
 
 def cmd_picker() -> int:
-    """Run the interactive TUI picker. Returns process exit code."""
+    """Run the textual TUI picker, then dispatch the user's selection."""
     if _resolve_tmux() is None:
         print("emux: tmux not found on PATH.", file=sys.stderr)
         print("       install with `brew install tmux` (macOS) or `apt install tmux` (Debian).", file=sys.stderr)
         return 2
 
-    choices = _build_picker_choices()
-    print(f"\nemux v{__version__} — pick a session to attach\n")
+    from .tui import run_tui
 
-    rows: list[tuple[str, str, str]] = []
-    for i, c in enumerate(choices, 1):
-        if c["kind"] == "registered":
-            label = c["name"]
-        elif c["kind"] == "live":
-            label = c["session"]
-        else:  # register-new
-            label = "(register new)"
-        rows.append((str(i), label, c["detail"]))
-    _print_table(rows)
-    print()
-
-    raw = input("  pick [1-{}], or q to quit: ".format(len(choices))).strip()
-    if raw.lower() in {"q", "quit", "exit", ""}:
+    result = run_tui()
+    if result is None:
+        # User quit, or there was nothing to pick.
         return 0
-    try:
-        idx = int(raw) - 1
-    except ValueError:
-        print(f"  invalid selection: {raw!r}")
-        return 1
-    if not 0 <= idx < len(choices):
-        print(f"  out of range: {raw}")
-        return 1
 
-    chosen = choices[idx]
-    if chosen["kind"] == "registered":
-        if chosen["is_stale"]:
-            print(f"\n  '{chosen['name']}' is stale (tmux session '{chosen['session']}' gone).")
-            print("  options: re-register against a live session, unregister, or pick again.")
-            return 1
-        print(f"\n  attaching: {chosen['name']} → {chosen['session']}")
-        _attach_to_session(chosen["session"])
+    action = result["action"]
+    if action == "attach":
+        _attach_to_session(result["session"])
         return 0  # not reached; execv replaces us
-    elif chosen["kind"] == "live":
-        # Offer to register on the fly, then attach.
-        print(f"\n  '{chosen['session']}' is live but not registered.")
-        ans = input("  register it now? [y/N]: ").strip().lower()
-        if ans == "y":
-            result = _interactive_register(default_name=chosen["session"])
-            if result is None:
-                return 0
-        print(f"\n  attaching: {chosen['session']}")
-        _attach_to_session(chosen["session"])
-        return 0
-    else:  # register-new
-        result = _interactive_register()
-        if result is None:
+    if action == "register_then_attach":
+        reg = _interactive_register(default_name=result["default_session"])
+        if reg is None:
             return 0
-        _name, session = result
-        attach = input(f"\n  attach to '{session}' now? [Y/n]: ").strip().lower()
-        if attach in {"", "y"}:
-            _attach_to_session(session)
+        _attach_to_session(reg[1])
         return 0
+    if action == "register_new":
+        reg = _interactive_register()
+        if reg is None:
+            return 0
+        prompt = f"\n  attach to '{reg[1]}' now? [Y/n]: "
+        attach = input(prompt).strip().lower()
+        if attach in {"", "y"}:
+            _attach_to_session(reg[1])
+        return 0
+    if action == "unregister":
+        registry = _load_registry()
+        if result["name"] in registry:
+            removed = registry.pop(result["name"])
+            _save_registry(registry)
+            print(f"\n  unregistered '{result['name']}' (was → {removed['session']}).")
+        return 0
+
+    print(f"emux: unknown TUI result action: {action!r}", file=sys.stderr)
+    return 1
 
 
 def cmd_ls() -> int:
