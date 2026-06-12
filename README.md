@@ -120,7 +120,7 @@ print(result["content"])  # tmux pane contents after the command
 `emux web` starts a persistent local HTTP server with a chat-style monitor:
 
 ```bash
-emux web                  # http://127.0.0.1:8787
+emux web                  # http://127.0.0.1:8689
 emux web --port 9000 --open
 ```
 

@@ -180,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_web = sub.add_parser("web", help="start the web daemon — monitor sessions in a browser like a chatbot")
     p_web.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1; no auth — keep it local)")
-    p_web.add_argument("--port", type=int, default=8787, help="port (default 8787)")
+    p_web.add_argument("--port", type=int, default=8689, help="port (default 8689)")
     p_web.add_argument("--open", action="store_true", help="open the browser after starting")
 
     p_reg = sub.add_parser("register", help="register a session under a friendly name")

@@ -25,7 +25,7 @@ from . import __version__
 from . import server as _server
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8787
+DEFAULT_PORT = 8689
 
 
 def sessions_payload() -> dict[str, Any]:
@@ -431,7 +431,13 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
     """Start the emux web daemon. Blocks until Ctrl-C."""
     if _server._resolve_tmux() is None:
         print("emux web: tmux not found on PATH — the UI will load but show nothing.", file=sys.stderr)
-    server = ThreadingHTTPServer((host, port), EmuxWebHandler)
+    try:
+        server = ThreadingHTTPServer((host, port), EmuxWebHandler)
+    except OSError as e:
+        if "address already in use" in str(e).lower():
+            print(f"emux web: port {port} is already in use — try `emux web --port {port + 1}`.", file=sys.stderr)
+            return 2
+        raise
     url = f"http://{host}:{port}"
     print(f"emux web daemon → {url}  (Ctrl-C to stop)")
     if host not in ("127.0.0.1", "localhost"):
