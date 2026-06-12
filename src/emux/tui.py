@@ -29,7 +29,6 @@ from typing import Any
 
 from .server import _live_sessions, _load_registry
 
-
 CRASH_DIR = Path(
     os.environ.get("EMUX_CRASH_DIR")
     or (Path.home() / ".config" / "emux" / "crashes")
@@ -142,9 +141,9 @@ def _build_preview_for(item: dict[str, Any] | None) -> str:
         lines.append("")
         lines.append(f"[bold]→[/bold]   {_esc(item['session'])}")
         if item["is_stale"]:
-            lines.append(f"[bold]Status[/bold]  [yellow]● STALE — tmux session gone[/yellow]")
+            lines.append("[bold]Status[/bold]  [yellow]● STALE — tmux session gone[/yellow]")
         else:
-            lines.append(f"[bold]Status[/bold]  [green]● live[/green]")
+            lines.append("[bold]Status[/bold]  [green]● live[/green]")
         if item.get("tags"):
             lines.append(f"[bold]Tags[/bold]    {' '.join('#' + _esc(t) for t in item['tags'])}")
         if item.get("registered_at"):

@@ -2,6 +2,7 @@
 
   emux              → TUI picker (registered + live tmux sessions)
   emux mcp          → start the MCP server
+  emux web          → start the web daemon (chat-style session monitor)
   emux register …   → CLI register
   emux ls           → list registered + live sessions
   emux --version    → print version
@@ -177,6 +178,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("mcp", help="start the emux MCP server (stdio)")
     sub.add_parser("ls", help="print registered + live sessions (non-interactive)")
 
+    p_web = sub.add_parser("web", help="start the web daemon — monitor sessions in a browser like a chatbot")
+    p_web.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1; no auth — keep it local)")
+    p_web.add_argument("--port", type=int, default=8787, help="port (default 8787)")
+    p_web.add_argument("--open", action="store_true", help="open the browser after starting")
+
     p_reg = sub.add_parser("register", help="register a session under a friendly name")
     p_reg.add_argument("name")
     p_reg.add_argument("session")
@@ -194,6 +200,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "mcp":
         run_mcp_server()
         return 0
+    if args.cmd == "web":
+        from .web import run_web
+        return run_web(host=args.host, port=args.port, open_browser=args.open)
     if args.cmd == "ls":
         return cmd_ls()
     if args.cmd == "register":

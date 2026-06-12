@@ -1,7 +1,7 @@
 [project]
 name = "emux"
-version = "0.1.0"
-description = "Eidos mux — pick up where you left off in tmux. TUI picker for registered sessions + an MCP server for agent-driven attach/send/capture."
+version = "0.2.0"
+description = "Eidos mux — pick up where you left off in tmux. TUI picker for registered sessions, an MCP server for agent-driven attach/send/capture, and a web daemon that monitors any session like a chatbot."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Eidos AGI", email = "daniel@eidosagi.com" }]

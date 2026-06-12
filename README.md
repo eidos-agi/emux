@@ -4,7 +4,7 @@
 
 ## What it does
 
-Two front-ends over one shared registry of named tmux sessions:
+Three front-ends over one shared registry of named tmux sessions:
 
 ```
 emux              → TUI picker. Lists registered + live sessions.
@@ -12,6 +12,10 @@ emux              → TUI picker. Lists registered + live sessions.
 
 emux mcp          → MCP server. Six tools for agents to drive
                     sessions: list, register, send, capture, run.
+
+emux web          → Web daemon. Browser UI that monitors any session
+                    like a chatbot: live pane is the bot's side of
+                    the chat, input bar types into the session.
 
 emux ls           → Print registered + live sessions (non-interactive,
                     CI-friendly).
@@ -110,6 +114,22 @@ result = await tmux_run(
 )
 print(result["content"])  # tmux pane contents after the command
 ```
+
+## Web daemon
+
+`emux web` starts a persistent local HTTP server with a chat-style monitor:
+
+```bash
+emux web                  # http://127.0.0.1:8787
+emux web --port 9000 --open
+```
+
+- **Sidebar** — every session emux knows about: registered entries first (name, description, tags, live/stale dot), then live-but-unregistered sessions. Refreshes every 5s.
+- **Chat view** — pick a session and its pane renders as the bot's side of a conversation, polled every 1.5s with a blinking cursor. Anything happening in that session — a Claude Code run, a build, a backfill — reads like a chatbot streaming at you.
+- **Input bar** — what you type is sent into the session verbatim (`send-keys -l`) followed by Enter, and shows up as your side of the chat. Control chips (`^C`, `ESC`, `⏎`, `↑`, `TAB`) send named keys for steering interactive programs.
+- **API** — `GET /api/sessions`, `GET /api/capture?session=&lines=`, `POST /api/send {session, keys, literal, enter}`. Same operations the MCP server exposes, over HTTP.
+
+**Security:** binds `127.0.0.1` and has **no auth** — anything that can reach the port can type into your tmux sessions. `--host 0.0.0.0` prints a warning; only do it on a network you trust end to end.
 
 ## Design principles
 
