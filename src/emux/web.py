@@ -1,30 +1,36 @@
-"""emux web — a persistent local daemon with a chat-style monitor UI.
+"""emux web — a persistent local daemon with monitoring + chat views.
 
 `emux web` starts a long-running HTTP server (the daemon) that exposes the
 same registry + tmux operations as the MCP server, plus a browser UI with
-five views over the sessions emux knows about:
+several views over the sessions emux knows about:
 
-- chat     — one session rendered like a chatbot: the live pane is the bot's
-             side of the chat, the input bar sends keys into the session.
+- chat     — one session as a live screen you can type into. The pane updates
+             in place (it is the rendered terminal, not a growing transcript);
+             your keystrokes are logged as a chat above it.
 - grid     — every session as a live mini-pane tile, all streaming at once.
 - groups   — the same tiles sectioned by registry tag.
 - activity — change-detection strips per session: which panes moved, when.
-- flow     — topology graph with the emux daemon at the center, sessions
-             around it, and directed edges for agent→agent `manages` links
-             from the registry.
+- flow     — agent topology: a layered hierarchy built from registry `manages`
+             edges (orchestrators on top, the agents they drive below);
+             sessions with no relationships sit in an "unconnected" row.
 
 Design principles (same as the MCP server):
 - Operates on EXISTING tmux sessions only. Never spawns, never kills.
 - The registry is metadata; live truth comes from `tmux list-sessions`.
-- Binds 127.0.0.1 by default. There is no auth — anything that can reach the
-  port can type into your tmux sessions. Only widen the bind address on a
-  network you trust end to end.
+- Binds 127.0.0.1 by default. Localhost is NOT a security boundary — any web
+  page in your browser can reach a localhost port — so the API rejects
+  foreign Host headers (DNS-rebind defense) and cross-origin POSTs. There is
+  still no authentication; only widen `--host` on a network you trust.
+
+Performance: a single background thread captures every live pane on a timer
+into a shared cache, so N browser tabs watching M sessions cost one capture
+sweep, not N×M. The cache also evicts sessions once tmux reaps them.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
+import re
 import sys
 import threading
 import time
@@ -39,14 +45,33 @@ from . import server as _server
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8689
 
-# Activity tracking: per tmux session, the daemon remembers the last pane
-# hash, when it last changed, and a ring buffer of changed/unchanged samples.
-# Shared across clients (it lives in the daemon, not the browser).
-_ACTIVITY: dict[str, dict[str, Any]] = {}
-_ACTIVITY_LOCK = threading.Lock()
-_SAMPLE_MIN_INTERVAL = 1.0  # seconds; multiple clients don't double-count
+# Background capture loop cadence, activity ring-buffer size, and how long a
+# cached pane frame is considered fresh (covers the loop missing a tick).
+_POLL_INTERVAL = 1.5
 _SAMPLE_WINDOW = 60
+_CACHE_TTL = 5.0
 
+_LOCALHOSTS = {"127.0.0.1", "localhost", "::1", ""}
+
+# Spinner / progress glyphs that animate without representing real work:
+# braille (Claude Code's thinking spinner), block/quadrant spinners, and a
+# handful of common dot/arc spinners. Stripped before change-detection so an
+# idle session with a spinning cursor doesn't read as perpetually "active".
+_SPINNER_RE = re.compile(
+    r"[⠀-⣿▀-▟●○◐◑◒◓"
+    r"◜◝◞◟◢◣◤◥"
+    r"⠋⠹⠙⠸⠦⠇⠏]"
+)
+
+# Daemon-side state, shared across all clients and guarded by one lock.
+_ACTIVITY: dict[str, dict[str, Any]] = {}   # session -> {norm, changed, last_change, samples}
+_CACHE: dict[str, dict[str, Any]] = {}      # session -> {content, ts, lines}
+_LOCK = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# session listing
+# ---------------------------------------------------------------------------
 
 def sessions_payload() -> dict[str, Any]:
     """Merged registry + live view: registered entries first, then live unregistered."""
@@ -85,8 +110,13 @@ def sessions_payload() -> dict[str, Any]:
     return {"ok": True, "sessions": sessions}
 
 
+# ---------------------------------------------------------------------------
+# capture + change detection
+# ---------------------------------------------------------------------------
+
 def capture_payload(session: str, lines: int = 300) -> dict[str, Any]:
-    """Capture the active pane of `session` (raw tmux session name)."""
+    """Capture the active pane of `session` (raw tmux session name). Always live
+    — the chat view wants fresh, deep scrollback for one session, which is cheap."""
     if _server._resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
     code, out, err = _server._run_tmux([
@@ -97,41 +127,93 @@ def capture_payload(session: str, lines: int = 300) -> dict[str, Any]:
     return {"ok": True, "session": session, "content": out}
 
 
-def _record_activity(session: str, content: str) -> dict[str, Any]:
-    """Update the daemon's activity record for one pane capture; return meta."""
+def _normalize(content: str) -> str:
+    """Reduce a pane capture to its meaningful content for change detection:
+    drop per-line trailing whitespace, trailing blank lines, and spinner glyphs.
+    Two captures that differ only by a cursor blink or a spinner frame normalize
+    to the same string."""
+    lines = [ln.rstrip() for ln in content.split("\n")]
+    text = "\n".join(lines).rstrip("\n")
+    return _SPINNER_RE.sub("", text)
+
+
+def _observe(session: str, content: str) -> dict[str, Any]:
+    """Fold one capture into the session's activity record. Returns its meta."""
     now = time.time()
-    digest = hashlib.sha1(content.encode()).hexdigest()
-    with _ACTIVITY_LOCK:
+    norm = _normalize(content)
+    with _LOCK:
         st = _ACTIVITY.setdefault(session, {
-            "hash": None, "last_change": None, "last_sample": 0.0,
+            "norm": None, "changed": False, "last_change": None,
             "samples": deque(maxlen=_SAMPLE_WINDOW),
         })
-        changed = st["hash"] is not None and st["hash"] != digest
+        changed = st["norm"] is not None and st["norm"] != norm
         if changed:
             st["last_change"] = now
-        st["hash"] = digest
-        if now - st["last_sample"] >= _SAMPLE_MIN_INTERVAL:
-            st["samples"].append(1 if changed else 0)
-            st["last_sample"] = now
-        return {
-            "changed": changed,
-            "last_change_age": (now - st["last_change"]) if st["last_change"] else None,
-            "activity": list(st["samples"]),
-        }
+        st["norm"] = norm
+        st["changed"] = changed
+        st["samples"].append(1 if changed else 0)
+        return _meta_locked(st, now)
+
+
+def _meta_locked(st: dict[str, Any], now: float) -> dict[str, Any]:
+    return {
+        "changed": st["changed"],
+        "last_change_age": (now - st["last_change"]) if st["last_change"] else None,
+        "activity": list(st["samples"]),
+    }
+
+
+def _meta(session: str) -> dict[str, Any]:
+    """Read the current activity meta for a session without re-observing."""
+    with _LOCK:
+        st = _ACTIVITY.get(session)
+        if not st:
+            return {"changed": False, "last_change_age": None, "activity": []}
+        return _meta_locked(st, time.time())
+
+
+def _capture_and_observe(session: str, lines: int) -> str:
+    """Capture a pane, fold it into activity state, and refresh the cache."""
+    cap = capture_payload(session, lines)
+    content = cap.get("content", "") if cap.get("ok") else ""
+    _observe(session, content)
+    with _LOCK:
+        _CACHE[session] = {"content": content, "ts": time.time(), "lines": lines}
+    return content
+
+
+def poll_once(lines: int = 14) -> None:
+    """One capture sweep over all live sessions; evicts state for dead ones.
+    Called on a timer by the background loop, and directly by tests."""
+    if _server._resolve_tmux() is None:
+        return
+    live = _server._live_sessions()
+    live_names = {s["name"] for s in live}
+    for s in live:
+        _capture_and_observe(s["name"], lines)
+    with _LOCK:
+        for dead in [k for k in _ACTIVITY if k not in live_names]:
+            _ACTIVITY.pop(dead, None)
+            _CACHE.pop(dead, None)
 
 
 def grid_payload(lines: int = 14) -> dict[str, Any]:
-    """Everything the grid/groups/activity/flow views need, in one call:
-    the merged session list, a mini capture per live pane, and activity meta."""
+    """Session list with a mini pane capture + activity meta per live session.
+    Serves from the daemon cache when fresh; captures on miss (cold start, or
+    when the poll loop isn't running, e.g. under tests)."""
     base = sessions_payload()
     if not base["ok"]:
         return base
+    now = time.time()
     for item in base["sessions"]:
         if item["live"]:
-            cap = capture_payload(item["session"], lines)
-            content = cap.get("content", "") if cap.get("ok") else ""
+            with _LOCK:
+                ce = _CACHE.get(item["session"])
+                content = ce["content"] if (ce is not None and (now - ce["ts"]) < _CACHE_TTL) else None
+            if content is None:
+                content = _capture_and_observe(item["session"], lines)
             item["content"] = content
-            item.update(_record_activity(item["session"], content))
+            item.update(_meta(item["session"]))
         else:
             item["content"] = ""
             item["changed"] = False
@@ -139,6 +221,10 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
             item["activity"] = []
     return base
 
+
+# ---------------------------------------------------------------------------
+# send
+# ---------------------------------------------------------------------------
 
 def send_payload(session: str, keys: str, literal: bool = True, enter: bool = True) -> dict[str, Any]:
     """Send keys to `session`. literal=True sends text verbatim (`send-keys -l`),
@@ -197,14 +283,12 @@ body{
   display:flex;
   overflow:hidden;
 }
-/* scanlines + vignette over everything */
 body::after{
   content:"";position:fixed;inset:0;pointer-events:none;z-index:99;
   background:
     repeating-linear-gradient(0deg, rgba(0,0,0,.16) 0 1px, transparent 1px 3px),
     radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.45) 100%);
 }
-/* ---------- sidebar ---------- */
 #side{
   width:280px;flex:none;height:100%;display:flex;flex-direction:column;
   background:var(--bg-raise);border-right:1px solid var(--line);
@@ -231,7 +315,6 @@ body::after{
 .card .badges{margin-top:4px;font-size:10px}
 .card .badges span{border:1px solid var(--line);color:var(--text-dim);padding:0 5px;margin-right:4px}
 #side footer{padding:10px 18px;border-top:1px solid var(--line);color:var(--text-dim);font-size:10px;letter-spacing:1px}
-/* ---------- main ---------- */
 #main{flex:1;height:100%;display:flex;flex-direction:column;min-width:0}
 #topbar{
   flex:none;display:flex;align-items:center;gap:14px;
@@ -247,9 +330,7 @@ body::after{
 }
 .tab:hover{color:var(--amber);border-color:var(--amber-dim)}
 .tab.on{background:var(--amber);color:#160f00;border-color:var(--amber)}
-/* ---------- views ---------- */
 #views{flex:1;overflow-y:auto;padding:18px}
-/* grid of live tiles */
 .tilegrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
 .tile{
   border:1px solid var(--line);background:#080705;cursor:pointer;overflow:hidden;
@@ -270,14 +351,12 @@ body::after{
   display:flex;flex-direction:column;justify-content:flex-end;
 }
 .tile pre.empty{color:var(--text-dim);font-style:italic;justify-content:center;text-align:center}
-/* grouped grids */
 .group{margin-bottom:26px}
 .group h2{
   font-family:"VT323",monospace;font-size:22px;letter-spacing:2px;color:var(--amber-dim);
   border-bottom:1px solid var(--line);margin-bottom:12px;padding-bottom:4px;
 }
 .group h2 .cnt{color:var(--text-dim);font-size:14px}
-/* activity grid */
 .actrows{display:flex;flex-direction:column;gap:10px;max-width:980px}
 .actrow{
   display:flex;align-items:center;gap:14px;border:1px solid var(--line);
@@ -290,26 +369,22 @@ body::after{
 .cell.on{background:var(--amber);box-shadow:0 0 5px rgba(255,176,0,.6)}
 .cell.recent{background:var(--user)}
 .actrow .age{font-size:11px;color:var(--text-dim);width:120px;text-align:right;flex:none;letter-spacing:1px}
-/* flow view */
 #flowwrap{width:100%;height:100%;min-height:520px}
 #flowwrap svg{width:100%;height:100%}
 .fnode{cursor:pointer}
-.fnode rect{fill:var(--bg-card);stroke:var(--line);stroke-width:1.5;rx:4}
+.fnode rect{fill:var(--bg-card);stroke:var(--line);stroke-width:1.5}
 .fnode:hover rect{stroke:var(--amber-dim)}
 .fnode.hot rect{stroke:var(--amber);filter:drop-shadow(0 0 8px rgba(255,176,0,.5))}
 .fnode.dead{opacity:.4}
 .fnode text{fill:var(--amber);font:600 12px "IBM Plex Mono",monospace}
 .fnode text.sub{fill:var(--text-dim);font:9px "IBM Plex Mono",monospace}
-.hub circle{fill:#1d1605;stroke:var(--amber);stroke-width:2;filter:drop-shadow(0 0 18px rgba(255,176,0,.4))}
-.hub text{fill:var(--amber);font:28px "VT323",monospace;letter-spacing:2px}
-.edge{stroke:var(--amber-faint);stroke-width:1.2;fill:none;stroke-dasharray:5 7;animation:flow 1.6s linear infinite}
-.edge.manage{stroke:var(--amber);stroke-width:2;stroke-dasharray:7 5;animation:flow .8s linear infinite;
-  filter:drop-shadow(0 0 4px rgba(255,176,0,.5))}
+.edge{stroke:var(--amber);stroke-width:2;fill:none;stroke-dasharray:7 5;animation:flow 1.1s linear infinite;
+  filter:drop-shadow(0 0 4px rgba(255,176,0,.4))}
 @keyframes flow{to{stroke-dashoffset:-12}}
-.elabel{fill:var(--amber-dim);font:9px "IBM Plex Mono",monospace;letter-spacing:1px}
+.rowlabel{fill:var(--text-dim);font:10px "IBM Plex Mono",monospace;letter-spacing:2px;text-transform:uppercase}
+.sep{stroke:var(--line);stroke-width:1;stroke-dasharray:3 5}
 #flowhint{color:var(--text-dim);font-size:11px;font-style:italic;margin-top:6px}
 #flowhint code{color:var(--amber-dim);font-style:normal}
-/* ---------- chat ---------- */
 #chat{flex:1;overflow-y:auto;padding:22px;display:none;flex-direction:column;gap:12px}
 .bubble{max-width:88%;padding:10px 14px;border:1px solid var(--line);position:relative}
 .bubble .who{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);margin-bottom:5px}
@@ -324,8 +399,7 @@ body::after{
 }
 #screen{
   font:12.5px/1.45 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
-  white-space:pre-wrap;word-break:break-word;
-  max-height:none;padding:4px 2px 2px;
+  white-space:pre-wrap;word-break:break-word;padding:4px 2px 2px;
 }
 #screen.dimmed{opacity:.35}
 .cursorblock{display:inline-block;width:8px;height:14px;background:var(--amber);
@@ -333,7 +407,6 @@ body::after{
 @keyframes blink{50%{opacity:0}}
 #empty{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;color:var(--text-dim);height:100%}
 #empty .glyph{font-family:"VT323",monospace;font-size:80px;color:var(--amber-faint);text-shadow:0 0 30px rgba(255,176,0,.15)}
-/* ---------- composer ---------- */
 #composer{flex:none;border-top:1px solid var(--line);background:var(--bg-raise);padding:12px 22px 16px}
 #chips{display:flex;gap:8px;margin-bottom:10px}
 .chip{
@@ -404,8 +477,8 @@ function ageLabel(a){
   if(a<3600)return Math.round(a/60)+"m ago";
   return Math.round(a/3600)+"h ago";
 }
+function hot(s){return s.last_change_age!==null&&s.last_change_age!==undefined&&s.last_change_age<6;}
 
-/* ---------- mode switching ---------- */
 function setMode(m){
   mode=m;current=(m==="chat")?current:null;
   $("#chat").style.display=(m==="chat")?"flex":"none";
@@ -418,7 +491,6 @@ function setMode(m){
 }
 document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setMode(t.dataset.mode));
 
-/* ---------- shared poll ---------- */
 async function poll(){
   try{
     const r=await api("/api/grid?lines=14");
@@ -447,17 +519,15 @@ function renderSidebar(){
   });
 }
 
-/* ---------- tiles (grid + groups) ---------- */
 function makeTile(s){
   const t=document.createElement("div");
-  t.className="tile"+((s.last_change_age!==null&&s.last_change_age<6)?" hot":"")+(s.live?"":" dead");
+  t.className="tile"+(hot(s)?" hot":"")+(s.live?"":" dead");
   const h=document.createElement("header");
   h.innerHTML='<span class="dot '+(s.live?"live":"stale")+'"></span><span class="nm">'+s.name
     +'</span><span class="age">'+(s.live?ageLabel(s.last_change_age):"gone")+'</span>';
   const p=document.createElement("pre");
   if(s.live&&s.content.trim()){
-    const lines=s.content.replace(/\s+$/,"").split("\n");
-    p.textContent=lines.slice(-14).join("\n");
+    p.textContent=s.content.replace(/\s+$/,"").split("\n").slice(-14).join("\n");
   }else{
     p.className="empty";p.textContent=s.live?"(blank pane)":"tmux session gone";
   }
@@ -468,10 +538,10 @@ function makeTile(s){
 
 function renderGrid(){
   const v=$("#views");v.innerHTML="";
+  if(!grid.length){v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';return;}
   const g=document.createElement("div");g.className="tilegrid";
   grid.forEach(s=>g.appendChild(makeTile(s)));
-  if(!grid.length)v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';
-  else v.appendChild(g);
+  v.appendChild(g);
 }
 
 function renderGroups(){
@@ -498,9 +568,9 @@ function renderGroups(){
   });
 }
 
-/* ---------- activity grid ---------- */
 function renderActivity(){
   const v=$("#views");v.innerHTML="";
+  if(!grid.length){v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';return;}
   const wrap=document.createElement("div");wrap.className="actrows";
   grid.forEach(s=>{
     const row=document.createElement("div");row.className="actrow";
@@ -508,8 +578,7 @@ function renderActivity(){
     nm.innerHTML='<span class="dot '+(s.live?"live":"stale")+'"></span>'+s.name;
     const cells=document.createElement("div");cells.className="cells";
     const samples=s.activity||[];
-    const pad=Math.max(0,60-samples.length);
-    for(let i=0;i<pad;i++){const c=document.createElement("div");c.className="cell";cells.appendChild(c);}
+    for(let i=0;i<Math.max(0,60-samples.length);i++){const c=document.createElement("div");c.className="cell";cells.appendChild(c);}
     samples.forEach((on,i)=>{
       const c=document.createElement("div");
       c.className="cell"+(on?(i>=samples.length-5?" recent":" on"):"");
@@ -521,59 +590,76 @@ function renderActivity(){
     row.onclick=()=>openChat(s);
     wrap.appendChild(row);
   });
-  if(!grid.length)v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';
-  else v.appendChild(wrap);
+  v.appendChild(wrap);
 }
 
-/* ---------- flow view ---------- */
 function el(tag,attrs){const e=document.createElementNS(SVGNS,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);return e;}
 
 function renderFlow(){
   const v=$("#views");v.innerHTML="";
-  const wrap=document.createElement("div");wrap.id="flowwrap";
-  const W=1100,H=640,CX=W/2,CY=H/2;
+  if(!grid.length){v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';return;}
+  // resolve manage targets by registry name OR underlying tmux session name
+  const byKey={};grid.forEach(s=>{byKey[s.name]=s;if(!(s.session in byKey))byKey[s.session]=s;});
+  const children=new Map(),indeg=new Map();
+  grid.forEach(s=>indeg.set(s.name,0));
+  const edges=[];
+  grid.forEach(s=>(s.manages||[]).forEach(t=>{
+    const tg=byKey[t];if(!tg||tg.name===s.name)return;
+    edges.push([s.name,tg.name]);
+    if(!children.has(s.name))children.set(s.name,[]);
+    children.get(s.name).push(tg.name);
+    indeg.set(tg.name,(indeg.get(tg.name)||0)+1);
+  }));
+  const connected=new Set();edges.forEach(([a,b])=>{connected.add(a);connected.add(b);});
+  // level assignment via BFS from roots; guard against cycles
+  const level=new Map();
+  [...connected].filter(n=>(indeg.get(n)||0)===0).forEach(r=>level.set(r,0));
+  let q=[...level.keys()],guard=0,MAX=grid.length*grid.length+20;
+  while(q.length&&guard++<MAX){
+    const n=q.shift(),l=level.get(n);
+    (children.get(n)||[]).forEach(c=>{
+      if(l+1<grid.length&&(!level.has(c)||level.get(c)<l+1)){level.set(c,l+1);q.push(c);}
+    });
+  }
+  [...connected].forEach(n=>{if(!level.has(n))level.set(n,0);});
+  const maxLvl=Math.max(0,...[...level.values()]);
+  const unconnected=grid.filter(s=>!connected.has(s.name));
+
+  const W=1100,H=Math.max(560,(maxLvl+ (unconnected.length?1:0) +1)*150+40);
+  const pos={};
+  const rowY=lv=>70+lv*150;
+  // place connected nodes by level
+  for(let lv=0;lv<=maxLvl;lv++){
+    const row=[...connected].filter(n=>level.get(n)===lv);
+    row.forEach((n,i)=>{pos[n]={x:W*(i+1)/(row.length+1),y:rowY(lv)};});
+  }
+  const uncY=rowY(maxLvl+1);
+  unconnected.forEach((s,i)=>{pos[s.name]={x:W*(i+1)/(unconnected.length+1),y:uncY};});
+
   const svg=el("svg",{viewBox:"0 0 "+W+" "+H});
   const defs=el("defs",{});
-  const marker=el("marker",{id:"arrow",viewBox:"0 0 10 10",refX:"9",refY:"5",
-    markerWidth:"7",markerHeight:"7",orient:"auto-start-reverse"});
+  const marker=el("marker",{id:"arrow",viewBox:"0 0 10 10",refX:"9",refY:"5",markerWidth:"7",markerHeight:"7",orient:"auto-start-reverse"});
   marker.appendChild(el("path",{d:"M0,0 L10,5 L0,10 z",fill:"#ffb000"}));
   defs.appendChild(marker);svg.appendChild(defs);
 
-  const n=grid.length;
-  const pos={};
-  grid.forEach((s,i)=>{
-    const a=-Math.PI/2+(2*Math.PI*i)/Math.max(1,n);
-    pos[s.name]={x:CX+Math.cos(a)*(W/2-160),y:CY+Math.sin(a)*(H/2-90),s:s};
+  // manage edges (parent bottom -> child top)
+  edges.forEach(([a,b])=>{
+    const pa=pos[a],pb=pos[b];if(!pa||!pb)return;
+    const y1=pa.y+24,y2=pb.y-24,my=(y1+y2)/2;
+    svg.appendChild(el("path",{d:"M"+pa.x+","+y1+" C"+pa.x+","+my+" "+pb.x+","+my+" "+pb.x+","+y2,
+      class:"edge","marker-end":"url(#arrow)"}));
   });
-  // resolve manage targets by registry name OR underlying tmux session name
-  const byKey={};grid.forEach(s=>{byKey[s.name]=s;byKey[s.session]=byKey[s.session]||s;});
-
-  // monitor edges: hub → every session (under nodes)
-  grid.forEach(s=>{
+  // unconnected separator + label
+  if(unconnected.length){
+    const sy=uncY-75;
+    svg.appendChild(el("line",{x1:30,y1:sy,x2:W-30,y2:sy,class:"sep"}));
+    const lab=el("text",{x:40,y:sy-8,class:"rowlabel"});lab.textContent="unconnected · not in any manages relationship";
+    svg.appendChild(lab);
+  }
+  // nodes
+  function node(s){
     const p=pos[s.name];
-    svg.appendChild(el("line",{x1:CX,y1:CY,x2:p.x,y2:p.y,class:"edge"}));
-  });
-  // manage edges: agent → agent
-  grid.forEach(s=>{
-    (s.manages||[]).forEach(t=>{
-      const target=byKey[t];if(!target||target.name===s.name)return;
-      const a=pos[s.name],b=pos[target.name];
-      const mx=(a.x+b.x)/2+(CY-(a.y+b.y)/2)*.25, my=(a.y+b.y)/2+((a.x+b.x)/2-CX)*.25;
-      svg.appendChild(el("path",{d:"M"+a.x+","+a.y+" Q"+mx+","+my+" "+b.x+","+b.y,
-        class:"edge manage","marker-end":"url(#arrow)"}));
-      const lt=el("text",{x:mx,y:my-6,class:"elabel","text-anchor":"middle"});
-      lt.textContent="manages";svg.appendChild(lt);
-    });
-  });
-  // hub
-  const hub=el("g",{class:"hub"});
-  hub.appendChild(el("circle",{cx:CX,cy:CY,r:46}));
-  const ht=el("text",{x:CX,y:CY+9,"text-anchor":"middle"});ht.textContent="EMUX";
-  hub.appendChild(ht);svg.appendChild(hub);
-  // session nodes
-  grid.forEach(s=>{
-    const p=pos[s.name];
-    const g=el("g",{class:"fnode"+((s.last_change_age!==null&&s.last_change_age<6)?" hot":"")+(s.live?"":" dead")});
+    const g=el("g",{class:"fnode"+(hot(s)?" hot":"")+(s.live?"":" dead")});
     const bw=Math.max(120,s.name.length*8+30);
     g.appendChild(el("rect",{x:p.x-bw/2,y:p.y-24,width:bw,height:48,rx:4}));
     const t1=el("text",{x:p.x,y:p.y-2,"text-anchor":"middle"});t1.textContent=s.name;
@@ -582,13 +668,14 @@ function renderFlow(){
     g.appendChild(t1);g.appendChild(t2);
     g.onclick=()=>openChat(s);
     svg.appendChild(g);
-  });
-  wrap.appendChild(svg);
-  v.appendChild(wrap);
+  }
+  [...connected].forEach(n=>node(byKey[n]));
+  unconnected.forEach(node);
+
+  const wrap=document.createElement("div");wrap.id="flowwrap";wrap.appendChild(svg);v.appendChild(wrap);
   const hint=document.createElement("div");hint.id="flowhint";
-  hint.innerHTML="dim flows = emux monitoring · bright arrows = agent manages agent — declare with <code>emux register &lt;name&gt; &lt;session&gt; --manages &lt;other&gt;</code>";
+  hint.innerHTML="arrows = agent manages agent, declared in the registry: <code>emux register &lt;name&gt; &lt;session&gt; --manages &lt;other&gt;</code>. orchestrators on top, the agents they drive below.";
   v.appendChild(hint);
-  if(!grid.length)v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';
 }
 
 function render(){
@@ -598,7 +685,6 @@ function render(){
   else if(mode==="flow")renderFlow();
 }
 
-/* ---------- chat ---------- */
 function pinned(){const c=$("#chat");return c.scrollHeight-c.scrollTop-c.clientHeight<60;}
 function scrollBottom(){const c=$("#chat");c.scrollTop=c.scrollHeight;}
 
@@ -641,7 +727,7 @@ function openChat(sess){
   const c=$("#chat");c.innerHTML="";screenEl=null;
   screenEl=document.createElement("div");screenEl.id="screen-bubble";screenEl.className="bubble";
   screenEl.innerHTML='<div class="who"></div><div id="screen"></div>';
-  screenEl.querySelector(".who").textContent=sess.name+" · live pane";
+  screenEl.querySelector(".who").textContent=sess.name+" · live screen (updates in place)";
   c.appendChild(screenEl);
   addBubble("sys",null,"monitoring tmux session “"+sess.session+"”"+(sess.description?" — "+sess.description:""));
   document.querySelectorAll(".card").forEach(el2=>el2.classList.toggle("active",el2.dataset.name===sess.name));
@@ -679,8 +765,15 @@ poll();gridTimer=setInterval(poll,2000);
 """
 
 
+# ---------------------------------------------------------------------------
+# HTTP handler
+# ---------------------------------------------------------------------------
+
 class EmuxWebHandler(BaseHTTPRequestHandler):
     server_version = f"emux/{__version__}"
+    # The host the daemon was bound to, when non-localhost; lets a deliberate
+    # --host 0.0.0.0 accept its own LAN address while still blocking foreign ones.
+    extra_host: str | None = None
 
     def _json(self, payload: dict[str, Any], status: int = 200) -> None:
         body = json.dumps(payload).encode()
@@ -689,6 +782,26 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _host_allowed(self) -> bool:
+        """Defeat DNS-rebinding: only serve requests whose Host header is a
+        loopback name (or the explicit bind host). A rebound attacker domain
+        resolving to 127.0.0.1 carries its own name in Host and is rejected."""
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
+        return host in _LOCALHOSTS or (self.extra_host is not None and host == self.extra_host)
+
+    def _origin_allowed(self) -> bool:
+        """Block cross-site writes: a POST carrying an Origin from any non-local
+        site is a forged request from another tab. Same-origin and non-browser
+        (no Origin) requests pass."""
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        try:
+            host = urlparse(origin).hostname
+        except ValueError:
+            return False
+        return host in _LOCALHOSTS or (self.extra_host is not None and host == self.extra_host)
 
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
         url = urlparse(self.path)
@@ -700,6 +813,10 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if url.path.startswith("/api/"):
+            if not self._host_allowed():
+                self._json({"ok": False, "error": "forbidden_host"}, 403)
+                return
         if url.path == "/api/sessions":
             self._json(sessions_payload())
             return
@@ -730,6 +847,12 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         if url.path != "/api/send":
             self._json({"ok": False, "error": "not_found"}, 404)
             return
+        if not self._host_allowed():
+            self._json({"ok": False, "error": "forbidden_host"}, 403)
+            return
+        if not self._origin_allowed():
+            self._json({"ok": False, "error": "forbidden_origin"}, 403)
+            return
         try:
             length = int(self.headers.get("Content-Length") or 0)
             data = json.loads(self.rfile.read(length) or b"{}")
@@ -753,10 +876,36 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         pass
 
 
+def launchd_plist(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
+    """A ready-to-install launchd plist that keeps `emux web` running and
+    restarts it on crash / login. Print with `emux web --print-launchd`."""
+    emux = sys.argv[0]
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.eidos.emux-web</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{emux}</string>
+    <string>web</string>
+    <string>--host</string><string>{host}</string>
+    <string>--port</string><string>{port}</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/emux-web.log</string>
+  <key>StandardErrorPath</key><string>/tmp/emux-web.err.log</string>
+</dict>
+</plist>
+"""
+
+
 def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bool = False) -> int:
     """Start the emux web daemon. Blocks until Ctrl-C."""
     if _server._resolve_tmux() is None:
         print("emux web: tmux not found on PATH — the UI will load but show nothing.", file=sys.stderr)
+    EmuxWebHandler.extra_host = host if host not in _LOCALHOSTS else None
     try:
         server = ThreadingHTTPServer((host, port), EmuxWebHandler)
     except OSError as e:
@@ -764,11 +913,28 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
             print(f"emux web: port {port} is already in use — try `emux web --port {port + 1}`.", file=sys.stderr)
             return 2
         raise
+
+    # Single background capture loop feeds the cache that every browser tab
+    # reads from. One sweep per tick regardless of how many tabs are open.
+    stop = threading.Event()
+
+    def poll_loop() -> None:
+        while not stop.is_set():
+            try:
+                poll_once(14)
+            except Exception:  # noqa: BLE001 — a transient tmux error must not kill the loop
+                pass
+            stop.wait(_POLL_INTERVAL)
+
+    poller = threading.Thread(target=poll_loop, daemon=True)
+    poller.start()
+
     url = f"http://{host}:{port}"
     print(f"emux web daemon → {url}  (Ctrl-C to stop)")
-    if host not in ("127.0.0.1", "localhost"):
-        print("  WARNING: bound beyond localhost with no auth — anything that can", file=sys.stderr)
-        print("  reach this port can type into your tmux sessions.", file=sys.stderr)
+    if host not in _LOCALHOSTS:
+        print("  WARNING: bound beyond localhost. The API blocks foreign Host/Origin", file=sys.stderr)
+        print("  requests, but there is still NO authentication — anyone who can reach", file=sys.stderr)
+        print("  this port and forge a matching Host header can type into your sessions.", file=sys.stderr)
     if open_browser:
         import webbrowser
         webbrowser.open(url)
@@ -777,5 +943,6 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
     except KeyboardInterrupt:
         print("\nemux web: stopped.")
     finally:
+        stop.set()
         server.server_close()
     return 0

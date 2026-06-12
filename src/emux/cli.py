@@ -179,10 +179,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("mcp", help="start the emux MCP server (stdio)")
     sub.add_parser("ls", help="print registered + live sessions (non-interactive)")
 
-    p_web = sub.add_parser("web", help="start the web daemon — monitor sessions in a browser like a chatbot")
+    p_web = sub.add_parser("web", help="start the web daemon — monitor sessions in a browser (grid/groups/activity/flow/chat)")
     p_web.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1; no auth — keep it local)")
     p_web.add_argument("--port", type=int, default=8689, help="port (default 8689)")
     p_web.add_argument("--open", action="store_true", help="open the browser after starting")
+    p_web.add_argument("--print-launchd", action="store_true",
+                       help="print a launchd plist that keeps the daemon running, then exit")
 
     p_reg = sub.add_parser("register", help="register a session under a friendly name")
     p_reg.add_argument("name")
@@ -204,6 +206,10 @@ def main(argv: list[str] | None = None) -> int:
         run_mcp_server()
         return 0
     if args.cmd == "web":
+        if args.print_launchd:
+            from .web import launchd_plist
+            print(launchd_plist(host=args.host, port=args.port), end="")
+            return 0
         from .web import run_web
         return run_web(host=args.host, port=args.port, open_browser=args.open)
     if args.cmd == "ls":

@@ -117,7 +117,7 @@ print(result["content"])  # tmux pane contents after the command
 
 ## Web daemon
 
-`emux web` starts a persistent local HTTP server with a chat-style monitor:
+`emux web` starts a persistent local HTTP server with monitoring + chat views:
 
 ```bash
 emux web                  # http://127.0.0.1:8689
@@ -128,11 +128,33 @@ Five views over the same registry:
 
 - **Grid** — every session as a live mini-pane tile, all streaming at once (2s poll). Tiles glow when their pane changed in the last few seconds; click one to drop into chat.
 - **Groups** — the same tiles sectioned by registry tag (`#prod`, `#agents`, …), with `untagged` and `unregistered` sections at the end. A session with multiple tags appears in each of its groups.
-- **Activity** — one row per session with a 60-sample change-detection strip (lit cell = the pane moved during that sample) and a "last active" age. Change tracking lives in the daemon, so every browser tab sees the same history.
-- **Flow** — topology graph: the emux daemon at the center, sessions around it, dim animated spokes for monitoring, and bright directed **manages** arrows between sessions for agent→agent relationships declared in the registry (`emux register boss main --manages worker-1 worker-2`, or the `manages` arg on the MCP `tmux_register` tool).
-- **Chat** — pick any session (sidebar or any tile/node) and its pane renders as the bot's side of a conversation, polled every 1.5s with a blinking cursor. The input bar sends what you type into the session verbatim (`send-keys -l` + Enter) and shows it as your side of the chat; control chips (`^C`, `ESC`, `⏎`, `↑`, `TAB`) send named keys for steering interactive programs.
+- **Activity** — one row per session with a 60-sample change-detection strip (lit cell = the pane moved during that sample) and a "last active" age. Detection ignores cursor blinks and spinner frames (braille/block glyphs are stripped before comparison) so an idle session with a thinking spinner doesn't read as busy. Tracking lives in the daemon, so every browser tab sees the same history.
+- **Flow** — agent topology as a layered hierarchy: orchestrators on top, the agents they drive below, connected by directed **manages** arrows. Built from registry relationships (`emux register boss main --manages worker-1 worker-2`, or the `manages` arg on the MCP `tmux_register` tool); sessions in no relationship sit in an "unconnected" row at the bottom. (Edges reflect *declared* intent in the registry, not observed traffic.)
+- **Chat** — pick any session (sidebar or any tile/node). Its pane renders as a **live screen that updates in place** — it's the rendered terminal, so a full-screen TUI like Claude Code or vim mutates rather than scrolls — with your keystrokes logged as a chat above it. The input bar sends what you type into the session verbatim (`send-keys -l` + Enter); control chips (`^C`, `ESC`, `⏎`, `↑`, `TAB`) send named keys for steering interactive programs.
+
+One background thread captures every live pane on a timer into a shared cache, so N tabs watching M sessions cost one capture sweep, not N×M; dead sessions are evicted from the cache as tmux reaps them.
 
 API: `GET /api/sessions`, `GET /api/grid?lines=` (captures + activity for all live panes in one call), `GET /api/capture?session=&lines=`, `POST /api/send {session, keys, literal, enter}`. Same operations the MCP server exposes, over HTTP.
+
+### Security
+
+Localhost is **not** a security boundary — any web page open in your browser can issue requests to a localhost port. So the API:
+
+- rejects `/api/*` requests whose `Host` header isn't a loopback name (DNS-rebinding defense), and
+- rejects `POST /api/send` carrying a cross-origin `Origin` header (CSRF defense — a forged keystroke-injection request from another tab).
+
+There is still **no authentication**. Keep the bind on `127.0.0.1`; only use `--host` on a network you fully trust.
+
+### Running it as a real service
+
+`emux web` backgrounded by hand dies on logout/reboot. To keep it running, install the generated launchd agent (macOS):
+
+```bash
+emux web --print-launchd > ~/Library/LaunchAgents/com.eidos.emux-web.plist
+launchctl load ~/Library/LaunchAgents/com.eidos.emux-web.plist
+```
+
+It sets `RunAtLoad` + `KeepAlive`, logging to `/tmp/emux-web{,.err}.log`.
 
 **Security:** binds `127.0.0.1` and has **no auth** — anything that can reach the port can type into your tmux sessions. `--host 0.0.0.0` prints a warning; only do it on a network you trust end to end.
 

@@ -80,7 +80,7 @@ def test_capture_payload_reports_failure(monkeypatch):
     assert result["error"] == "tmux_capture_failed"
 
 
-def test_grid_payload_includes_capture_and_activity(monkeypatch):
+def test_poll_once_tracks_activity_then_grid_reads_cache(monkeypatch):
     from emux import server, web
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
     monkeypatch.setattr(server, "_live_sessions", lambda: [
@@ -92,21 +92,20 @@ def test_grid_payload_includes_capture_and_activity(monkeypatch):
     })
     outputs = iter(["pane v1\n", "pane v1\n", "pane v2\n"])
     monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, next(outputs), ""))
-    monkeypatch.setattr(web, "_SAMPLE_MIN_INTERVAL", 0.0)
     web._ACTIVITY.clear()
+    web._CACHE.clear()
 
-    first = web.grid_payload()["sessions"][0]
-    assert first["content"] == "pane v1\n"
-    assert first["manages"] == ["worker-1"]
-    assert first["changed"] is False  # first observation is a baseline, not a change
+    # The daemon's background loop drives activity sampling, one sample per tick.
+    web.poll_once()   # baseline (v1)
+    web.poll_once()   # unchanged (v1)
+    web.poll_once()   # changed (v2)
 
-    second = web.grid_payload()["sessions"][0]
-    assert second["changed"] is False  # identical content
-
-    third = web.grid_payload()["sessions"][0]
-    assert third["changed"] is True  # content moved
-    assert third["last_change_age"] is not None and third["last_change_age"] < 2
-    assert third["activity"][-3:] == [0, 0, 1]
+    item = web.grid_payload()["sessions"][0]  # served from cache, no extra sample
+    assert item["content"] == "pane v2\n"
+    assert item["manages"] == ["worker-1"]
+    assert item["changed"] is True
+    assert item["last_change_age"] is not None and item["last_change_age"] < 2
+    assert item["activity"] == [0, 0, 1]
 
 
 def test_grid_payload_stale_session_has_no_capture(monkeypatch):
@@ -116,10 +115,47 @@ def test_grid_payload_stale_session_has_no_capture(monkeypatch):
     monkeypatch.setattr(server, "_load_registry", lambda: {
         "old": {"session": "gone", "description": None, "tags": [], "registered_at": 0},
     })
+    web._ACTIVITY.clear()
+    web._CACHE.clear()
     item = web.grid_payload()["sessions"][0]
     assert item["live"] is False
     assert item["content"] == ""
     assert item["activity"] == []
+
+
+def test_normalize_collapses_spinner_and_cursor_noise():
+    from emux import web
+    # A braille thinking spinner and trailing whitespace are not real change.
+    assert web._normalize("working ⠋ \nrest") == web._normalize("working ⠙\nrest")
+    assert web._normalize("line   \n\n\n") == web._normalize("line\n")
+
+
+def test_observe_ignores_spinner_frame_change():
+    from emux import web
+    web._ACTIVITY.clear()
+    web._observe("s", "Thinking ⠋\nidle")
+    meta = web._observe("s", "Thinking ⠹\nidle")  # only the spinner advanced
+    assert meta["changed"] is False
+    real = web._observe("s", "Done.\nidle")
+    assert real["changed"] is True
+
+
+def test_poll_once_evicts_dead_sessions(monkeypatch):
+    from emux import server, web
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, "x\n", ""))
+    web._ACTIVITY.clear()
+    web._CACHE.clear()
+
+    monkeypatch.setattr(server, "_live_sessions", lambda: [
+        {"name": "main", "windows": 1, "created_unix": 0, "attached": False},
+    ])
+    web.poll_once()
+    assert "main" in web._ACTIVITY and "main" in web._CACHE
+
+    monkeypatch.setattr(server, "_live_sessions", lambda: [])  # tmux reaped it
+    web.poll_once()
+    assert "main" not in web._ACTIVITY and "main" not in web._CACHE
 
 
 # ---------- HTTP round trip ----------
@@ -215,3 +251,51 @@ def test_http_unknown_route_404(daemon):
     status, body = _get(daemon + "/api/nope")
     assert status == 404
     assert body["error"] == "not_found"
+
+
+def test_http_rejects_foreign_host(daemon):
+    # DNS-rebind defense: a request whose Host isn't loopback is refused.
+    req = urllib.request.Request(daemon + "/api/sessions", headers={"Host": "attacker.example"})
+    try:
+        urllib.request.urlopen(req)
+        raise AssertionError("expected 403")
+    except urllib.error.HTTPError as e:
+        assert e.code == 403
+        assert json.loads(e.read().decode())["error"] == "forbidden_host"
+
+
+def test_http_send_rejects_cross_origin(daemon):
+    # CSRF defense: a POST carrying a foreign Origin (forged by another site) is refused.
+    req = urllib.request.Request(
+        daemon + "/api/send",
+        data=json.dumps({"session": "main", "keys": "rm -rf ~"}).encode(),
+        headers={"Content-Type": "application/json", "Origin": "http://evil.example"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req)
+        raise AssertionError("expected 403")
+    except urllib.error.HTTPError as e:
+        assert e.code == 403
+        assert json.loads(e.read().decode())["error"] == "forbidden_origin"
+
+
+def test_http_send_allows_same_origin(daemon):
+    # A same-origin Origin header (the emux UI itself) is allowed through.
+    base = daemon
+    req = urllib.request.Request(
+        base + "/api/send",
+        data=json.dumps({"session": "main", "keys": "echo hi"}).encode(),
+        headers={"Content-Type": "application/json", "Origin": base},
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as r:
+        assert json.loads(r.read().decode())["ok"]
+
+
+def test_launchd_plist_is_well_formed():
+    from emux import web
+    plist = web.launchd_plist(port=9999)
+    assert "com.eidos.emux-web" in plist
+    assert "<string>9999</string>" in plist
+    assert plist.strip().startswith("<?xml")
