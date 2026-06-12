@@ -142,6 +142,7 @@ async def tmux_register(
     session: str,
     description: str | None = None,
     tags: list[str] | None = None,
+    manages: list[str] | None = None,
 ) -> dict[str, Any]:
     """Register a tmux session under a friendly name with metadata.
 
@@ -155,6 +156,9 @@ async def tmux_register(
         session: The actual tmux session name as shown by `tmux list-sessions`.
         description: Optional human-readable note about what this session is for.
         tags: Optional list of tags for filtering.
+        manages: Optional list of other registered names (or tmux session ids)
+            that the agent in THIS session manages/drives. Rendered as directed
+            edges in the `emux web` flow view.
 
     Returns:
         The registry entry that was saved, plus whether the underlying tmux
@@ -165,6 +169,7 @@ async def tmux_register(
         "session": session,
         "description": description,
         "tags": tags or [],
+        "manages": manages or [],
         "registered_at": int(time.time()),
     }
     registry[name] = entry

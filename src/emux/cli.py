@@ -149,6 +149,7 @@ def cmd_register(args: argparse.Namespace) -> int:
         "session": args.session,
         "description": args.description,
         "tags": args.tags or [],
+        "manages": args.manages or [],
         "registered_at": int(time.time()),
     }
     _save_registry(registry)
@@ -188,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
     p_reg.add_argument("session")
     p_reg.add_argument("-d", "--description", default=None)
     p_reg.add_argument("-t", "--tags", nargs="*")
+    p_reg.add_argument("-m", "--manages", nargs="*",
+                       help="other registered names (or session ids) this agent manages — drawn as arrows in `emux web` flow view")
 
     p_unreg = sub.add_parser("unregister", help="remove a session from the registry")
     p_unreg.add_argument("name")

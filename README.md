@@ -124,10 +124,15 @@ emux web                  # http://127.0.0.1:8689
 emux web --port 9000 --open
 ```
 
-- **Sidebar** — every session emux knows about: registered entries first (name, description, tags, live/stale dot), then live-but-unregistered sessions. Refreshes every 5s.
-- **Chat view** — pick a session and its pane renders as the bot's side of a conversation, polled every 1.5s with a blinking cursor. Anything happening in that session — a Claude Code run, a build, a backfill — reads like a chatbot streaming at you.
-- **Input bar** — what you type is sent into the session verbatim (`send-keys -l`) followed by Enter, and shows up as your side of the chat. Control chips (`^C`, `ESC`, `⏎`, `↑`, `TAB`) send named keys for steering interactive programs.
-- **API** — `GET /api/sessions`, `GET /api/capture?session=&lines=`, `POST /api/send {session, keys, literal, enter}`. Same operations the MCP server exposes, over HTTP.
+Five views over the same registry:
+
+- **Grid** — every session as a live mini-pane tile, all streaming at once (2s poll). Tiles glow when their pane changed in the last few seconds; click one to drop into chat.
+- **Groups** — the same tiles sectioned by registry tag (`#prod`, `#agents`, …), with `untagged` and `unregistered` sections at the end. A session with multiple tags appears in each of its groups.
+- **Activity** — one row per session with a 60-sample change-detection strip (lit cell = the pane moved during that sample) and a "last active" age. Change tracking lives in the daemon, so every browser tab sees the same history.
+- **Flow** — topology graph: the emux daemon at the center, sessions around it, dim animated spokes for monitoring, and bright directed **manages** arrows between sessions for agent→agent relationships declared in the registry (`emux register boss main --manages worker-1 worker-2`, or the `manages` arg on the MCP `tmux_register` tool).
+- **Chat** — pick any session (sidebar or any tile/node) and its pane renders as the bot's side of a conversation, polled every 1.5s with a blinking cursor. The input bar sends what you type into the session verbatim (`send-keys -l` + Enter) and shows it as your side of the chat; control chips (`^C`, `ESC`, `⏎`, `↑`, `TAB`) send named keys for steering interactive programs.
+
+API: `GET /api/sessions`, `GET /api/grid?lines=` (captures + activity for all live panes in one call), `GET /api/capture?session=&lines=`, `POST /api/send {session, keys, literal, enter}`. Same operations the MCP server exposes, over HTTP.
 
 **Security:** binds `127.0.0.1` and has **no auth** — anything that can reach the port can type into your tmux sessions. `--host 0.0.0.0` prints a warning; only do it on a network you trust end to end.
 

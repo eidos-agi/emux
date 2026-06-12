@@ -80,6 +80,48 @@ def test_capture_payload_reports_failure(monkeypatch):
     assert result["error"] == "tmux_capture_failed"
 
 
+def test_grid_payload_includes_capture_and_activity(monkeypatch):
+    from emux import server, web
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_live_sessions", lambda: [
+        {"name": "main", "windows": 1, "created_unix": 0, "attached": False},
+    ])
+    monkeypatch.setattr(server, "_load_registry", lambda: {
+        "boss": {"session": "main", "description": None, "tags": ["agents"],
+                 "manages": ["worker-1"], "registered_at": 0},
+    })
+    outputs = iter(["pane v1\n", "pane v1\n", "pane v2\n"])
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, next(outputs), ""))
+    monkeypatch.setattr(web, "_SAMPLE_MIN_INTERVAL", 0.0)
+    web._ACTIVITY.clear()
+
+    first = web.grid_payload()["sessions"][0]
+    assert first["content"] == "pane v1\n"
+    assert first["manages"] == ["worker-1"]
+    assert first["changed"] is False  # first observation is a baseline, not a change
+
+    second = web.grid_payload()["sessions"][0]
+    assert second["changed"] is False  # identical content
+
+    third = web.grid_payload()["sessions"][0]
+    assert third["changed"] is True  # content moved
+    assert third["last_change_age"] is not None and third["last_change_age"] < 2
+    assert third["activity"][-3:] == [0, 0, 1]
+
+
+def test_grid_payload_stale_session_has_no_capture(monkeypatch):
+    from emux import server, web
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_live_sessions", lambda: [])
+    monkeypatch.setattr(server, "_load_registry", lambda: {
+        "old": {"session": "gone", "description": None, "tags": [], "registered_at": 0},
+    })
+    item = web.grid_payload()["sessions"][0]
+    assert item["live"] is False
+    assert item["content"] == ""
+    assert item["activity"] == []
+
+
 # ---------- HTTP round trip ----------
 
 @pytest.fixture()
@@ -159,6 +201,14 @@ def test_http_send_rejects_bad_body(daemon):
     except urllib.error.HTTPError as e:
         assert e.code == 400
         assert json.loads(e.read().decode())["error"] == "bad_json"
+
+
+def test_http_grid(daemon):
+    status, body = _get(daemon + "/api/grid?lines=10")
+    assert status == 200
+    assert body["ok"]
+    first = body["sessions"][0]
+    assert "content" in first and "activity" in first and "manages" in first
 
 
 def test_http_unknown_route_404(daemon):

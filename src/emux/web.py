@@ -1,9 +1,17 @@
 """emux web — a persistent local daemon with a chat-style monitor UI.
 
 `emux web` starts a long-running HTTP server (the daemon) that exposes the
-same registry + tmux operations as the MCP server, plus a browser UI that
-renders any session like a chatbot conversation: the live pane is the bot's
-side of the chat, the input bar sends keys into the session.
+same registry + tmux operations as the MCP server, plus a browser UI with
+five views over the sessions emux knows about:
+
+- chat     — one session rendered like a chatbot: the live pane is the bot's
+             side of the chat, the input bar sends keys into the session.
+- grid     — every session as a live mini-pane tile, all streaming at once.
+- groups   — the same tiles sectioned by registry tag.
+- activity — change-detection strips per session: which panes moved, when.
+- flow     — topology graph with the emux daemon at the center, sessions
+             around it, and directed edges for agent→agent `manages` links
+             from the registry.
 
 Design principles (same as the MCP server):
 - Operates on EXISTING tmux sessions only. Never spawns, never kills.
@@ -15,8 +23,12 @@ Design principles (same as the MCP server):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
+import threading
+import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -26,6 +38,14 @@ from . import server as _server
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8689
+
+# Activity tracking: per tmux session, the daemon remembers the last pane
+# hash, when it last changed, and a ring buffer of changed/unchanged samples.
+# Shared across clients (it lives in the daemon, not the browser).
+_ACTIVITY: dict[str, dict[str, Any]] = {}
+_ACTIVITY_LOCK = threading.Lock()
+_SAMPLE_MIN_INTERVAL = 1.0  # seconds; multiple clients don't double-count
+_SAMPLE_WINDOW = 60
 
 
 def sessions_payload() -> dict[str, Any]:
@@ -43,6 +63,7 @@ def sessions_payload() -> dict[str, Any]:
             "session": target,
             "description": entry.get("description"),
             "tags": entry.get("tags") or [],
+            "manages": entry.get("manages") or [],
             "registered": True,
             "live": target in live_by_name,
             "attached": live_by_name.get(target, {}).get("attached", False),
@@ -56,6 +77,7 @@ def sessions_payload() -> dict[str, Any]:
             "session": s["name"],
             "description": None,
             "tags": [],
+            "manages": [],
             "registered": False,
             "live": True,
             "attached": s.get("attached", False),
@@ -73,6 +95,49 @@ def capture_payload(session: str, lines: int = 300) -> dict[str, Any]:
     if code != 0:
         return {"ok": False, "error": "tmux_capture_failed", "stderr": err}
     return {"ok": True, "session": session, "content": out}
+
+
+def _record_activity(session: str, content: str) -> dict[str, Any]:
+    """Update the daemon's activity record for one pane capture; return meta."""
+    now = time.time()
+    digest = hashlib.sha1(content.encode()).hexdigest()
+    with _ACTIVITY_LOCK:
+        st = _ACTIVITY.setdefault(session, {
+            "hash": None, "last_change": None, "last_sample": 0.0,
+            "samples": deque(maxlen=_SAMPLE_WINDOW),
+        })
+        changed = st["hash"] is not None and st["hash"] != digest
+        if changed:
+            st["last_change"] = now
+        st["hash"] = digest
+        if now - st["last_sample"] >= _SAMPLE_MIN_INTERVAL:
+            st["samples"].append(1 if changed else 0)
+            st["last_sample"] = now
+        return {
+            "changed": changed,
+            "last_change_age": (now - st["last_change"]) if st["last_change"] else None,
+            "activity": list(st["samples"]),
+        }
+
+
+def grid_payload(lines: int = 14) -> dict[str, Any]:
+    """Everything the grid/groups/activity/flow views need, in one call:
+    the merged session list, a mini capture per live pane, and activity meta."""
+    base = sessions_payload()
+    if not base["ok"]:
+        return base
+    for item in base["sessions"]:
+        if item["live"]:
+            cap = capture_payload(item["session"], lines)
+            content = cap.get("content", "") if cap.get("ok") else ""
+            item["content"] = content
+            item.update(_record_activity(item["session"], content))
+        else:
+            item["content"] = ""
+            item["changed"] = False
+            item["last_change_age"] = None
+            item["activity"] = []
+    return base
 
 
 def send_payload(session: str, keys: str, literal: bool = True, enter: bool = True) -> dict[str, Any]:
@@ -159,7 +224,7 @@ body::after{
 .card:hover{border-color:var(--amber-dim);transform:translateX(2px)}
 .card.active{border-left-color:var(--amber);box-shadow:0 0 14px rgba(255,176,0,.12) inset}
 .card .nm{color:var(--amber);font-weight:600}
-.card .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:1px}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:1px}
 .dot.live{background:var(--live);box-shadow:0 0 6px var(--live)}
 .dot.stale{background:var(--stale);box-shadow:0 0 6px var(--stale)}
 .card .sub{color:var(--text-dim);font-size:11px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -169,13 +234,83 @@ body::after{
 /* ---------- main ---------- */
 #main{flex:1;height:100%;display:flex;flex-direction:column;min-width:0}
 #topbar{
-  flex:none;display:flex;align-items:baseline;gap:14px;
-  padding:14px 22px;border-bottom:1px solid var(--line);background:var(--bg-raise);
+  flex:none;display:flex;align-items:center;gap:14px;
+  padding:10px 22px;border-bottom:1px solid var(--line);background:var(--bg-raise);
 }
 #topbar #title{font-family:"VT323",monospace;font-size:26px;color:var(--amber);letter-spacing:1px}
 #topbar #status{font-size:11px;color:var(--text-dim);letter-spacing:2px;text-transform:uppercase}
 #topbar #status.err{color:var(--stale)}
-#chat{flex:1;overflow-y:auto;padding:22px;display:flex;flex-direction:column;gap:12px}
+#tabs{margin-left:auto;display:flex;gap:6px}
+.tab{
+  font-family:"VT323",monospace;font-size:17px;letter-spacing:2px;padding:3px 14px;
+  background:transparent;color:var(--text-dim);border:1px solid var(--line);cursor:pointer;
+}
+.tab:hover{color:var(--amber);border-color:var(--amber-dim)}
+.tab.on{background:var(--amber);color:#160f00;border-color:var(--amber)}
+/* ---------- views ---------- */
+#views{flex:1;overflow-y:auto;padding:18px}
+/* grid of live tiles */
+.tilegrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
+.tile{
+  border:1px solid var(--line);background:#080705;cursor:pointer;overflow:hidden;
+  display:flex;flex-direction:column;transition:border-color .2s, box-shadow .4s;
+}
+.tile:hover{border-color:var(--amber-dim)}
+.tile.hot{border-color:var(--amber);box-shadow:0 0 16px rgba(255,176,0,.25)}
+.tile.dead{opacity:.45}
+.tile header{
+  display:flex;align-items:baseline;gap:8px;padding:6px 10px;
+  background:var(--bg-card);border-bottom:1px solid var(--line);
+}
+.tile header .nm{color:var(--amber);font-weight:600;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile header .age{margin-left:auto;font-size:10px;color:var(--text-dim);letter-spacing:1px;white-space:nowrap}
+.tile pre{
+  flex:1;font:9.5px/1.35 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
+  white-space:pre-wrap;word-break:break-word;padding:8px 10px;height:190px;overflow:hidden;
+  display:flex;flex-direction:column;justify-content:flex-end;
+}
+.tile pre.empty{color:var(--text-dim);font-style:italic;justify-content:center;text-align:center}
+/* grouped grids */
+.group{margin-bottom:26px}
+.group h2{
+  font-family:"VT323",monospace;font-size:22px;letter-spacing:2px;color:var(--amber-dim);
+  border-bottom:1px solid var(--line);margin-bottom:12px;padding-bottom:4px;
+}
+.group h2 .cnt{color:var(--text-dim);font-size:14px}
+/* activity grid */
+.actrows{display:flex;flex-direction:column;gap:10px;max-width:980px}
+.actrow{
+  display:flex;align-items:center;gap:14px;border:1px solid var(--line);
+  background:var(--bg-card);padding:10px 14px;cursor:pointer;
+}
+.actrow:hover{border-color:var(--amber-dim)}
+.actrow .nm{color:var(--amber);font-weight:600;width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:none}
+.cells{display:flex;gap:2px;flex:1;min-width:0}
+.cell{width:9px;height:18px;background:#1a140a;flex:none}
+.cell.on{background:var(--amber);box-shadow:0 0 5px rgba(255,176,0,.6)}
+.cell.recent{background:var(--user)}
+.actrow .age{font-size:11px;color:var(--text-dim);width:120px;text-align:right;flex:none;letter-spacing:1px}
+/* flow view */
+#flowwrap{width:100%;height:100%;min-height:520px}
+#flowwrap svg{width:100%;height:100%}
+.fnode{cursor:pointer}
+.fnode rect{fill:var(--bg-card);stroke:var(--line);stroke-width:1.5;rx:4}
+.fnode:hover rect{stroke:var(--amber-dim)}
+.fnode.hot rect{stroke:var(--amber);filter:drop-shadow(0 0 8px rgba(255,176,0,.5))}
+.fnode.dead{opacity:.4}
+.fnode text{fill:var(--amber);font:600 12px "IBM Plex Mono",monospace}
+.fnode text.sub{fill:var(--text-dim);font:9px "IBM Plex Mono",monospace}
+.hub circle{fill:#1d1605;stroke:var(--amber);stroke-width:2;filter:drop-shadow(0 0 18px rgba(255,176,0,.4))}
+.hub text{fill:var(--amber);font:28px "VT323",monospace;letter-spacing:2px}
+.edge{stroke:var(--amber-faint);stroke-width:1.2;fill:none;stroke-dasharray:5 7;animation:flow 1.6s linear infinite}
+.edge.manage{stroke:var(--amber);stroke-width:2;stroke-dasharray:7 5;animation:flow .8s linear infinite;
+  filter:drop-shadow(0 0 4px rgba(255,176,0,.5))}
+@keyframes flow{to{stroke-dashoffset:-12}}
+.elabel{fill:var(--amber-dim);font:9px "IBM Plex Mono",monospace;letter-spacing:1px}
+#flowhint{color:var(--text-dim);font-size:11px;font-style:italic;margin-top:6px}
+#flowhint code{color:var(--amber-dim);font-style:normal}
+/* ---------- chat ---------- */
+#chat{flex:1;overflow-y:auto;padding:22px;display:none;flex-direction:column;gap:12px}
 .bubble{max-width:88%;padding:10px 14px;border:1px solid var(--line);position:relative}
 .bubble .who{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);margin-bottom:5px}
 .bubble.user{
@@ -196,7 +331,7 @@ body::after{
 .cursorblock{display:inline-block;width:8px;height:14px;background:var(--amber);
   vertical-align:-2px;animation:blink 1.1s steps(1) infinite;box-shadow:0 0 8px rgba(255,176,0,.8)}
 @keyframes blink{50%{opacity:0}}
-#empty{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;color:var(--text-dim)}
+#empty{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;color:var(--text-dim);height:100%}
 #empty .glyph{font-family:"VT323",monospace;font-size:80px;color:var(--amber-faint);text-shadow:0 0 30px rgba(255,176,0,.15)}
 /* ---------- composer ---------- */
 #composer{flex:none;border-top:1px solid var(--line);background:var(--bg-raise);padding:12px 22px 16px}
@@ -217,7 +352,6 @@ body::after{
   background:var(--amber);color:#160f00;border:none;cursor:pointer;
 }
 #send:hover{box-shadow:0 0 18px rgba(255,176,0,.5)}
-#send:disabled{background:var(--amber-faint);color:var(--text-dim);cursor:default;box-shadow:none}
 ::-webkit-scrollbar{width:8px}
 ::-webkit-scrollbar-thumb{background:var(--amber-faint)}
 ::-webkit-scrollbar-track{background:transparent}
@@ -231,12 +365,17 @@ body::after{
 </aside>
 <main id="main">
   <div id="topbar">
-    <span id="title">no session</span>
-    <span id="status">pick a session to monitor</span>
+    <span id="title">grid</span>
+    <span id="status">connecting…</span>
+    <div id="tabs">
+      <button class="tab" data-mode="grid">GRID</button>
+      <button class="tab" data-mode="groups">GROUPS</button>
+      <button class="tab" data-mode="activity">ACTIVITY</button>
+      <button class="tab" data-mode="flow">FLOW</button>
+    </div>
   </div>
-  <div id="chat">
-    <div id="empty"><div class="glyph">▚▞</div><div>select a session on the left — its pane becomes the chat</div></div>
-  </div>
+  <div id="views"></div>
+  <div id="chat"></div>
   <div id="composer" style="display:none">
     <div id="chips">
       <button class="chip" data-keys="C-c">^C</button>
@@ -253,10 +392,213 @@ body::after{
 </main>
 <script>
 const $=s=>document.querySelector(s);
-let current=null, pollTimer=null, sessTimer=null, screenEl=null;
+const SVGNS="http://www.w3.org/2000/svg";
+let mode="grid", current=null, grid=[], chatTimer=null, gridTimer=null, screenEl=null;
 
 async function api(path,opts){const r=await fetch(path,opts);return r.json();}
 
+function ageLabel(a){
+  if(a===null||a===undefined)return "—";
+  if(a<2)return "now";
+  if(a<60)return Math.round(a)+"s ago";
+  if(a<3600)return Math.round(a/60)+"m ago";
+  return Math.round(a/3600)+"h ago";
+}
+
+/* ---------- mode switching ---------- */
+function setMode(m){
+  mode=m;current=(m==="chat")?current:null;
+  $("#chat").style.display=(m==="chat")?"flex":"none";
+  $("#views").style.display=(m==="chat")?"none":"";
+  $("#composer").style.display=(m==="chat")?"":"none";
+  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.mode===m));
+  document.querySelectorAll(".card").forEach(el=>el.classList.toggle("active",!!(current&&el.dataset.name===current.name)));
+  clearInterval(chatTimer);chatTimer=null;
+  if(m!=="chat"){$("#title").textContent=m;$("#views").innerHTML="";render();}
+}
+document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setMode(t.dataset.mode));
+
+/* ---------- shared poll ---------- */
+async function poll(){
+  try{
+    const r=await api("/api/grid?lines=14");
+    if(!r.ok){$("#status").textContent=r.error||"error";$("#status").className="err";return;}
+    grid=r.sessions;
+    $("#status").textContent=grid.filter(s=>s.live).length+" live · polling";$("#status").className="";
+    renderSidebar();
+    if(mode!=="chat")render();
+  }catch(e){$("#status").textContent="daemon unreachable";$("#status").className="err";}
+}
+
+function renderSidebar(){
+  const box=$("#sessions");box.innerHTML="";
+  grid.forEach(s=>{
+    const d=document.createElement("div");
+    d.className="card"+(current&&current.name===s.name?" active":"");
+    d.dataset.name=s.name;
+    const badges=(s.registered?"<span>registered</span>":"<span>unregistered</span>")
+      +(s.attached?"<span>attached</span>":"")
+      +(s.tags||[]).map(t=>"<span>#"+t+"</span>").join("");
+    d.innerHTML='<div class="nm"><span class="dot '+(s.live?"live":"stale")+'"></span>'+s.name+'</div>'
+      +'<div class="sub">→ '+s.session+(s.description?" — "+s.description:"")+'</div>'
+      +'<div class="badges">'+badges+'</div>';
+    d.onclick=()=>openChat(s);
+    box.appendChild(d);
+  });
+}
+
+/* ---------- tiles (grid + groups) ---------- */
+function makeTile(s){
+  const t=document.createElement("div");
+  t.className="tile"+((s.last_change_age!==null&&s.last_change_age<6)?" hot":"")+(s.live?"":" dead");
+  const h=document.createElement("header");
+  h.innerHTML='<span class="dot '+(s.live?"live":"stale")+'"></span><span class="nm">'+s.name
+    +'</span><span class="age">'+(s.live?ageLabel(s.last_change_age):"gone")+'</span>';
+  const p=document.createElement("pre");
+  if(s.live&&s.content.trim()){
+    const lines=s.content.replace(/\s+$/,"").split("\n");
+    p.textContent=lines.slice(-14).join("\n");
+  }else{
+    p.className="empty";p.textContent=s.live?"(blank pane)":"tmux session gone";
+  }
+  t.appendChild(h);t.appendChild(p);
+  t.onclick=()=>openChat(s);
+  return t;
+}
+
+function renderGrid(){
+  const v=$("#views");v.innerHTML="";
+  const g=document.createElement("div");g.className="tilegrid";
+  grid.forEach(s=>g.appendChild(makeTile(s)));
+  if(!grid.length)v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';
+  else v.appendChild(g);
+}
+
+function renderGroups(){
+  const v=$("#views");v.innerHTML="";
+  const groups=new Map();
+  const put=(k,s)=>{if(!groups.has(k))groups.set(k,[]);groups.get(k).push(s);};
+  grid.forEach(s=>{
+    if(!s.registered)put("unregistered",s);
+    else if(!(s.tags||[]).length)put("untagged",s);
+    else s.tags.forEach(t=>put("#"+t,s));
+  });
+  if(!groups.size){v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';return;}
+  const order=[...groups.keys()].sort((a,b)=>{
+    const w=k=>k==="unregistered"?2:(k==="untagged"?1:0);
+    return w(a)-w(b)||a.localeCompare(b);
+  });
+  order.forEach(k=>{
+    const sec=document.createElement("div");sec.className="group";
+    const h=document.createElement("h2");
+    h.innerHTML=k+' <span class="cnt">· '+groups.get(k).length+'</span>';
+    const g=document.createElement("div");g.className="tilegrid";
+    groups.get(k).forEach(s=>g.appendChild(makeTile(s)));
+    sec.appendChild(h);sec.appendChild(g);v.appendChild(sec);
+  });
+}
+
+/* ---------- activity grid ---------- */
+function renderActivity(){
+  const v=$("#views");v.innerHTML="";
+  const wrap=document.createElement("div");wrap.className="actrows";
+  grid.forEach(s=>{
+    const row=document.createElement("div");row.className="actrow";
+    const nm=document.createElement("div");nm.className="nm";
+    nm.innerHTML='<span class="dot '+(s.live?"live":"stale")+'"></span>'+s.name;
+    const cells=document.createElement("div");cells.className="cells";
+    const samples=s.activity||[];
+    const pad=Math.max(0,60-samples.length);
+    for(let i=0;i<pad;i++){const c=document.createElement("div");c.className="cell";cells.appendChild(c);}
+    samples.forEach((on,i)=>{
+      const c=document.createElement("div");
+      c.className="cell"+(on?(i>=samples.length-5?" recent":" on"):"");
+      cells.appendChild(c);
+    });
+    const age=document.createElement("div");age.className="age";
+    age.textContent=s.live?("active "+ageLabel(s.last_change_age)):"gone";
+    row.appendChild(nm);row.appendChild(cells);row.appendChild(age);
+    row.onclick=()=>openChat(s);
+    wrap.appendChild(row);
+  });
+  if(!grid.length)v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';
+  else v.appendChild(wrap);
+}
+
+/* ---------- flow view ---------- */
+function el(tag,attrs){const e=document.createElementNS(SVGNS,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);return e;}
+
+function renderFlow(){
+  const v=$("#views");v.innerHTML="";
+  const wrap=document.createElement("div");wrap.id="flowwrap";
+  const W=1100,H=640,CX=W/2,CY=H/2;
+  const svg=el("svg",{viewBox:"0 0 "+W+" "+H});
+  const defs=el("defs",{});
+  const marker=el("marker",{id:"arrow",viewBox:"0 0 10 10",refX:"9",refY:"5",
+    markerWidth:"7",markerHeight:"7",orient:"auto-start-reverse"});
+  marker.appendChild(el("path",{d:"M0,0 L10,5 L0,10 z",fill:"#ffb000"}));
+  defs.appendChild(marker);svg.appendChild(defs);
+
+  const n=grid.length;
+  const pos={};
+  grid.forEach((s,i)=>{
+    const a=-Math.PI/2+(2*Math.PI*i)/Math.max(1,n);
+    pos[s.name]={x:CX+Math.cos(a)*(W/2-160),y:CY+Math.sin(a)*(H/2-90),s:s};
+  });
+  // resolve manage targets by registry name OR underlying tmux session name
+  const byKey={};grid.forEach(s=>{byKey[s.name]=s;byKey[s.session]=byKey[s.session]||s;});
+
+  // monitor edges: hub → every session (under nodes)
+  grid.forEach(s=>{
+    const p=pos[s.name];
+    svg.appendChild(el("line",{x1:CX,y1:CY,x2:p.x,y2:p.y,class:"edge"}));
+  });
+  // manage edges: agent → agent
+  grid.forEach(s=>{
+    (s.manages||[]).forEach(t=>{
+      const target=byKey[t];if(!target||target.name===s.name)return;
+      const a=pos[s.name],b=pos[target.name];
+      const mx=(a.x+b.x)/2+(CY-(a.y+b.y)/2)*.25, my=(a.y+b.y)/2+((a.x+b.x)/2-CX)*.25;
+      svg.appendChild(el("path",{d:"M"+a.x+","+a.y+" Q"+mx+","+my+" "+b.x+","+b.y,
+        class:"edge manage","marker-end":"url(#arrow)"}));
+      const lt=el("text",{x:mx,y:my-6,class:"elabel","text-anchor":"middle"});
+      lt.textContent="manages";svg.appendChild(lt);
+    });
+  });
+  // hub
+  const hub=el("g",{class:"hub"});
+  hub.appendChild(el("circle",{cx:CX,cy:CY,r:46}));
+  const ht=el("text",{x:CX,y:CY+9,"text-anchor":"middle"});ht.textContent="EMUX";
+  hub.appendChild(ht);svg.appendChild(hub);
+  // session nodes
+  grid.forEach(s=>{
+    const p=pos[s.name];
+    const g=el("g",{class:"fnode"+((s.last_change_age!==null&&s.last_change_age<6)?" hot":"")+(s.live?"":" dead")});
+    const bw=Math.max(120,s.name.length*8+30);
+    g.appendChild(el("rect",{x:p.x-bw/2,y:p.y-24,width:bw,height:48,rx:4}));
+    const t1=el("text",{x:p.x,y:p.y-2,"text-anchor":"middle"});t1.textContent=s.name;
+    const t2=el("text",{x:p.x,y:p.y+14,"text-anchor":"middle",class:"sub"});
+    t2.textContent=s.live?("active "+ageLabel(s.last_change_age)):"gone";
+    g.appendChild(t1);g.appendChild(t2);
+    g.onclick=()=>openChat(s);
+    svg.appendChild(g);
+  });
+  wrap.appendChild(svg);
+  v.appendChild(wrap);
+  const hint=document.createElement("div");hint.id="flowhint";
+  hint.innerHTML="dim flows = emux monitoring · bright arrows = agent manages agent — declare with <code>emux register &lt;name&gt; &lt;session&gt; --manages &lt;other&gt;</code>";
+  v.appendChild(hint);
+  if(!grid.length)v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';
+}
+
+function render(){
+  if(mode==="grid")renderGrid();
+  else if(mode==="groups")renderGroups();
+  else if(mode==="activity")renderActivity();
+  else if(mode==="flow")renderFlow();
+}
+
+/* ---------- chat ---------- */
 function pinned(){const c=$("#chat");return c.scrollHeight-c.scrollTop-c.clientHeight<60;}
 function scrollBottom(){const c=$("#chat");c.scrollTop=c.scrollHeight;}
 
@@ -269,19 +611,12 @@ function addBubble(cls,who,text){
   scrollBottom();
 }
 
-function ensureScreen(){
-  if(screenEl)return;
-  screenEl=document.createElement("div");screenEl.id="screen-bubble";screenEl.className="bubble";
-  screenEl.innerHTML='<div class="who">'+current.name+' · live pane</div><div id="screen"></div>';
-  $("#chat").appendChild(screenEl);
-}
-
 async function refreshScreen(){
   if(!current)return;
   const wasPinned=pinned();
   try{
     const r=await api("/api/capture?session="+encodeURIComponent(current.session)+"&lines=400");
-    const s=$("#screen");
+    const s=$("#screen");if(!s)return;
     if(r.ok){
       $("#status").textContent="live · polling";$("#status").className="";
       s.classList.remove("dimmed");
@@ -298,38 +633,20 @@ async function refreshScreen(){
   }catch(e){$("#status").textContent="daemon unreachable";$("#status").className="err";}
 }
 
-function select(sess){
+function openChat(sess){
   current=sess;
+  setMode("chat");
   $("#title").textContent=sess.name;
   $("#status").textContent="connecting…";$("#status").className="";
-  $("#composer").style.display="";
   const c=$("#chat");c.innerHTML="";screenEl=null;
-  ensureScreen();
+  screenEl=document.createElement("div");screenEl.id="screen-bubble";screenEl.className="bubble";
+  screenEl.innerHTML='<div class="who"></div><div id="screen"></div>';
+  screenEl.querySelector(".who").textContent=sess.name+" · live pane";
+  c.appendChild(screenEl);
   addBubble("sys",null,"monitoring tmux session “"+sess.session+"”"+(sess.description?" — "+sess.description:""));
-  document.querySelectorAll(".card").forEach(el=>el.classList.toggle("active",el.dataset.name===sess.name));
-  clearInterval(pollTimer);refreshScreen();pollTimer=setInterval(refreshScreen,1500);
+  document.querySelectorAll(".card").forEach(el2=>el2.classList.toggle("active",el2.dataset.name===sess.name));
+  refreshScreen();chatTimer=setInterval(refreshScreen,1500);
   $("#input").focus();
-}
-
-async function refreshSessions(){
-  try{
-    const r=await api("/api/sessions");
-    const box=$("#sessions");box.innerHTML="";
-    if(!r.ok){box.innerHTML='<div class="card"><div class="nm">tmux unavailable</div><div class="sub">'+(r.error||"")+'</div></div>';return;}
-    r.sessions.forEach(s=>{
-      const d=document.createElement("div");d.className="card"+(current&&current.name===s.name?" active":"");
-      d.dataset.name=s.name;
-      const dot=s.live?"live":"stale";
-      const badges=(s.registered?"<span>registered</span>":"<span>unregistered</span>")
-        +(s.attached?"<span>attached</span>":"")
-        +(s.tags||[]).map(t=>"<span>#"+t+"</span>").join("");
-      d.innerHTML='<div class="nm"><span class="dot '+dot+'"></span>'+s.name+'</div>'
-        +'<div class="sub">→ '+s.session+(s.description?" — "+s.description:"")+'</div>'
-        +'<div class="badges">'+badges+'</div>';
-      d.onclick=()=>select(s);
-      box.appendChild(d);
-    });
-  }catch(e){/* daemon hiccup; next tick retries */}
 }
 
 async function sendText(){
@@ -354,7 +671,8 @@ document.querySelectorAll(".chip").forEach(ch=>{
   };
 });
 
-refreshSessions();sessTimer=setInterval(refreshSessions,5000);
+setMode("grid");
+poll();gridTimer=setInterval(poll,2000);
 </script>
 </body>
 </html>
@@ -384,6 +702,14 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/sessions":
             self._json(sessions_payload())
+            return
+        if url.path == "/api/grid":
+            q = parse_qs(url.query)
+            try:
+                lines = max(1, min(100, int((q.get("lines") or ["14"])[0])))
+            except ValueError:
+                lines = 14
+            self._json(grid_payload(lines))
             return
         if url.path == "/api/capture":
             q = parse_qs(url.query)
