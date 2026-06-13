@@ -293,6 +293,25 @@ def test_http_send_allows_same_origin(daemon):
         assert json.loads(r.read().decode())["ok"]
 
 
+def test_http_healthz_is_unguarded(daemon):
+    # /healthz must answer even with a foreign Host (it leaks nothing).
+    req = urllib.request.Request(daemon + "/healthz", headers={"Host": "monitoring.example"})
+    with urllib.request.urlopen(req) as r:
+        body = json.loads(r.read().decode())
+    assert body["ok"] and "version" in body and "live_sessions" in body
+
+
+def test_sessions_payload_includes_created_unix(monkeypatch):
+    from emux import server, web
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_live_sessions", lambda: [
+        {"name": "main", "windows": 1, "created_unix": 1700000000, "attached": False},
+    ])
+    monkeypatch.setattr(server, "_load_registry", lambda: {})
+    item = web.sessions_payload()["sessions"][0]
+    assert item["created_unix"] == 1700000000
+
+
 def test_launchd_plist_is_well_formed():
     from emux import web
     plist = web.launchd_plist(port=9999)

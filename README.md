@@ -134,7 +134,9 @@ Five views over the same registry:
 
 One background thread captures every live pane on a timer into a shared cache, so N tabs watching M sessions cost one capture sweep, not N×M; dead sessions are evicted from the cache as tmux reaps them.
 
-API: `GET /api/sessions`, `GET /api/grid?lines=` (captures + activity for all live panes in one call), `GET /api/capture?session=&lines=`, `POST /api/send {session, keys, literal, enter}`. Same operations the MCP server exposes, over HTTP.
+**Niceties:** keys `1`–`4` switch views and `Esc` leaves chat; the last view is remembered across reloads; a sidebar **filter** narrows by name; tile/row ages are color-tiered by recency; sessions show **uptime** and an **attached** marker; the tab title shows the live count (and flashes when a watched chat session changes in the background); polling pauses on a hidden tab. A wrap toggle, copy-attach button, and per-message timestamps live in the chat view.
+
+API: `GET /healthz` (unauthenticated liveness), `GET /api/sessions`, `GET /api/grid?lines=` (captures + activity for all live panes in one call), `GET /api/capture?session=&lines=`, `POST /api/send {session, keys, literal, enter}`. The `/api/*` routes enforce the Host/Origin guards above. Same operations the MCP server exposes, over HTTP.
 
 ### Security
 

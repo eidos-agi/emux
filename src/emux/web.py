@@ -92,6 +92,7 @@ def sessions_payload() -> dict[str, Any]:
             "registered": True,
             "live": target in live_by_name,
             "attached": live_by_name.get(target, {}).get("attached", False),
+            "created_unix": live_by_name.get(target, {}).get("created_unix"),
         })
     registered_targets = {e.get("session") for e in registry.values()}
     for s in live:
@@ -106,6 +107,7 @@ def sessions_payload() -> dict[str, Any]:
             "registered": False,
             "live": True,
             "attached": s.get("attached", False),
+            "created_unix": s.get("created_unix"),
         })
     return {"ok": True, "sessions": sessions}
 
@@ -257,6 +259,7 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>emux — control room</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230c0a07'/><rect x='3' y='3' width='10' height='10' rx='2' fill='%23ffb000'/></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=VT323&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
 <style>
@@ -425,6 +428,36 @@ body::after{
   background:var(--amber);color:#160f00;border:none;cursor:pointer;
 }
 #send:hover{box-shadow:0 0 18px rgba(255,176,0,.5)}
+/* recency-tiered age coloring (#17) */
+.age.t-now{color:var(--amber)}
+.age.t-min{color:var(--amber-dim)}
+.age.t-old{color:var(--text-dim)}
+/* stale sessions in the sidebar (#19) */
+.card.gone{opacity:.5}
+.card.gone .nm{text-decoration:line-through}
+/* attached marker (#18) */
+.att{color:var(--live);font-size:10px;letter-spacing:1px;margin-left:6px}
+/* sidebar filter (#7) */
+#filter{
+  margin:0 8px 8px;width:calc(100% - 16px);background:#080705;border:1px solid var(--line);
+  color:var(--text);font:11px "IBM Plex Mono",monospace;padding:6px 9px;outline:none;
+}
+#filter:focus{border-color:var(--amber-dim)}
+/* topbar action buttons (#12 #15) */
+.act{
+  font:11px "IBM Plex Mono",monospace;color:var(--amber-dim);background:transparent;
+  border:1px solid var(--line);padding:3px 9px;cursor:pointer;letter-spacing:1px;
+}
+.act:hover{color:var(--amber);border-color:var(--amber-dim)}
+/* word-wrap toggle off → horizontal scroll (#9) */
+#screen.nowrap{white-space:pre;overflow-x:auto}
+/* jump-to-bottom pill (#11) */
+#jump{
+  position:absolute;left:50%;transform:translateX(-50%);bottom:96px;display:none;
+  font-family:"VT323",monospace;font-size:16px;letter-spacing:1px;
+  background:var(--amber);color:#160f00;border:none;padding:4px 16px;cursor:pointer;
+  box-shadow:0 0 14px rgba(255,176,0,.5);z-index:5;
+}
 ::-webkit-scrollbar{width:8px}
 ::-webkit-scrollbar-thumb{background:var(--amber-faint)}
 ::-webkit-scrollbar-track{background:transparent}
@@ -433,13 +466,16 @@ body::after{
 <body>
 <aside id="side">
   <div id="brand"><h1>EMUX</h1><small>control room</small></div>
+  <input id="filter" placeholder="filter sessions…" autocomplete="off" spellcheck="false">
   <div id="sessions"></div>
-  <footer>daemon · v__VERSION__</footer>
+  <footer id="footer">daemon · v__VERSION__</footer>
 </aside>
 <main id="main">
   <div id="topbar">
     <span id="title">grid</span>
     <span id="status">connecting…</span>
+    <button id="attachbtn" class="act" style="display:none">⧉ copy attach</button>
+    <button id="refreshbtn" class="act">↻ refresh</button>
     <div id="tabs">
       <button class="tab" data-mode="grid">GRID</button>
       <button class="tab" data-mode="groups">GROUPS</button>
@@ -449,6 +485,7 @@ body::after{
   </div>
   <div id="views"></div>
   <div id="chat"></div>
+  <button id="jump">↓ jump to bottom</button>
   <div id="composer" style="display:none">
     <div id="chips">
       <button class="chip" data-keys="C-c">^C</button>
@@ -456,6 +493,7 @@ body::after{
       <button class="chip" data-keys="Enter">⏎</button>
       <button class="chip" data-keys="Up">↑</button>
       <button class="chip" data-keys="Tab">TAB</button>
+      <button class="chip" id="wrapchip">WRAP: ON</button>
     </div>
     <div id="row">
       <input id="input" placeholder="type into the session… (Enter sends)" autocomplete="off" spellcheck="false">
@@ -467,6 +505,8 @@ body::after{
 const $=s=>document.querySelector(s);
 const SVGNS="http://www.w3.org/2000/svg";
 let mode="grid", current=null, grid=[], chatTimer=null, gridTimer=null, screenEl=null;
+let filterStr="", flashOn=false;
+const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW"};
 
 async function api(path,opts){const r=await fetch(path,opts);return r.json();}
 
@@ -477,13 +517,29 @@ function ageLabel(a){
   if(a<3600)return Math.round(a/60)+"m ago";
   return Math.round(a/3600)+"h ago";
 }
+function ageClass(a){            // recency tiers (#17)
+  if(a===null||a===undefined)return "t-old";
+  if(a<6)return "t-now";
+  if(a<120)return "t-min";
+  return "t-old";
+}
+function uptime(created){        // session age from tmux created_unix (#16)
+  if(!created)return "";
+  const s=Math.max(0,Math.floor(Date.now()/1000)-created);
+  if(s<3600)return "up "+Math.round(s/60)+"m";
+  if(s<86400)return "up "+Math.round(s/3600)+"h";
+  return "up "+Math.round(s/86400)+"d";
+}
 function hot(s){return s.last_change_age!==null&&s.last_change_age!==undefined&&s.last_change_age<6;}
+function shown(){return grid.filter(s=>!filterStr||s.name.toLowerCase().includes(filterStr));}
 
 function setMode(m){
   mode=m;current=(m==="chat")?current:null;
+  if(m!=="chat")localStorage.setItem("emux_view",m);   // remember last view (#6)
   $("#chat").style.display=(m==="chat")?"flex":"none";
   $("#views").style.display=(m==="chat")?"none":"";
   $("#composer").style.display=(m==="chat")?"":"none";
+  $("#attachbtn").style.display=(m==="chat")?"":"none";
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.mode===m));
   document.querySelectorAll(".card").forEach(el=>el.classList.toggle("active",!!(current&&el.dataset.name===current.name)));
   clearInterval(chatTimer);chatTimer=null;
@@ -491,31 +547,49 @@ function setMode(m){
 }
 document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setMode(t.dataset.mode));
 
+function updateChrome(){         // title, footer, tab counts (#1 #3 #4)
+  const liveN=grid.filter(s=>s.live).length;
+  const actN=grid.filter(s=>s.live&&hot(s)).length;
+  if(!flashOn)document.title="emux · "+liveN+" live";
+  $("#footer").textContent="daemon · v__VERSION__ · "+grid.length+" sessions";
+  document.querySelectorAll(".tab").forEach(t=>{
+    const m=t.dataset.mode;
+    t.textContent=(m==="activity"&&actN)?BASE_TAB[m]+" · "+actN:BASE_TAB[m];
+  });
+}
+
 async function poll(){
+  if(document.hidden&&grid.length)return;  // pause steady-state polling on a backgrounded tab, but still do the first load (#13)
   try{
     const r=await api("/api/grid?lines=14");
     if(!r.ok){$("#status").textContent=r.error||"error";$("#status").className="err";return;}
     grid=r.sessions;
     $("#status").textContent=grid.filter(s=>s.live).length+" live · polling";$("#status").className="";
-    renderSidebar();
+    updateChrome();renderSidebar();
     if(mode!=="chat")render();
   }catch(e){$("#status").textContent="daemon unreachable";$("#status").className="err";}
 }
 
 function renderSidebar(){
   const box=$("#sessions");box.innerHTML="";
-  grid.forEach(s=>{
+  shown().forEach(s=>{
     const d=document.createElement("div");
-    d.className="card"+(current&&current.name===s.name?" active":"");
+    d.className="card"+(current&&current.name===s.name?" active":"")+(s.live?"":" gone");
     d.dataset.name=s.name;
+    const att=s.attached?'<span class="att">●attached</span>':"";
+    const up=s.live?uptime(s.created_unix):"";
+    const tagspans=(s.tags||[]).map(t=>'<span class="tagjump" data-tag="'+t+'">#'+t+'</span>').join("");
     const badges=(s.registered?"<span>registered</span>":"<span>unregistered</span>")
-      +(s.attached?"<span>attached</span>":"")
-      +(s.tags||[]).map(t=>"<span>#"+t+"</span>").join("");
-    d.innerHTML='<div class="nm"><span class="dot '+(s.live?"live":"stale")+'"></span>'+s.name+'</div>'
-      +'<div class="sub">→ '+s.session+(s.description?" — "+s.description:"")+'</div>'
+      +(s.attached?"<span>attached</span>":"")+tagspans;
+    d.innerHTML='<div class="nm"><span class="dot '+(s.live?"live":"stale")+'"></span>'+s.name+att+'</div>'
+      +'<div class="sub">→ '+s.session+(up?" · "+up:"")+(s.description?" — "+s.description:"")+'</div>'
       +'<div class="badges">'+badges+'</div>';
     d.onclick=()=>openChat(s);
     box.appendChild(d);
+  });
+  document.querySelectorAll(".tagjump").forEach(el=>el.onclick=ev=>{   // clickable tags (#8)
+    ev.stopPropagation();const tag=el.dataset.tag;setMode("groups");
+    setTimeout(()=>{const h=document.getElementById("grp-"+tag);if(h)h.scrollIntoView({behavior:"smooth"});},60);
   });
 }
 
@@ -523,8 +597,9 @@ function makeTile(s){
   const t=document.createElement("div");
   t.className="tile"+(hot(s)?" hot":"")+(s.live?"":" dead");
   const h=document.createElement("header");
-  h.innerHTML='<span class="dot '+(s.live?"live":"stale")+'"></span><span class="nm">'+s.name
-    +'</span><span class="age">'+(s.live?ageLabel(s.last_change_age):"gone")+'</span>';
+  const att=s.attached?'<span class="att">●</span>':"";
+  h.innerHTML='<span class="dot '+(s.live?"live":"stale")+'"></span><span class="nm">'+s.name+att
+    +'</span><span class="age '+(s.live?ageClass(s.last_change_age):"t-old")+'">'+(s.live?ageLabel(s.last_change_age):"gone")+'</span>';
   const p=document.createElement("pre");
   if(s.live&&s.content.trim()){
     p.textContent=s.content.replace(/\s+$/,"").split("\n").slice(-14).join("\n");
@@ -538,9 +613,10 @@ function makeTile(s){
 
 function renderGrid(){
   const v=$("#views");v.innerHTML="";
-  if(!grid.length){v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';return;}
+  const list=shown();
+  if(!list.length){v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no matching sessions</div></div>';return;}
   const g=document.createElement("div");g.className="tilegrid";
-  grid.forEach(s=>g.appendChild(makeTile(s)));
+  list.forEach(s=>g.appendChild(makeTile(s)));
   v.appendChild(g);
 }
 
@@ -548,12 +624,12 @@ function renderGroups(){
   const v=$("#views");v.innerHTML="";
   const groups=new Map();
   const put=(k,s)=>{if(!groups.has(k))groups.set(k,[]);groups.get(k).push(s);};
-  grid.forEach(s=>{
+  shown().forEach(s=>{
     if(!s.registered)put("unregistered",s);
     else if(!(s.tags||[]).length)put("untagged",s);
     else s.tags.forEach(t=>put("#"+t,s));
   });
-  if(!groups.size){v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';return;}
+  if(!groups.size){v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no matching sessions</div></div>';return;}
   const order=[...groups.keys()].sort((a,b)=>{
     const w=k=>k==="unregistered"?2:(k==="untagged"?1:0);
     return w(a)-w(b)||a.localeCompare(b);
@@ -561,6 +637,7 @@ function renderGroups(){
   order.forEach(k=>{
     const sec=document.createElement("div");sec.className="group";
     const h=document.createElement("h2");
+    if(k[0]==="#")h.id="grp-"+k.slice(1);   // anchor for clickable-tag jump (#8)
     h.innerHTML=k+' <span class="cnt">· '+groups.get(k).length+'</span>';
     const g=document.createElement("div");g.className="tilegrid";
     groups.get(k).forEach(s=>g.appendChild(makeTile(s)));
@@ -570,9 +647,10 @@ function renderGroups(){
 
 function renderActivity(){
   const v=$("#views");v.innerHTML="";
-  if(!grid.length){v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';return;}
+  const list=shown();
+  if(!list.length){v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no matching sessions</div></div>';return;}
   const wrap=document.createElement("div");wrap.className="actrows";
-  grid.forEach(s=>{
+  list.forEach(s=>{
     const row=document.createElement("div");row.className="actrow";
     const nm=document.createElement("div");nm.className="nm";
     nm.innerHTML='<span class="dot '+(s.live?"live":"stale")+'"></span>'+s.name;
@@ -584,7 +662,7 @@ function renderActivity(){
       c.className="cell"+(on?(i>=samples.length-5?" recent":" on"):"");
       cells.appendChild(c);
     });
-    const age=document.createElement("div");age.className="age";
+    const age=document.createElement("div");age.className="age "+(s.live?ageClass(s.last_change_age):"t-old");
     age.textContent=s.live?("active "+ageLabel(s.last_change_age)):"gone";
     row.appendChild(nm);row.appendChild(cells);row.appendChild(age);
     row.onclick=()=>openChat(s);
@@ -686,11 +764,16 @@ function render(){
 }
 
 function pinned(){const c=$("#chat");return c.scrollHeight-c.scrollTop-c.clientHeight<60;}
-function scrollBottom(){const c=$("#chat");c.scrollTop=c.scrollHeight;}
+function scrollBottom(){const c=$("#chat");c.scrollTop=c.scrollHeight;$("#jump").style.display="none";}
+function clockNow(){const d=new Date();return d.toTimeString().slice(0,5);}  // HH:MM (#10)
 
 function addBubble(cls,who,text){
   const b=document.createElement("div");b.className="bubble "+cls;
-  if(who){const w=document.createElement("div");w.className="who";w.textContent=who;b.appendChild(w);}
+  if(who){
+    const w=document.createElement("div");w.className="who";
+    w.textContent=(cls==="user")?who+" · "+clockNow():who;   // timestamp user bubbles (#10)
+    b.appendChild(w);
+  }
   const t=document.createElement("div");t.textContent=text;b.appendChild(t);
   const c=$("#chat");
   if(screenEl&&screenEl.parentElement===c){c.insertBefore(b,screenEl);}else{c.appendChild(b);}
@@ -710,7 +793,8 @@ async function refreshScreen(){
         s.dataset.last=r.content;
         s.textContent=r.content.replace(/\s+$/,"")+"\n";
         const cur=document.createElement("span");cur.className="cursorblock";s.appendChild(cur);
-        if(wasPinned)scrollBottom();
+        if(document.hidden){flashOn=true;document.title="● emux — "+current.name;}  // title flash (#20)
+        if(wasPinned)scrollBottom();else $("#jump").style.display="block";          // jump pill (#11)
       }
     }else{
       $("#status").textContent=r.error||"capture failed";$("#status").className="err";
@@ -729,6 +813,7 @@ function openChat(sess){
   screenEl.innerHTML='<div class="who"></div><div id="screen"></div>';
   screenEl.querySelector(".who").textContent=sess.name+" · live screen (updates in place)";
   c.appendChild(screenEl);
+  applyWrap();
   addBubble("sys",null,"monitoring tmux session “"+sess.session+"”"+(sess.description?" — "+sess.description:""));
   document.querySelectorAll(".card").forEach(el2=>el2.classList.toggle("active",el2.dataset.name===sess.name));
   refreshScreen();chatTimer=setInterval(refreshScreen,1500);
@@ -745,9 +830,21 @@ async function sendText(){
   setTimeout(refreshScreen,300);
 }
 
+// wrap toggle (#9)
+function applyWrap(){
+  const s=$("#screen");if(!s)return;
+  const off=localStorage.getItem("emux_wrap")==="off";
+  s.classList.toggle("nowrap",off);
+  $("#wrapchip").textContent="WRAP: "+(off?"OFF":"ON");
+}
+$("#wrapchip").onclick=()=>{
+  localStorage.setItem("emux_wrap",localStorage.getItem("emux_wrap")==="off"?"on":"off");applyWrap();
+};
+
 $("#send").onclick=sendText;
 $("#input").addEventListener("keydown",e=>{if(e.key==="Enter")sendText();});
 document.querySelectorAll(".chip").forEach(ch=>{
+  if(ch.id==="wrapchip")return;
   ch.onclick=async()=>{
     if(!current)return;
     addBubble("user","key",ch.textContent);
@@ -757,7 +854,32 @@ document.querySelectorAll(".chip").forEach(ch=>{
   };
 });
 
-setMode("grid");
+// copy attach command (#12)
+$("#attachbtn").onclick=()=>{
+  if(!current)return;
+  navigator.clipboard?.writeText("tmux attach -t "+current.session);
+  const b=$("#attachbtn");const o=b.textContent;b.textContent="⧉ copied!";setTimeout(()=>b.textContent=o,1200);
+};
+// manual refresh (#15)
+$("#refreshbtn").onclick=()=>{poll();if(current)refreshScreen();};
+// jump to bottom pill (#11)
+$("#jump").onclick=scrollBottom;
+$("#chat").addEventListener("scroll",()=>{if(pinned())$("#jump").style.display="none";});
+// sidebar filter (#7)
+$("#filter").addEventListener("input",e=>{filterStr=e.target.value.toLowerCase();renderSidebar();if(mode!=="chat")render();});
+// keyboard: 1-4 switch views, Esc leaves chat (#5)
+document.addEventListener("keydown",e=>{
+  if(e.target.id==="filter"||e.target.id==="input")return;
+  const map={"1":"grid","2":"groups","3":"activity","4":"flow"};
+  if(map[e.key])setMode(map[e.key]);
+  else if(e.key==="Escape"&&mode==="chat")setMode(localStorage.getItem("emux_view")||"grid");
+});
+// resume + clear title flash when tab refocuses (#13 #20)
+document.addEventListener("visibilitychange",()=>{
+  if(!document.hidden){flashOn=false;poll();if(current)refreshScreen();}
+});
+
+setMode(localStorage.getItem("emux_view")||"grid");   // restore last view (#6)
 poll();gridTimer=setInterval(poll,2000);
 </script>
 </body>
@@ -812,6 +934,12 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            return
+        if url.path == "/healthz":
+            # Unguarded on purpose: leaks nothing, lets launchd/monitoring probe liveness.
+            live = sessions_payload()
+            n = len([s for s in live.get("sessions", []) if s.get("live")]) if live.get("ok") else 0
+            self._json({"ok": True, "version": __version__, "live_sessions": n})
             return
         if url.path.startswith("/api/"):
             if not self._host_allowed():
