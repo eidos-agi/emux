@@ -312,6 +312,39 @@ def test_sessions_payload_includes_created_unix(monkeypatch):
     assert item["created_unix"] == 1700000000
 
 
+def test_flow_handles_recursive_manages_cycle(monkeypatch):
+    """The simplest recursion: two agents that manage each other (A→B→A).
+
+    The flow view's level-assignment BFS guards against exactly this — a cycle
+    has no in-degree-0 root, so naive layering would loop forever. This test
+    pins the data layer that feeds the view: grid_payload must carry BOTH
+    directions of the loop so the flow renderer can draw (and cycle-guard) it.
+    Live-verified separately that the browser renders the loop without hanging.
+    """
+    from emux import server, web
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_live_sessions", lambda: [
+        {"name": "a", "windows": 1, "created_unix": 0, "attached": False},
+        {"name": "b", "windows": 1, "created_unix": 0, "attached": False},
+    ])
+    monkeypatch.setattr(server, "_load_registry", lambda: {
+        "a": {"session": "a", "description": None, "tags": [], "manages": ["b"], "registered_at": 0},
+        "b": {"session": "b", "description": None, "tags": [], "manages": ["a"], "registered_at": 0},
+    })
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, "x\n", ""))
+    web._ACTIVITY.clear()
+    web._CACHE.clear()
+
+    by_name = {s["name"]: s for s in web.grid_payload()["sessions"]}
+    # Both halves of the cycle are present → the renderer sees a true loop.
+    assert by_name["a"]["manages"] == ["b"]
+    assert by_name["b"]["manages"] == ["a"]
+    # Every node is both a manager and managed → no in-degree-0 root exists,
+    # which is precisely the case the flow BFS must guard against.
+    targets = {t for s in by_name.values() for t in s["manages"]}
+    assert targets == {"a", "b"}
+
+
 def test_launchd_plist_is_well_formed():
     from emux import web
     plist = web.launchd_plist(port=9999)
