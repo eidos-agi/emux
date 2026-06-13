@@ -92,6 +92,7 @@ def test_poll_once_tracks_activity_then_grid_reads_cache(monkeypatch):
     })
     outputs = iter(["pane v1\n", "pane v1\n", "pane v2\n"])
     monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, next(outputs), ""))
+    monkeypatch.setattr(web, "_pane_command", lambda s: "")  # don't consume the capture iterator
     web._ACTIVITY.clear()
     web._CACHE.clear()
 
@@ -310,6 +311,43 @@ def test_sessions_payload_includes_created_unix(monkeypatch):
     monkeypatch.setattr(server, "_load_registry", lambda: {})
     item = web.sessions_payload()["sessions"][0]
     assert item["created_unix"] == 1700000000
+
+
+def test_detect_agent_from_pane_command(monkeypatch):
+    from emux import web
+    monkeypatch.setattr(web, "_pane_command", lambda s: "claude")
+    assert _agent_key(web._detect_agent("s", "")) == "claude"
+    monkeypatch.setattr(web, "_pane_command", lambda s: "codex")
+    assert _agent_key(web._detect_agent("s", "")) == "codex"
+    monkeypatch.setattr(web, "_pane_command", lambda s: "zsh")
+    assert _agent_key(web._detect_agent("s", "")) == "shell"
+
+
+def test_detect_agent_falls_back_to_content_signature(monkeypatch):
+    from emux import web
+    # A node-wrapped CLI reports "node" as the process; the content disambiguates.
+    monkeypatch.setattr(web, "_pane_command", lambda s: "node")
+    a = web._detect_agent("s", "Welcome to Gemini CLI — type a prompt")
+    assert _agent_key(a) == "gemini" and a["glyph"]
+
+
+def test_grid_payload_attaches_agent(monkeypatch):
+    from emux import server, web
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_live_sessions", lambda: [
+        {"name": "main", "windows": 1, "created_unix": 0, "attached": False},
+    ])
+    monkeypatch.setattr(server, "_load_registry", lambda: {})
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, "x\n", ""))
+    monkeypatch.setattr(web, "_pane_command", lambda s: "claude")
+    web._ACTIVITY.clear()
+    web._CACHE.clear()
+    item = web.grid_payload()["sessions"][0]
+    assert item["agent"]["agent"] == "claude" and item["agent"]["label"] == "Claude Code"
+
+
+def _agent_key(a):
+    return a["agent"]
 
 
 def test_flow_handles_recursive_manages_cycle(monkeypatch):

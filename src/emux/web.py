@@ -129,6 +129,48 @@ def capture_payload(session: str, lines: int = 300) -> dict[str, Any]:
     return {"ok": True, "session": session, "content": out}
 
 
+# Which AI/tool is running in a pane. Primary signal is tmux's live foreground
+# process (`pane_current_command`); content signatures catch node-wrapped CLIs
+# that all report as "node". Glyphs are monochrome Unicode to match the theme.
+# (key, label, glyph, command-name substrings, content substrings)
+_AGENT_TABLE = [
+    ("claude", "Claude Code", "✳", ("claude",), ("claude code", "anthropic")),
+    ("codex", "Codex", "◇", ("codex",), ("openai codex", "codex cli")),
+    ("gemini", "Gemini", "♊", ("gemini",), ("gemini cli", "google gemini")),
+    ("hermes", "Hermes", "☿", ("hermes",), ("hermes", " nous ")),
+    ("aider", "Aider", "✦", ("aider",), ("aider ",)),
+]
+_SHELLS = {"zsh", "-zsh", "bash", "-bash", "fish", "sh", "-sh"}
+_EDITORS = {"vim", "nvim", "vi", "nano", "emacs"}
+
+
+def _pane_command(session: str) -> str:
+    """The live foreground process name in the session's active pane."""
+    code, out, _ = _server._run_tmux(
+        ["display-message", "-p", "-t", session, "#{pane_current_command}"]
+    )
+    return out.strip() if code == 0 else ""
+
+
+def _detect_agent(session: str, content: str) -> dict[str, str]:
+    """Best-effort: which AI system / tool is currently running in the pane."""
+    cmd = _pane_command(session).lower()
+    low = (content or "").lower()
+    for key, label, glyph, cmds, _sigs in _AGENT_TABLE:
+        if any(c in cmd for c in cmds):
+            return {"agent": key, "label": label, "glyph": glyph}
+    for key, label, glyph, _cmds, sigs in _AGENT_TABLE:
+        if any(s in low for s in sigs):
+            return {"agent": key, "label": label, "glyph": glyph}
+    if cmd in _SHELLS:
+        return {"agent": "shell", "label": "shell", "glyph": "$"}
+    if cmd in _EDITORS:
+        return {"agent": "editor", "label": cmd, "glyph": "✎"}
+    if cmd:
+        return {"agent": cmd, "label": cmd, "glyph": "▸"}
+    return {"agent": "unknown", "label": "—", "glyph": "·"}
+
+
 def _normalize(content: str) -> str:
     """Reduce a pane capture to its meaningful content for change detection:
     drop per-line trailing whitespace, trailing blank lines, and spinner glyphs.
@@ -175,12 +217,14 @@ def _meta(session: str) -> dict[str, Any]:
 
 
 def _capture_and_observe(session: str, lines: int) -> str:
-    """Capture a pane, fold it into activity state, and refresh the cache."""
+    """Capture a pane, fold it into activity state, detect the running agent,
+    and refresh the cache."""
     cap = capture_payload(session, lines)
     content = cap.get("content", "") if cap.get("ok") else ""
     _observe(session, content)
+    agent = _detect_agent(session, content)
     with _LOCK:
-        _CACHE[session] = {"content": content, "ts": time.time(), "lines": lines}
+        _CACHE[session] = {"content": content, "ts": time.time(), "lines": lines, "agent": agent}
     return content
 
 
@@ -214,13 +258,17 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
                 content = ce["content"] if (ce is not None and (now - ce["ts"]) < _CACHE_TTL) else None
             if content is None:
                 content = _capture_and_observe(item["session"], lines)
+            with _LOCK:
+                ce = _CACHE.get(item["session"])
             item["content"] = content
+            item["agent"] = (ce or {}).get("agent") or {"agent": "unknown", "label": "—", "glyph": "·"}
             item.update(_meta(item["session"]))
         else:
             item["content"] = ""
             item["changed"] = False
             item["last_change_age"] = None
             item["activity"] = []
+            item["agent"] = {"agent": "gone", "label": "", "glyph": ""}
     return base
 
 
@@ -372,15 +420,27 @@ body::after{
 .cell.on{background:var(--amber);box-shadow:0 0 5px rgba(255,176,0,.6)}
 .cell.recent{background:var(--user)}
 .actrow .age{font-size:11px;color:var(--text-dim);width:120px;text-align:right;flex:none;letter-spacing:1px}
-#flowwrap{width:100%;height:100%;min-height:520px}
-#flowwrap svg{width:100%;height:100%}
-.fnode{cursor:pointer}
-.fnode rect{fill:var(--bg-card);stroke:var(--line);stroke-width:1.5}
-.fnode:hover rect{stroke:var(--amber-dim)}
-.fnode.hot rect{stroke:var(--amber);filter:drop-shadow(0 0 8px rgba(255,176,0,.5))}
-.fnode.dead{opacity:.4}
-.fnode text{fill:var(--amber);font:600 12px "IBM Plex Mono",monospace}
-.fnode text.sub{fill:var(--text-dim);font:9px "IBM Plex Mono",monospace}
+/* flow view — live mini-pane boxes over an SVG edge layer */
+#flowwrap{position:relative;margin:0 auto}
+#flowsvg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.fbox{
+  position:absolute;transform:translate(-50%,-50%);z-index:1;
+  border:1px solid var(--line);background:#080705;cursor:pointer;overflow:hidden;
+  transition:border-color .2s, box-shadow .4s;
+}
+.fbox:hover{border-color:var(--amber-dim)}
+.fbox.hot{border-color:var(--amber);box-shadow:0 0 16px rgba(255,176,0,.25)}
+.fbox.dead{opacity:.45}
+.fbox .ftitle{display:flex;align-items:center;gap:6px;padding:5px 9px;background:var(--bg-card);border-bottom:1px solid var(--line)}
+.fbox .ftitle .nm{color:var(--amber);font-weight:600;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fbox .ftitle .ag{margin-left:auto;color:var(--amber-dim);font-size:10px;letter-spacing:.5px;white-space:nowrap}
+.fbox pre{
+  font:8.5px/1.32 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
+  white-space:pre-wrap;word-break:break-word;padding:6px 9px;height:96px;overflow:hidden;
+  display:flex;flex-direction:column;justify-content:flex-end;
+}
+.fbox pre.empty{color:var(--text-dim);font-style:italic;justify-content:center;text-align:center}
+.agentbadge{color:var(--amber-dim);font-size:10px;letter-spacing:1px;margin-left:6px}
 .edge{stroke:var(--amber);stroke-width:2;fill:none;stroke-dasharray:7 5;animation:flow 1.1s linear infinite;
   filter:drop-shadow(0 0 4px rgba(255,176,0,.4))}
 @keyframes flow{to{stroke-dashoffset:-12}}
@@ -578,9 +638,11 @@ function renderSidebar(){
     d.dataset.name=s.name;
     const att=s.attached?'<span class="att">●attached</span>':"";
     const up=s.live?uptime(s.created_unix):"";
+    const ag=s.agent||{glyph:"",label:""};
+    const agspan=(s.live&&ag.label&&ag.label!=="—")?'<span>'+ag.glyph+' '+ag.label+'</span>':"";
     const tagspans=(s.tags||[]).map(t=>'<span class="tagjump" data-tag="'+t+'">#'+t+'</span>').join("");
     const badges=(s.registered?"<span>registered</span>":"<span>unregistered</span>")
-      +(s.attached?"<span>attached</span>":"")+tagspans;
+      +agspan+(s.attached?"<span>attached</span>":"")+tagspans;
     d.innerHTML='<div class="nm"><span class="dot '+(s.live?"live":"stale")+'"></span>'+s.name+att+'</div>'
       +'<div class="sub">→ '+s.session+(up?" · "+up:"")+(s.description?" — "+s.description:"")+'</div>'
       +'<div class="badges">'+badges+'</div>';
@@ -598,8 +660,10 @@ function makeTile(s){
   t.className="tile"+(hot(s)?" hot":"")+(s.live?"":" dead");
   const h=document.createElement("header");
   const att=s.attached?'<span class="att">●</span>':"";
-  h.innerHTML='<span class="dot '+(s.live?"live":"stale")+'"></span><span class="nm">'+s.name+att
-    +'</span><span class="age '+(s.live?ageClass(s.last_change_age):"t-old")+'">'+(s.live?ageLabel(s.last_change_age):"gone")+'</span>';
+  const ag=s.agent||{glyph:"",label:""};
+  const agbadge=(s.live&&ag.label&&ag.label!=="—")?'<span class="agentbadge">'+ag.glyph+' '+ag.label+'</span>':"";
+  h.innerHTML='<span class="dot '+(s.live?"live":"stale")+'"></span><span class="nm">'+s.name+att+'</span>'+agbadge
+    +'<span class="age '+(s.live?ageClass(s.last_change_age):"t-old")+'">'+(s.live?ageLabel(s.last_change_age):"gone")+'</span>';
   const p=document.createElement("pre");
   if(s.live&&s.content.trim()){
     p.textContent=s.content.replace(/\s+$/,"").split("\n").slice(-14).join("\n");
@@ -703,10 +767,12 @@ function renderFlow(){
   const maxLvl=Math.max(0,...[...level.values()]);
   const unconnected=grid.filter(s=>!connected.has(s.name));
 
-  const W=1100,H=Math.max(560,(maxLvl+ (unconnected.length?1:0) +1)*150+40);
+  // Each node is a live mini-pane box (title + tiny tmux preview), laid out by
+  // level. Boxes are HTML positioned over an SVG edge layer.
+  const BW=236,BH=150,COLGAP=40,ROWGAP=64,PAD=30;
+  const W=1200,H=PAD*2+(maxLvl+(unconnected.length?1:0)+1)*(BH+ROWGAP);
   const pos={};
-  const rowY=lv=>70+lv*150;
-  // place connected nodes by level
+  const rowY=lv=>PAD+BH/2+lv*(BH+ROWGAP);
   for(let lv=0;lv<=maxLvl;lv++){
     const row=[...connected].filter(n=>level.get(n)===lv);
     row.forEach((n,i)=>{pos[n]={x:W*(i+1)/(row.length+1),y:rowY(lv)};});
@@ -714,45 +780,52 @@ function renderFlow(){
   const uncY=rowY(maxLvl+1);
   unconnected.forEach((s,i)=>{pos[s.name]={x:W*(i+1)/(unconnected.length+1),y:uncY};});
 
-  const svg=el("svg",{viewBox:"0 0 "+W+" "+H});
+  // edge layer (SVG, behind the boxes)
+  const svg=el("svg",{id:"flowsvg",viewBox:"0 0 "+W+" "+H});
   const defs=el("defs",{});
   const marker=el("marker",{id:"arrow",viewBox:"0 0 10 10",refX:"9",refY:"5",markerWidth:"7",markerHeight:"7",orient:"auto-start-reverse"});
   marker.appendChild(el("path",{d:"M0,0 L10,5 L0,10 z",fill:"#ffb000"}));
   defs.appendChild(marker);svg.appendChild(defs);
-
-  // manage edges (parent bottom -> child top)
   edges.forEach(([a,b])=>{
     const pa=pos[a],pb=pos[b];if(!pa||!pb)return;
-    const y1=pa.y+24,y2=pb.y-24,my=(y1+y2)/2;
+    const y1=pa.y+BH/2,y2=pb.y-BH/2,my=(y1+y2)/2;
     svg.appendChild(el("path",{d:"M"+pa.x+","+y1+" C"+pa.x+","+my+" "+pb.x+","+my+" "+pb.x+","+y2,
       class:"edge","marker-end":"url(#arrow)"}));
   });
-  // unconnected separator + label
   if(unconnected.length){
-    const sy=uncY-75;
-    svg.appendChild(el("line",{x1:30,y1:sy,x2:W-30,y2:sy,class:"sep"}));
-    const lab=el("text",{x:40,y:sy-8,class:"rowlabel"});lab.textContent="unconnected · not in any manages relationship";
+    const sy=uncY-BH/2-ROWGAP/2;
+    svg.appendChild(el("line",{x1:PAD,y1:sy,x2:W-PAD,y2:sy,class:"sep"}));
+    const lab=el("text",{x:PAD+6,y:sy-7,class:"rowlabel"});lab.textContent="unconnected · not in any manages relationship";
     svg.appendChild(lab);
   }
-  // nodes
-  function node(s){
-    const p=pos[s.name];
-    const g=el("g",{class:"fnode"+(hot(s)?" hot":"")+(s.live?"":" dead")});
-    const bw=Math.max(120,s.name.length*8+30);
-    g.appendChild(el("rect",{x:p.x-bw/2,y:p.y-24,width:bw,height:48,rx:4}));
-    const t1=el("text",{x:p.x,y:p.y-2,"text-anchor":"middle"});t1.textContent=s.name;
-    const t2=el("text",{x:p.x,y:p.y+14,"text-anchor":"middle",class:"sub"});
-    t2.textContent=s.live?("active "+ageLabel(s.last_change_age)):"gone";
-    g.appendChild(t1);g.appendChild(t2);
-    g.onclick=()=>openChat(s);
-    svg.appendChild(g);
-  }
-  [...connected].forEach(n=>node(byKey[n]));
-  unconnected.forEach(node);
 
-  const wrap=document.createElement("div");wrap.id="flowwrap";wrap.appendChild(svg);v.appendChild(wrap);
+  const wrap=document.createElement("div");wrap.id="flowwrap";
+  wrap.style.width=W+"px";wrap.style.height=H+"px";
+  wrap.appendChild(svg);
+
+  // node boxes: title (name + agent icon) + tiny live pane
+  function box(s){
+    const p=pos[s.name];
+    const ag=s.agent||{glyph:"",label:""};
+    const d=document.createElement("div");
+    d.className="fbox"+(hot(s)?" hot":"")+(s.live?"":" dead");
+    d.style.left=p.x+"px";d.style.top=p.y+"px";d.style.width=BW+"px";
+    const agtxt=s.live?((ag.glyph?ag.glyph+" ":"")+(ag.label||"—")):"gone";
+    const title='<div class="ftitle"><span class="dot '+(s.live?"live":"stale")+'"></span>'
+      +'<span class="nm">'+s.name+'</span><span class="ag">'+agtxt+'</span></div>';
+    const pre=document.createElement("pre");
+    if(s.live&&s.content.trim())pre.textContent=s.content.replace(/\s+$/,"").split("\n").slice(-9).join("\n");
+    else{pre.className="empty";pre.textContent=s.live?"(blank pane)":"tmux session gone";}
+    d.innerHTML=title;d.appendChild(pre);
+    d.onclick=()=>openChat(s);
+    wrap.appendChild(d);
+  }
+  [...connected].forEach(n=>box(byKey[n]));
+  unconnected.forEach(box);
+
+  v.appendChild(wrap);
   const hint=document.createElement("div");hint.id="flowhint";
-  hint.innerHTML="arrows = agent manages agent, declared in the registry: <code>emux register &lt;name&gt; &lt;session&gt; --manages &lt;other&gt;</code>. orchestrators on top, the agents they drive below.";
+  hint.innerHTML="each box is a live tmux pane; title shows the session + detected AI. arrows = agent manages agent (<code>emux register &lt;name&gt; &lt;session&gt; --manages &lt;other&gt;</code>) — orchestrators on top, the agents they drive below.";
   v.appendChild(hint);
 }
 
