@@ -518,6 +518,34 @@ body::after{
   background:var(--amber);color:#160f00;border:none;padding:4px 16px;cursor:pointer;
   box-shadow:0 0 14px rgba(255,176,0,.5);z-index:5;
 }
+/* zoom-in steer modal */
+#modal{position:fixed;inset:0;z-index:200;display:none;align-items:center;justify-content:center}
+#modal.open{display:flex}
+#modalback{position:absolute;inset:0;background:rgba(6,4,2,.72);backdrop-filter:blur(2px)}
+#modalpanel{
+  position:relative;width:min(900px,86vw);height:min(620px,82vh);display:flex;flex-direction:column;
+  background:var(--bg-raise);border:1px solid var(--amber-dim);box-shadow:0 0 50px rgba(255,176,0,.18);
+  animation:zoomin .16s ease-out;
+}
+@keyframes zoomin{from{transform:scale(.92);opacity:.4}to{transform:scale(1);opacity:1}}
+#modalhead{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--line);background:var(--bg-card)}
+#modalhead .nm{font-family:"VT323",monospace;font-size:24px;color:var(--amber);letter-spacing:1px}
+#modalhead .ag{color:var(--amber-dim);font-size:12px;letter-spacing:1px}
+#modalhead .st{margin-left:auto;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim)}
+#modalclose{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:14px;cursor:pointer;padding:2px 11px;margin-left:10px}
+#modalclose:hover{color:var(--amber);border-color:var(--amber-dim)}
+#modalscreen{
+  flex:1;overflow-y:auto;font:12.5px/1.45 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
+  white-space:pre-wrap;word-break:break-word;padding:14px 16px;background:#080705;
+}
+#modalchips{display:flex;gap:8px;padding:10px 16px 0}
+#modalrow{display:flex;gap:10px;padding:10px 16px 14px}
+#modalinput{flex:1;background:#080705;border:1px solid var(--line);color:var(--text);
+  font:14px "IBM Plex Mono",monospace;padding:11px 14px;outline:none;caret-color:var(--amber)}
+#modalinput:focus{border-color:var(--amber-dim);box-shadow:0 0 12px rgba(255,176,0,.1)}
+#modalsend{font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:0 24px;
+  background:var(--amber);color:#160f00;border:none;cursor:pointer}
+#modalsend:hover{box-shadow:0 0 18px rgba(255,176,0,.5)}
 ::-webkit-scrollbar{width:8px}
 ::-webkit-scrollbar-thumb{background:var(--amber-faint)}
 ::-webkit-scrollbar-track{background:transparent}
@@ -561,11 +589,36 @@ body::after{
     </div>
   </div>
 </main>
+<div id="modal">
+  <div id="modalback"></div>
+  <div id="modalpanel">
+    <div id="modalhead">
+      <span class="dot live"></span>
+      <span class="nm" id="modalname"></span>
+      <span class="ag" id="modalagent"></span>
+      <span class="st" id="modalstatus">live</span>
+      <button id="modalclose">✕ close</button>
+    </div>
+    <div id="modalscreen"></div>
+    <div id="modalchips">
+      <button class="chip" data-keys="C-c">^C</button>
+      <button class="chip" data-keys="Escape">ESC</button>
+      <button class="chip" data-keys="Enter">⏎</button>
+      <button class="chip" data-keys="Up">↑</button>
+      <button class="chip" data-keys="Tab">TAB</button>
+    </div>
+    <div id="modalrow">
+      <input id="modalinput" placeholder="prompt / steer this session… (Enter sends)" autocomplete="off" spellcheck="false">
+      <button id="modalsend">SEND</button>
+    </div>
+  </div>
+</div>
 <script>
 const $=s=>document.querySelector(s);
 const SVGNS="http://www.w3.org/2000/svg";
 let mode="grid", current=null, grid=[], chatTimer=null, gridTimer=null, screenEl=null;
 let filterStr="", flashOn=false;
+let flowSig=null, flowPre={}, flowBox={};   // flow view: rebuild only on topology change, else update panes in place
 const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW"};
 
 async function api(path,opts){const r=await fetch(path,opts);return r.json();}
@@ -603,7 +656,7 @@ function setMode(m){
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.mode===m));
   document.querySelectorAll(".card").forEach(el=>el.classList.toggle("active",!!(current&&el.dataset.name===current.name)));
   clearInterval(chatTimer);chatTimer=null;
-  if(m!=="chat"){$("#title").textContent=m;$("#views").innerHTML="";render();}
+  if(m!=="chat"){$("#title").textContent=m;$("#views").innerHTML="";flowSig=null;render();}
 }
 document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setMode(t.dataset.mode));
 
@@ -646,7 +699,7 @@ function renderSidebar(){
     d.innerHTML='<div class="nm"><span class="dot '+(s.live?"live":"stale")+'"></span>'+s.name+att+'</div>'
       +'<div class="sub">→ '+s.session+(up?" · "+up:"")+(s.description?" — "+s.description:"")+'</div>'
       +'<div class="badges">'+badges+'</div>';
-    d.onclick=()=>openChat(s);
+    d.onclick=()=>openModal(s);
     box.appendChild(d);
   });
   document.querySelectorAll(".tagjump").forEach(el=>el.onclick=ev=>{   // clickable tags (#8)
@@ -671,7 +724,7 @@ function makeTile(s){
     p.className="empty";p.textContent=s.live?"(blank pane)":"tmux session gone";
   }
   t.appendChild(h);t.appendChild(p);
-  t.onclick=()=>openChat(s);
+  t.onclick=()=>openModal(s);
   return t;
 }
 
@@ -729,7 +782,7 @@ function renderActivity(){
     const age=document.createElement("div");age.className="age "+(s.live?ageClass(s.last_change_age):"t-old");
     age.textContent=s.live?("active "+ageLabel(s.last_change_age)):"gone";
     row.appendChild(nm);row.appendChild(cells);row.appendChild(age);
-    row.onclick=()=>openChat(s);
+    row.onclick=()=>openModal(s);
     wrap.appendChild(row);
   });
   v.appendChild(wrap);
@@ -737,9 +790,25 @@ function renderActivity(){
 
 function el(tag,attrs){const e=document.createElementNS(SVGNS,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);return e;}
 
+function paneText(s){return (s.live&&s.content.trim())?s.content.replace(/\s+$/,"").split("\n").slice(-9).join("\n"):"";}
+function agentText(s){const ag=s.agent||{};return s.live?((ag.glyph?ag.glyph+" ":"")+(ag.label||"—")):"gone";}
+
+// Update flow boxes in place (no DOM teardown) — keeps the panes LIVE and smooth.
+function updateFlowPanes(){
+  grid.forEach(s=>{
+    const d=flowBox[s.name], pre=flowPre[s.name];
+    if(!d||!pre)return;
+    d.className="fbox"+(hot(s)?" hot":"")+(s.live?"":" dead");
+    const ag=d.querySelector(".ag");if(ag)ag.textContent=agentText(s);
+    const txt=paneText(s);
+    if(txt){pre.className="";if(pre.textContent!==txt)pre.textContent=txt;}
+    else{pre.className="empty";pre.textContent=s.live?"(blank pane)":"tmux session gone";}
+  });
+}
+
 function renderFlow(){
-  const v=$("#views");v.innerHTML="";
-  if(!grid.length){v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';return;}
+  const v=$("#views");
+  if(!grid.length){flowSig=null;v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';return;}
   // resolve manage targets by registry name OR underlying tmux session name
   const byKey={};grid.forEach(s=>{byKey[s.name]=s;if(!(s.session in byKey))byKey[s.session]=s;});
   const children=new Map(),indeg=new Map();
@@ -766,6 +835,16 @@ function renderFlow(){
   [...connected].forEach(n=>{if(!level.has(n))level.set(n,0);});
   const maxLvl=Math.max(0,...[...level.values()]);
   const unconnected=grid.filter(s=>!connected.has(s.name));
+
+  // Topology signature: rebuild the DOM only when the structure changes;
+  // otherwise just stream new pane content into the existing boxes.
+  const sig=JSON.stringify([
+    [...connected].sort(), unconnected.map(s=>s.name).sort(),
+    edges.map(e=>e.join(">")).sort(), [...level.entries()].sort(),
+  ]);
+  if(sig===flowSig && document.getElementById("flowwrap")){updateFlowPanes();return;}
+  flowSig=sig;flowPre={};flowBox={};
+  v.innerHTML="";
 
   // Each node is a live mini-pane box (title + tiny tmux preview), laid out by
   // level. Boxes are HTML positioned over an SVG edge layer.
@@ -806,18 +885,17 @@ function renderFlow(){
   // node boxes: title (name + agent icon) + tiny live pane
   function box(s){
     const p=pos[s.name];
-    const ag=s.agent||{glyph:"",label:""};
     const d=document.createElement("div");
     d.className="fbox"+(hot(s)?" hot":"")+(s.live?"":" dead");
     d.style.left=p.x+"px";d.style.top=p.y+"px";d.style.width=BW+"px";
-    const agtxt=s.live?((ag.glyph?ag.glyph+" ":"")+(ag.label||"—")):"gone";
     const title='<div class="ftitle"><span class="dot '+(s.live?"live":"stale")+'"></span>'
-      +'<span class="nm">'+s.name+'</span><span class="ag">'+agtxt+'</span></div>';
+      +'<span class="nm">'+s.name+'</span><span class="ag">'+agentText(s)+'</span></div>';
     const pre=document.createElement("pre");
-    if(s.live&&s.content.trim())pre.textContent=s.content.replace(/\s+$/,"").split("\n").slice(-9).join("\n");
-    else{pre.className="empty";pre.textContent=s.live?"(blank pane)":"tmux session gone";}
+    const txt=paneText(s);
+    if(txt)pre.textContent=txt;else{pre.className="empty";pre.textContent=s.live?"(blank pane)":"tmux session gone";}
     d.innerHTML=title;d.appendChild(pre);
-    d.onclick=()=>openChat(s);
+    d.onclick=()=>openModal(s);                 // click a box → zoom-in modal to steer it
+    flowBox[s.name]=d;flowPre[s.name]=pre;
     wrap.appendChild(d);
   }
   [...connected].forEach(n=>box(byKey[n]));
@@ -825,7 +903,7 @@ function renderFlow(){
 
   v.appendChild(wrap);
   const hint=document.createElement("div");hint.id="flowhint";
-  hint.innerHTML="each box is a live tmux pane; title shows the session + detected AI. arrows = agent manages agent (<code>emux register &lt;name&gt; &lt;session&gt; --manages &lt;other&gt;</code>) — orchestrators on top, the agents they drive below.";
+  hint.innerHTML="each box is a live tmux pane (click to zoom in & steer); title shows the session + detected AI. arrows = agent manages agent (<code>emux register &lt;name&gt; &lt;session&gt; --manages &lt;other&gt;</code>) — orchestrators on top, the agents they drive below.";
   v.appendChild(hint);
 }
 
@@ -916,7 +994,7 @@ $("#wrapchip").onclick=()=>{
 
 $("#send").onclick=sendText;
 $("#input").addEventListener("keydown",e=>{if(e.key==="Enter")sendText();});
-document.querySelectorAll(".chip").forEach(ch=>{
+document.querySelectorAll("#chips .chip").forEach(ch=>{
   if(ch.id==="wrapchip")return;
   ch.onclick=async()=>{
     if(!current)return;
@@ -940,16 +1018,60 @@ $("#jump").onclick=scrollBottom;
 $("#chat").addEventListener("scroll",()=>{if(pinned())$("#jump").style.display="none";});
 // sidebar filter (#7)
 $("#filter").addEventListener("input",e=>{filterStr=e.target.value.toLowerCase();renderSidebar();if(mode!=="chat")render();});
-// keyboard: 1-4 switch views, Esc leaves chat (#5)
+// ---------- zoom-in steer modal ----------
+let modalSession=null, modalTimer=null;
+function openModal(s){
+  modalSession=s;
+  $("#modalname").textContent=s.name;
+  $("#modalagent").textContent=agentText(s);
+  $("#modalstatus").textContent="connecting…";$("#modalstatus").style.color="";
+  const sc=$("#modalscreen");sc.textContent="";sc.dataset.last="";
+  $("#modal").classList.add("open");
+  modalRefresh();clearInterval(modalTimer);modalTimer=setInterval(modalRefresh,1200);
+  setTimeout(()=>$("#modalinput").focus(),40);
+}
+function closeModal(){
+  $("#modal").classList.remove("open");
+  clearInterval(modalTimer);modalTimer=null;modalSession=null;
+}
+async function modalRefresh(){
+  if(!modalSession)return;
+  const sc=$("#modalscreen");const atBottom=sc.scrollHeight-sc.scrollTop-sc.clientHeight<60;
+  try{
+    const r=await api("/api/capture?session="+encodeURIComponent(modalSession.session)+"&lines=400");
+    if(r.ok){
+      $("#modalstatus").textContent="live";$("#modalstatus").style.color="";
+      if(sc.dataset.last!==r.content){
+        sc.dataset.last=r.content;sc.textContent=r.content.replace(/\s+$/,"")+"\n";
+        const cur=document.createElement("span");cur.className="cursorblock";sc.appendChild(cur);
+        if(atBottom)sc.scrollTop=sc.scrollHeight;
+      }
+    }else{$("#modalstatus").textContent=r.error||"error";$("#modalstatus").style.color="var(--stale)";}
+  }catch(e){$("#modalstatus").textContent="unreachable";$("#modalstatus").style.color="var(--stale)";}
+}
+async function modalKeys(keys,literal,enter){
+  if(!modalSession)return;
+  await api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session:modalSession.session,keys,literal,enter})});
+  setTimeout(modalRefresh,250);
+}
+function modalSubmit(){const i=$("#modalinput");if(i.value){modalKeys(i.value,true,true);i.value="";}}
+$("#modalsend").onclick=modalSubmit;
+$("#modalinput").addEventListener("keydown",e=>{if(e.key==="Enter")modalSubmit();});
+$("#modalclose").onclick=closeModal;
+$("#modalback").onclick=closeModal;
+document.querySelectorAll("#modalchips .chip").forEach(ch=>ch.onclick=()=>modalKeys(ch.dataset.keys,false,false));
+
+// keyboard: Esc closes the modal first; otherwise 1-4 switch views
 document.addEventListener("keydown",e=>{
-  if(e.target.id==="filter"||e.target.id==="input")return;
+  if($("#modal").classList.contains("open")){if(e.key==="Escape")closeModal();return;}
+  if(e.target.id==="filter"||e.target.id==="input"||e.target.id==="modalinput")return;
   const map={"1":"grid","2":"groups","3":"activity","4":"flow"};
   if(map[e.key])setMode(map[e.key]);
-  else if(e.key==="Escape"&&mode==="chat")setMode(localStorage.getItem("emux_view")||"grid");
 });
 // resume + clear title flash when tab refocuses (#13 #20)
 document.addEventListener("visibilitychange",()=>{
-  if(!document.hidden){flashOn=false;poll();if(current)refreshScreen();}
+  if(!document.hidden){flashOn=false;poll();if(modalSession)modalRefresh();}
 });
 
 setMode(localStorage.getItem("emux_view")||"grid");   // restore last view (#6)
