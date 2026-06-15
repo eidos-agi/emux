@@ -16,7 +16,7 @@
     "target_id": "emux-web:010-pytest-suite",
     "target": "The Python surface (session listing, capture/send payloads, change detection, agent detection, HTTP routing + guards, grid cache/eviction, cycle data) is covered by automated tests.",
     "probe": "uv run pytest -q --junitxml -> 41 passed.",
-    "delta": "All green, but every tmux call is monkeypatched — these prove logic, not real tmux behavior or any browser rendering.",
+    "delta": "All green, but every tmux call is monkeypatched \u2014 these prove logic, not real tmux behavior or any browser rendering.",
     "class": "pass_controlled_harness",
     "evidence": ".converge/pytest-rows.json (41 rows); /tmp/emux-junit.xml",
     "next_action": "Keep green; do not let this stand in for real-surface proof of capture/send/render.",
@@ -27,7 +27,11 @@
       "environment": "ci/local-unit",
       "surface": "pytest with mocked _run_tmux/_live_sessions/_pane_command",
       "captured_at": "2026-06-15",
-      "bypassed_controls": ["real tmux server", "real pane content", "real browser DOM/JS"],
+      "bypassed_controls": [
+        "real tmux server",
+        "real pane content",
+        "real browser DOM/JS"
+      ],
       "fails_to_test": [
         "flow view renders without hanging in a real browser",
         "send-keys actually reaches a live pane",
@@ -40,7 +44,7 @@
     "target_id": "emux-web:020-flow-live-panes",
     "target": "The flow view renders each session as a LIVE mini tmux pane in the manages hierarchy, streaming in place without flicker.",
     "probe": "Loaded FLOW at http://127.0.0.1:8689 with a real boss->{lead-a,lead-b}->{worker,worker2} tree; panes updated in place.",
-    "delta": "Proven once, by eye, in this session — no repeatable artifact or assertion.",
+    "delta": "Proven once, by eye, in this session \u2014 no repeatable artifact or assertion.",
     "class": "pass_real_surface",
     "evidence": "browser screenshots ss_92733pc9e, ss_5610kw1rz (2026-06-15)",
     "next_action": "Capture a re-runnable browser proof (Playwright/claude-in-chrome script) that asserts N .fbox elements with non-empty live content and no console errors.",
@@ -53,65 +57,11 @@
       "base_origin": "http://127.0.0.1:8689",
       "captured_at": "2026-06-15",
       "freshness_days": 7,
-      "fails_to_test": ["repeatable assertion", "behavior under many sessions", "behavior when a pane dies mid-view"]
-    }
-  },
-  {
-    "target_id": "emux-web:021-click-zoom-steer",
-    "target": "Clicking a flow box opens a zoom-in modal whose input sends real keystrokes into that tmux session.",
-    "probe": "Clicked demo-boss -> modal showed live Claude Code TUI; typed print(6*7) into a python REPL session -> the real pane returned 42.",
-    "delta": "Manual one-shot; not encoded as a test.",
-    "class": "pass_real_surface",
-    "evidence": "browser screenshots ss_2445ziaaj, ss_9535061oq (2026-06-15)",
-    "next_action": "Add a scripted browser proof: open modal, POST /api/send a marker command, assert the marker appears in /api/capture.",
-    "adapter": "human:browser",
-    "convergence_style": "consensus_evidence",
-    "required": true,
-    "proof_envelope": {
-      "environment": "local-daemon",
-      "surface": "browser modal + /api/send + /api/capture",
-      "base_origin": "http://127.0.0.1:8689",
-      "captured_at": "2026-06-15",
-      "side_effects": ["typed `print(6*7)` into the demo-worker2 tmux session"],
-      "fails_to_test": ["control-key chips (^C/ESC/Tab) reaching the pane", "send to a full-screen TUI vs a shell"]
-    }
-  },
-  {
-    "target_id": "emux-web:022-agent-detection-real",
-    "target": "Each box's icon reflects the AI/tool actually running, read from the live pane.",
-    "probe": "Ran real CLIs: demo-boss->Claude Code, demo-lead-b->Gemini, demo-worker->Hermes detected; codex exited so its box honestly showed `$ shell`.",
-    "delta": "Detection mixes pane_current_command (primary) and content signatures (fallback); content sigs are heuristic and only spot-checked.",
-    "class": "pass_real_surface",
-    "evidence": "curl /api/grid output 2026-06-15; pane_current_command probe (top/python3.12 confirmed)",
-    "next_action": "Expand _AGENT_TABLE coverage and add a fixture-based test for content-signature detection on representative TUI banners.",
-    "adapter": "human:browser",
-    "convergence_style": "tolerance_band",
-    "required": false,
-    "proof_envelope": {
-      "environment": "local-daemon",
-      "surface": "tmux pane_current_command + pane content",
-      "base_origin": "http://127.0.0.1:8689",
-      "captured_at": "2026-06-15",
-      "fails_to_test": ["node-wrapped CLIs that share generic banners", "agents that change identity mid-session"]
-    }
-  },
-  {
-    "target_id": "emux-web:030-csrf-host-guard",
-    "target": "The API rejects foreign Host headers (DNS-rebind) and cross-origin POST /api/send (CSRF); localhost is treated as not-a-boundary.",
-    "probe": "curl with Host: evil.example -> 403; cross-origin Origin POST -> 403; normal grid -> 200.",
-    "delta": "Verified live via curl AND covered by harness tests — strong here.",
-    "class": "pass_real_surface",
-    "evidence": "curl checks 2026-06-15; tests test_http_rejects_foreign_host / test_http_send_rejects_cross_origin",
-    "next_action": "Hold. Revisit only if an auth layer or non-localhost bind is added.",
-    "adapter": "human:browser",
-    "convergence_style": "regression_hardening",
-    "required": true,
-    "proof_envelope": {
-      "environment": "local-daemon",
-      "surface": "HTTP /api/* and /api/send guards",
-      "base_origin": "http://127.0.0.1:8689",
-      "captured_at": "2026-06-15",
-      "fails_to_test": ["there is still NO authentication — anyone who can reach the port and forge Host can drive sessions"]
+      "fails_to_test": [
+        "repeatable assertion",
+        "behavior under many sessions",
+        "behavior when a pane dies mid-view"
+      ]
     }
   },
   {
@@ -178,8 +128,14 @@
       "environment": "string-generation only",
       "surface": "launchd plist text",
       "captured_at": "2026-06-15",
-      "bypassed_controls": ["never loaded into launchd", "never reboot-tested"],
-      "fails_to_test": ["RunAtLoad on real login", "KeepAlive restart on crash"]
+      "bypassed_controls": [
+        "never loaded into launchd",
+        "never reboot-tested"
+      ],
+      "fails_to_test": [
+        "RunAtLoad on real login",
+        "KeepAlive restart on crash"
+      ]
     }
   },
   {
@@ -197,7 +153,9 @@
       "environment": "local-unit + manual browser",
       "surface": "grid_payload data + manual flow render",
       "captured_at": "2026-06-15",
-      "fails_to_test": ["automated assertion that the JS BFS guard terminates"]
+      "fails_to_test": [
+        "automated assertion that the JS BFS guard terminates"
+      ]
     }
   }
 ]

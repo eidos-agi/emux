@@ -8,12 +8,17 @@
   ],
   "row_files": [
     ".converge/converge-rows.json",
-    ".converge/pytest-rows.json"
+    ".converge/pytest-rows.json",
+    ".converge/real-surface-rows.json"
   ],
   "contracts": [],
   "proofs": [],
-  "next_command": "uv run pytest -q && emux web (manual real-surface checks at http://127.0.0.1:8689)",
-  "replay_commands": {},
+  "next_command": "python3 .converge/real_surface_probe.py  # real-surface; then uv run pytest -q  # harness",
+  "replay_commands": {
+    "emux-web:021-click-zoom-steer": "python3 .converge/real_surface_probe.py",
+    "emux-web:022-agent-detection-real": "python3 .converge/real_surface_probe.py",
+    "emux-web:030-csrf-host-guard": "python3 .converge/real_surface_probe.py"
+  },
   "artifact_retention": {
     "archive_after_days": 90,
     "mode": "plan_by_default"

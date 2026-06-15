@@ -1,12 +1,12 @@
 # Converge Closeout
 
-Captured: 2026-06-15T18:54:49Z
+Captured: 2026-06-15T18:59:11Z
 State: in_progress
 
 ## Score
 
-- score: 0.06382978723404255
-- qualified_score: 0.9574468085106383
+- score: 0.10204081632653061
+- qualified_score: 0.9591836734693877
 - regression_count: 0
 - drift_count: 0
 - doctor_ok: True

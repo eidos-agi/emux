@@ -1,6 +1,6 @@
 {
-  "score": 0.06382978723404255,
-  "qualified_score": 0.9574468085106383,
+  "score": 0.10204081632653061,
+  "qualified_score": 0.9591836734693877,
   "current_rows": [
     {
       "target_id": "emux-web:000-north-star",
@@ -92,60 +92,55 @@
     {
       "target_id": "emux-web:021-click-zoom-steer",
       "class": "pass_real_surface",
-      "target": "Clicking a flow box opens a zoom-in modal whose input sends real keystrokes into that tmux session.",
-      "probe": "Clicked demo-boss -> modal showed live Claude Code TUI; typed print(6*7) into a python REPL session -> the real pane returned 42.",
-      "delta": "Manual one-shot; not encoded as a test.",
-      "evidence": "browser screenshots ss_2445ziaaj, ss_9535061oq (2026-06-15)",
-      "next_action": "Add a scripted browser proof: open modal, POST /api/send a marker command, assert the marker appears in /api/capture.",
-      "adapter": "human:browser",
-      "source_file": ".converge/converge-rows.json",
+      "target": "Keystrokes sent via /api/send reach the real tmux pane and are observable via /api/capture.",
+      "probe": "POST /api/send marker CONVERGE_80247_1781549915 -> GET /api/capture",
+      "delta": "",
+      "evidence": "marker observed in live pane",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+      "adapter": "converge:real-surface-probe",
+      "source_file": ".converge/real-surface-rows.json",
       "weight": 1.0,
       "proof_envelope": {
-        "environment": "local-daemon",
-        "surface": "browser modal + /api/send + /api/capture",
-        "base_origin": "http://127.0.0.1:8689",
+        "environment": "real daemon + real tmux",
+        "surface": "live HTTP API + tmux server",
+        "base_origin": "http://127.0.0.1:8699",
         "captured_at": "2026-06-15",
-        "side_effects": [
-          "typed `print(6*7)` into the demo-worker2 tmux session"
-        ],
+        "freshness_days": 7,
         "fails_to_test": [
-          "control-key chips (^C/ESC/Tab) reaching the pane",
-          "send to a full-screen TUI vs a shell"
+          "browser modal DOM rendering",
+          "control-key chips (^C/ESC/Tab)"
         ]
       },
       "fails_to_test": [
-        "control-key chips (^C/ESC/Tab) reaching the pane",
-        "send to a full-screen TUI vs a shell"
+        "browser modal DOM rendering",
+        "control-key chips (^C/ESC/Tab)"
       ],
       "bypassed_controls": [],
-      "side_effects": [
-        "typed `print(6*7)` into the demo-worker2 tmux session"
-      ]
+      "side_effects": []
     },
     {
       "target_id": "emux-web:022-agent-detection-real",
       "class": "pass_real_surface",
-      "target": "Each box's icon reflects the AI/tool actually running, read from the live pane.",
-      "probe": "Ran real CLIs: demo-boss->Claude Code, demo-lead-b->Gemini, demo-worker->Hermes detected; codex exited so its box honestly showed `$ shell`.",
-      "delta": "Detection mixes pane_current_command (primary) and content signatures (fallback); content sigs are heuristic and only spot-checked.",
-      "evidence": "curl /api/grid output 2026-06-15; pane_current_command probe (top/python3.12 confirmed)",
-      "next_action": "Expand _AGENT_TABLE coverage and add a fixture-based test for content-signature detection on representative TUI banners.",
-      "adapter": "human:browser",
-      "source_file": ".converge/converge-rows.json",
+      "target": "Agent detection reflects the real foreground process (a python process is detected as python).",
+      "probe": "start python in pane -> GET /api/grid agent.label",
+      "delta": "",
+      "evidence": "detected agent label = 'python3.12'",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+      "adapter": "converge:real-surface-probe",
+      "source_file": ".converge/real-surface-rows.json",
       "weight": 1.0,
       "proof_envelope": {
-        "environment": "local-daemon",
-        "surface": "tmux pane_current_command + pane content",
-        "base_origin": "http://127.0.0.1:8689",
+        "environment": "real daemon + real tmux",
+        "surface": "live HTTP API + tmux server",
+        "base_origin": "http://127.0.0.1:8699",
         "captured_at": "2026-06-15",
+        "freshness_days": 7,
         "fails_to_test": [
-          "node-wrapped CLIs that share generic banners",
-          "agents that change identity mid-session"
+          "node-wrapped CLIs (Claude/Gemini) rely on content signatures, proven only manually"
         ]
       },
       "fails_to_test": [
-        "node-wrapped CLIs that share generic banners",
-        "agents that change identity mid-session"
+        "node-wrapped CLIs (Claude/Gemini) rely on content signatures, proven only manually"
       ],
       "bypassed_controls": [],
       "side_effects": []
@@ -153,25 +148,26 @@
     {
       "target_id": "emux-web:030-csrf-host-guard",
       "class": "pass_real_surface",
-      "target": "The API rejects foreign Host headers (DNS-rebind) and cross-origin POST /api/send (CSRF); localhost is treated as not-a-boundary.",
-      "probe": "curl with Host: evil.example -> 403; cross-origin Origin POST -> 403; normal grid -> 200.",
-      "delta": "Verified live via curl AND covered by harness tests \u2014 strong here.",
-      "evidence": "curl checks 2026-06-15; tests test_http_rejects_foreign_host / test_http_send_rejects_cross_origin",
-      "next_action": "Hold. Revisit only if an auth layer or non-localhost bind is added.",
-      "adapter": "human:browser",
-      "source_file": ".converge/converge-rows.json",
+      "target": "API rejects foreign Host (DNS-rebind) and cross-origin POST (CSRF).",
+      "probe": "GET /api/sessions Host:evil -> ; POST /api/send Origin:evil ->",
+      "delta": "",
+      "evidence": "foreign-host status=403, cross-origin status=403 (want 403/403)",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+      "adapter": "converge:real-surface-probe",
+      "source_file": ".converge/real-surface-rows.json",
       "weight": 1.0,
       "proof_envelope": {
-        "environment": "local-daemon",
-        "surface": "HTTP /api/* and /api/send guards",
-        "base_origin": "http://127.0.0.1:8689",
+        "environment": "real daemon + real tmux",
+        "surface": "live HTTP API + tmux server",
+        "base_origin": "http://127.0.0.1:8699",
         "captured_at": "2026-06-15",
+        "freshness_days": 7,
         "fails_to_test": [
-          "there is still NO authentication \u2014 anyone who can reach the port and forge Host can drive sessions"
+          "no authentication: a forged matching Host still works"
         ]
       },
       "fails_to_test": [
-        "there is still NO authentication \u2014 anyone who can reach the port and forge Host can drive sessions"
+        "no authentication: a forged matching Host still works"
       ],
       "bypassed_controls": [],
       "side_effects": []
@@ -295,6 +291,77 @@
       },
       "fails_to_test": [
         "automated assertion that the JS BFS guard terminates"
+      ],
+      "bypassed_controls": [],
+      "side_effects": []
+    },
+    {
+      "target_id": "emux-web:rs-grid-capture",
+      "class": "pass_real_surface",
+      "target": "/api/grid returns the live session with a real pane capture.",
+      "probe": "GET http://127.0.0.1:8699/api/grid -> session 'converge-probe'",
+      "delta": "",
+      "evidence": "session present live=True, has content key=True",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+      "adapter": "converge:real-surface-probe",
+      "source_file": ".converge/real-surface-rows.json",
+      "weight": 1.0,
+      "proof_envelope": {
+        "environment": "real daemon + real tmux",
+        "surface": "live HTTP API + tmux server",
+        "base_origin": "http://127.0.0.1:8699",
+        "captured_at": "2026-06-15",
+        "freshness_days": 7
+      },
+      "fails_to_test": [],
+      "bypassed_controls": [],
+      "side_effects": []
+    },
+    {
+      "target_id": "emux-web:rs-healthz",
+      "class": "pass_real_surface",
+      "target": "Daemon answers /healthz.",
+      "probe": "GET http://127.0.0.1:8699/healthz",
+      "delta": "",
+      "evidence": "healthz ok, version reported, converge-probe among live",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+      "adapter": "converge:real-surface-probe",
+      "source_file": ".converge/real-surface-rows.json",
+      "weight": 1.0,
+      "proof_envelope": {
+        "environment": "real daemon + real tmux",
+        "surface": "live HTTP API + tmux server",
+        "base_origin": "http://127.0.0.1:8699",
+        "captured_at": "2026-06-15",
+        "freshness_days": 7
+      },
+      "fails_to_test": [],
+      "bypassed_controls": [],
+      "side_effects": []
+    },
+    {
+      "target_id": "emux-web:rs-ui-served",
+      "class": "pass_real_surface",
+      "target": "GET / serves the UI shell (brand, flow boxes, steer modal markup).",
+      "probe": "GET http://127.0.0.1:8699/",
+      "delta": "",
+      "evidence": "status=200, contains EMUX/fbox/modal markup=True",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+      "adapter": "converge:real-surface-probe",
+      "source_file": ".converge/real-surface-rows.json",
+      "weight": 1.0,
+      "proof_envelope": {
+        "environment": "real daemon + real tmux",
+        "surface": "live HTTP API + tmux server",
+        "base_origin": "http://127.0.0.1:8699",
+        "captured_at": "2026-06-15",
+        "freshness_days": 7,
+        "fails_to_test": [
+          "this proves the HTML/JS is delivered, NOT that it renders \u2014 see browser-render gap"
+        ]
+      },
+      "fails_to_test": [
+        "this proves the HTML/JS is delivered, NOT that it renders \u2014 see browser-render gap"
       ],
       "bypassed_controls": [],
       "side_effects": []
@@ -1367,18 +1434,18 @@
     }
   ],
   "weighted_totals": {
-    "pass": 3.0,
+    "pass": 5.0,
     "qualified_pass": 42.0,
     "fail": 1.0,
     "blocked": 1.0,
     "skip": 0.0,
-    "total": 47.0
+    "total": 49.0
   },
   "class_counts": {
     "match": 0,
     "rounding": 0,
     "pass": 0,
-    "pass_real_surface": 4,
+    "pass_real_surface": 7,
     "pass_controlled_harness": 43,
     "pass_with_bypass": 1,
     "miss_small": 0,
@@ -1391,7 +1458,7 @@
     "skip": 0
   },
   "proof_surface_counts": {
-    "real_surface": 3,
+    "real_surface": 5,
     "controlled_harness": 42,
     "with_bypass": 0
   },
@@ -2578,98 +2645,61 @@
     {
       "target_id": "emux-web:021-click-zoom-steer",
       "class": "pass_real_surface",
-      "target": "Clicking a flow box opens a zoom-in modal whose input sends real keystrokes into that tmux session.",
-      "probe": "Clicked demo-boss -> modal showed live Claude Code TUI; typed print(6*7) into a python REPL session -> the real pane returned 42.",
-      "delta": "Manual one-shot; not encoded as a test.",
-      "evidence": "browser screenshots ss_2445ziaaj, ss_9535061oq (2026-06-15)",
-      "next_action": "Add a scripted browser proof: open modal, POST /api/send a marker command, assert the marker appears in /api/capture.",
-      "adapter": "human:browser",
-      "source_file": ".converge/converge-rows.json",
+      "target": "Keystrokes sent via /api/send reach the real tmux pane and are observable via /api/capture.",
+      "probe": "POST /api/send marker CONVERGE_80247_1781549915 -> GET /api/capture",
+      "delta": "",
+      "evidence": "marker observed in live pane",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+      "adapter": "converge:real-surface-probe",
+      "source_file": ".converge/real-surface-rows.json",
       "weight": 1.0,
       "proof_envelope": {
-        "environment": "local-daemon",
-        "surface": "browser modal + /api/send + /api/capture",
-        "base_origin": "http://127.0.0.1:8689",
+        "environment": "real daemon + real tmux",
+        "surface": "live HTTP API + tmux server",
+        "base_origin": "http://127.0.0.1:8699",
         "captured_at": "2026-06-15",
-        "side_effects": [
-          "typed `print(6*7)` into the demo-worker2 tmux session"
-        ],
+        "freshness_days": 7,
         "fails_to_test": [
-          "control-key chips (^C/ESC/Tab) reaching the pane",
-          "send to a full-screen TUI vs a shell"
+          "browser modal DOM rendering",
+          "control-key chips (^C/ESC/Tab)"
         ]
       },
       "fails_to_test": [
-        "control-key chips (^C/ESC/Tab) reaching the pane",
-        "send to a full-screen TUI vs a shell"
+        "browser modal DOM rendering",
+        "control-key chips (^C/ESC/Tab)"
       ],
       "bypassed_controls": [],
-      "side_effects": [
-        "typed `print(6*7)` into the demo-worker2 tmux session"
-      ]
+      "side_effects": []
     },
     {
       "target_id": "emux-web:030-csrf-host-guard",
       "class": "pass_real_surface",
-      "target": "The API rejects foreign Host headers (DNS-rebind) and cross-origin POST /api/send (CSRF); localhost is treated as not-a-boundary.",
-      "probe": "curl with Host: evil.example -> 403; cross-origin Origin POST -> 403; normal grid -> 200.",
-      "delta": "Verified live via curl AND covered by harness tests \u2014 strong here.",
-      "evidence": "curl checks 2026-06-15; tests test_http_rejects_foreign_host / test_http_send_rejects_cross_origin",
-      "next_action": "Hold. Revisit only if an auth layer or non-localhost bind is added.",
-      "adapter": "human:browser",
-      "source_file": ".converge/converge-rows.json",
+      "target": "API rejects foreign Host (DNS-rebind) and cross-origin POST (CSRF).",
+      "probe": "GET /api/sessions Host:evil -> ; POST /api/send Origin:evil ->",
+      "delta": "",
+      "evidence": "foreign-host status=403, cross-origin status=403 (want 403/403)",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+      "adapter": "converge:real-surface-probe",
+      "source_file": ".converge/real-surface-rows.json",
       "weight": 1.0,
       "proof_envelope": {
-        "environment": "local-daemon",
-        "surface": "HTTP /api/* and /api/send guards",
-        "base_origin": "http://127.0.0.1:8689",
+        "environment": "real daemon + real tmux",
+        "surface": "live HTTP API + tmux server",
+        "base_origin": "http://127.0.0.1:8699",
         "captured_at": "2026-06-15",
+        "freshness_days": 7,
         "fails_to_test": [
-          "there is still NO authentication \u2014 anyone who can reach the port and forge Host can drive sessions"
+          "no authentication: a forged matching Host still works"
         ]
       },
       "fails_to_test": [
-        "there is still NO authentication \u2014 anyone who can reach the port and forge Host can drive sessions"
+        "no authentication: a forged matching Host still works"
       ],
       "bypassed_controls": [],
       "side_effects": []
     }
   ],
-  "side_effect_rows": [
-    {
-      "target_id": "emux-web:021-click-zoom-steer",
-      "class": "pass_real_surface",
-      "target": "Clicking a flow box opens a zoom-in modal whose input sends real keystrokes into that tmux session.",
-      "probe": "Clicked demo-boss -> modal showed live Claude Code TUI; typed print(6*7) into a python REPL session -> the real pane returned 42.",
-      "delta": "Manual one-shot; not encoded as a test.",
-      "evidence": "browser screenshots ss_2445ziaaj, ss_9535061oq (2026-06-15)",
-      "next_action": "Add a scripted browser proof: open modal, POST /api/send a marker command, assert the marker appears in /api/capture.",
-      "adapter": "human:browser",
-      "source_file": ".converge/converge-rows.json",
-      "weight": 1.0,
-      "proof_envelope": {
-        "environment": "local-daemon",
-        "surface": "browser modal + /api/send + /api/capture",
-        "base_origin": "http://127.0.0.1:8689",
-        "captured_at": "2026-06-15",
-        "side_effects": [
-          "typed `print(6*7)` into the demo-worker2 tmux session"
-        ],
-        "fails_to_test": [
-          "control-key chips (^C/ESC/Tab) reaching the pane",
-          "send to a full-screen TUI vs a shell"
-        ]
-      },
-      "fails_to_test": [
-        "control-key chips (^C/ESC/Tab) reaching the pane",
-        "send to a full-screen TUI vs a shell"
-      ],
-      "bypassed_controls": [],
-      "side_effects": [
-        "typed `print(6*7)` into the demo-worker2 tmux session"
-      ]
-    }
-  ],
+  "side_effect_rows": [],
   "generated_gap_rows": [
     {
       "target_id": "emux-web:010-pytest-suite:gap:flow-view-renders-without-hanging-in-a-real-browser",
@@ -2770,46 +2800,46 @@
       "gap": "behavior when a pane dies mid-view"
     },
     {
-      "target_id": "emux-web:021-click-zoom-steer:gap:control-key-chips-c-esc-tab-reaching-the-pane",
+      "target_id": "emux-web:021-click-zoom-steer:gap:browser-modal-dom-rendering",
       "class": "missing",
-      "target": "Prove untested surface: control-key chips (^C/ESC/Tab) reaching the pane",
+      "target": "Prove untested surface: browser modal DOM rendering",
       "probe": "No proof row supplied.",
       "delta": "Generated from emux-web:021-click-zoom-steer proof envelope.",
-      "evidence": "browser screenshots ss_2445ziaaj, ss_9535061oq (2026-06-15)",
-      "next_action": "Add a scripted browser proof: open modal, POST /api/send a marker command, assert the marker appears in /api/capture.",
+      "evidence": "marker observed in live pane",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
       "adapter": "converge:proof-envelope",
-      "source_file": ".converge/converge-rows.json",
+      "source_file": ".converge/real-surface-rows.json",
       "weight": 1.0,
       "generated_from": "emux-web:021-click-zoom-steer",
-      "gap": "control-key chips (^C/ESC/Tab) reaching the pane"
+      "gap": "browser modal DOM rendering"
     },
     {
-      "target_id": "emux-web:021-click-zoom-steer:gap:send-to-a-full-screen-tui-vs-a-shell",
+      "target_id": "emux-web:021-click-zoom-steer:gap:control-key-chips-c-esc-tab",
       "class": "missing",
-      "target": "Prove untested surface: send to a full-screen TUI vs a shell",
+      "target": "Prove untested surface: control-key chips (^C/ESC/Tab)",
       "probe": "No proof row supplied.",
       "delta": "Generated from emux-web:021-click-zoom-steer proof envelope.",
-      "evidence": "browser screenshots ss_2445ziaaj, ss_9535061oq (2026-06-15)",
-      "next_action": "Add a scripted browser proof: open modal, POST /api/send a marker command, assert the marker appears in /api/capture.",
+      "evidence": "marker observed in live pane",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
       "adapter": "converge:proof-envelope",
-      "source_file": ".converge/converge-rows.json",
+      "source_file": ".converge/real-surface-rows.json",
       "weight": 1.0,
       "generated_from": "emux-web:021-click-zoom-steer",
-      "gap": "send to a full-screen TUI vs a shell"
+      "gap": "control-key chips (^C/ESC/Tab)"
     },
     {
-      "target_id": "emux-web:030-csrf-host-guard:gap:there-is-still-no-authentication-anyone-who-can-reach-the-port-and-forge-host-ca",
+      "target_id": "emux-web:030-csrf-host-guard:gap:no-authentication-a-forged-matching-host-still-works",
       "class": "missing",
-      "target": "Prove untested surface: there is still NO authentication \u2014 anyone who can reach the port and forge Host can drive sessions",
+      "target": "Prove untested surface: no authentication: a forged matching Host still works",
       "probe": "No proof row supplied.",
       "delta": "Generated from emux-web:030-csrf-host-guard proof envelope.",
-      "evidence": "curl checks 2026-06-15; tests test_http_rejects_foreign_host / test_http_send_rejects_cross_origin",
-      "next_action": "Hold. Revisit only if an auth layer or non-localhost bind is added.",
+      "evidence": "foreign-host status=403, cross-origin status=403 (want 403/403)",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
       "adapter": "converge:proof-envelope",
-      "source_file": ".converge/converge-rows.json",
+      "source_file": ".converge/real-surface-rows.json",
       "weight": 1.0,
       "generated_from": "emux-web:030-csrf-host-guard",
-      "gap": "there is still NO authentication \u2014 anyone who can reach the port and forge Host can drive sessions"
+      "gap": "no authentication: a forged matching Host still works"
     }
   ],
   "conflicts": [],
@@ -4051,56 +4081,58 @@
       "gap": "behavior when a pane dies mid-view"
     },
     {
-      "target_id": "emux-web:021-click-zoom-steer:gap:control-key-chips-c-esc-tab-reaching-the-pane",
+      "target_id": "emux-web:021-click-zoom-steer:gap:browser-modal-dom-rendering",
       "class": "missing",
-      "target": "Prove untested surface: control-key chips (^C/ESC/Tab) reaching the pane",
+      "target": "Prove untested surface: browser modal DOM rendering",
       "probe": "No proof row supplied.",
       "delta": "Generated from emux-web:021-click-zoom-steer proof envelope.",
-      "evidence": "browser screenshots ss_2445ziaaj, ss_9535061oq (2026-06-15)",
-      "next_action": "Add a scripted browser proof: open modal, POST /api/send a marker command, assert the marker appears in /api/capture.",
+      "evidence": "marker observed in live pane",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
       "adapter": "converge:proof-envelope",
-      "source_file": ".converge/converge-rows.json",
+      "source_file": ".converge/real-surface-rows.json",
       "weight": 1.0,
       "generated_from": "emux-web:021-click-zoom-steer",
-      "gap": "control-key chips (^C/ESC/Tab) reaching the pane"
+      "gap": "browser modal DOM rendering"
     },
     {
-      "target_id": "emux-web:021-click-zoom-steer:gap:send-to-a-full-screen-tui-vs-a-shell",
+      "target_id": "emux-web:021-click-zoom-steer:gap:control-key-chips-c-esc-tab",
       "class": "missing",
-      "target": "Prove untested surface: send to a full-screen TUI vs a shell",
+      "target": "Prove untested surface: control-key chips (^C/ESC/Tab)",
       "probe": "No proof row supplied.",
       "delta": "Generated from emux-web:021-click-zoom-steer proof envelope.",
-      "evidence": "browser screenshots ss_2445ziaaj, ss_9535061oq (2026-06-15)",
-      "next_action": "Add a scripted browser proof: open modal, POST /api/send a marker command, assert the marker appears in /api/capture.",
+      "evidence": "marker observed in live pane",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
       "adapter": "converge:proof-envelope",
-      "source_file": ".converge/converge-rows.json",
+      "source_file": ".converge/real-surface-rows.json",
       "weight": 1.0,
       "generated_from": "emux-web:021-click-zoom-steer",
-      "gap": "send to a full-screen TUI vs a shell"
+      "gap": "control-key chips (^C/ESC/Tab)"
     },
     {
-      "target_id": "emux-web:030-csrf-host-guard:gap:there-is-still-no-authentication-anyone-who-can-reach-the-port-and-forge-host-ca",
+      "target_id": "emux-web:030-csrf-host-guard:gap:no-authentication-a-forged-matching-host-still-works",
       "class": "missing",
-      "target": "Prove untested surface: there is still NO authentication \u2014 anyone who can reach the port and forge Host can drive sessions",
+      "target": "Prove untested surface: no authentication: a forged matching Host still works",
       "probe": "No proof row supplied.",
       "delta": "Generated from emux-web:030-csrf-host-guard proof envelope.",
-      "evidence": "curl checks 2026-06-15; tests test_http_rejects_foreign_host / test_http_send_rejects_cross_origin",
-      "next_action": "Hold. Revisit only if an auth layer or non-localhost bind is added.",
+      "evidence": "foreign-host status=403, cross-origin status=403 (want 403/403)",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
       "adapter": "converge:proof-envelope",
-      "source_file": ".converge/converge-rows.json",
+      "source_file": ".converge/real-surface-rows.json",
       "weight": 1.0,
       "generated_from": "emux-web:030-csrf-host-guard",
-      "gap": "there is still NO authentication \u2014 anyone who can reach the port and forge Host can drive sessions"
+      "gap": "no authentication: a forged matching Host still works"
     }
   ],
   "source_files": [
     ".converge/converge-rows.json",
-    ".converge/pytest-rows.json"
+    ".converge/pytest-rows.json",
+    ".converge/real-surface-rows.json"
   ],
-  "captured_at": "2026-06-15T18:54:49Z",
+  "captured_at": "2026-06-15T18:59:11Z",
   "row_files": [
     ".converge/converge-rows.json",
-    ".converge/pytest-rows.json"
+    ".converge/pytest-rows.json",
+    ".converge/real-surface-rows.json"
   ],
   "regression_rows": [],
   "regression_count": 0,
