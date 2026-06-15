@@ -1,6 +1,6 @@
 {
-  "score": 0.16,
-  "qualified_score": 1.0,
+  "score": 0.15384615384615385,
+  "qualified_score": 0.9615384615384616,
   "current_rows": [
     {
       "target_id": "emux-web:000-north-star",
@@ -401,6 +401,86 @@
       "fails_to_test": [
         "this proves the HTML/JS is delivered, NOT that it renders \u2014 see browser-render gap"
       ],
+      "bypassed_controls": [],
+      "side_effects": []
+    },
+    {
+      "target_id": "emux-web:ux01-status-means-state",
+      "class": "fail",
+      "target": "A session's status signal answers 'which one needs me?' \u2014 distinct states for working / idle / waiting-on-input / crashed, not just alive.",
+      "probe": "Synthetic user 'Riley' triage run 2026-06-15.",
+      "delta": "Every sidebar dot is green = 'tmux session exists'. Idle, stuck, and crashed sessions all look identical, so triage (the whole job) fails at a glance.",
+      "evidence": ".converge/synthetic-user.md report: 'every session looks green/active; it tells me THAT things are running, not WHICH one needs me'",
+      "next_action": "Derive a real state per session (output flowing -> working; quiet -> idle; pane matches an input/(y/n) prompt or traceback -> needs-attention; gone -> dead) and color the dot/border by it.",
+      "adapter": "synthetic-user:riley",
+      "source_file": ".converge/converge-rows.json",
+      "weight": 1.0,
+      "proof_envelope": {},
+      "fails_to_test": [],
+      "bypassed_controls": [],
+      "side_effects": []
+    },
+    {
+      "target_id": "emux-web:ux02-needs-attention-surfacing",
+      "class": "missing",
+      "target": "Sessions blocked on input, on a (y/n) prompt, or showing a traceback bubble to the top with a badge.",
+      "probe": "Synthetic user run: scraper blocked on input(), tokut-8766 had a ConnectionResetError traceback \u2014 both 'needs a human'.",
+      "delta": "Neither is flagged anywhere; only caught by reading raw pane text.",
+      "evidence": ".converge/synthetic-user.md friction log #7",
+      "next_action": "Detect attention-needed patterns in pane tails and surface them (sort-to-top + badge) across grid/flow/activity.",
+      "adapter": "synthetic-user:riley",
+      "source_file": ".converge/converge-rows.json",
+      "weight": 1.0,
+      "proof_envelope": {},
+      "fails_to_test": [],
+      "bypassed_controls": [],
+      "side_effects": []
+    },
+    {
+      "target_id": "emux-web:ux03-triage-in-sidebar",
+      "class": "missing",
+      "target": "The primary triage signal (recent-activity + idle-for-N) is visible where the user first looks \u2014 the sidebar \u2014 not only in the ACTIVITY tab.",
+      "probe": "Riley found the ACTIVITY sparkline view last; the sidebar dots carried no triage signal.",
+      "delta": "Real signal is buried one nav-tab away; 'active \u2014' vs 'active 3s ago' is too subtle and everything reads 'active'.",
+      "evidence": ".converge/synthetic-user.md friction log #4,#5",
+      "next_action": "Put a tiny activity sparkline / 'idle N' on each sidebar card; reserve the word 'active' for sessions actually emitting.",
+      "adapter": "synthetic-user:riley",
+      "source_file": ".converge/converge-rows.json",
+      "weight": 1.0,
+      "proof_envelope": {},
+      "fails_to_test": [],
+      "bypassed_controls": [],
+      "side_effects": []
+    },
+    {
+      "target_id": "emux-web:ux04-click-affordance",
+      "class": "missing",
+      "target": "Clicking anywhere on a flow box opens its steer modal; the click target is obvious.",
+      "probe": "Riley's first click on a pane body was a no-op; only the title bar worked (needs reproduction \u2014 body click may have landed on empty canvas).",
+      "delta": "Either a real dead-zone or an unclear affordance; cost the user a step.",
+      "evidence": ".converge/synthetic-user.md friction log #2",
+      "next_action": "Reproduce a body-click; ensure the whole .fbox is the hit target and add a hover affordance (cursor/overlay 'click to steer').",
+      "adapter": "synthetic-user:riley",
+      "source_file": ".converge/converge-rows.json",
+      "weight": 1.0,
+      "proof_envelope": {},
+      "fails_to_test": [],
+      "bypassed_controls": [],
+      "side_effects": []
+    },
+    {
+      "target_id": "emux-web:ux05-agent-current-task",
+      "class": "missing",
+      "target": "A detected agent box shows a one-line 'currently: <task / idle at prompt>' instead of only the raw pane.",
+      "probe": "claude-refactor showed only the Claude Code welcome splash; no sense of what it had done.",
+      "delta": "Raw pane only; no task/recent-activity summary for detected agents.",
+      "evidence": ".converge/synthetic-user.md goal 3",
+      "next_action": "Heuristic 'currently' line from the pane tail for known agents (idle-at-prompt vs working vs awaiting-approval).",
+      "adapter": "synthetic-user:riley",
+      "source_file": ".converge/converge-rows.json",
+      "weight": 1.0,
+      "proof_envelope": {},
+      "fails_to_test": [],
       "bypassed_controls": [],
       "side_effects": []
     },
@@ -1474,10 +1554,10 @@
   "weighted_totals": {
     "pass": 8.0,
     "qualified_pass": 42.0,
-    "fail": 0.0,
-    "blocked": 0.0,
+    "fail": 1.0,
+    "blocked": 1.0,
     "skip": 0.0,
-    "total": 50.0
+    "total": 52.0
   },
   "class_counts": {
     "match": 2,
@@ -1488,8 +1568,8 @@
     "pass_with_bypass": 1,
     "miss_small": 0,
     "miss_large": 0,
-    "fail": 0,
-    "missing": 2,
+    "fail": 1,
+    "missing": 6,
     "blocked": 0,
     "drift": 0,
     "regression": 0,
@@ -2965,6 +3045,38 @@
   "conflicts": [],
   "repair_rows": [
     {
+      "target_id": "emux-web:ux01-status-means-state",
+      "class": "fail",
+      "target": "A session's status signal answers 'which one needs me?' \u2014 distinct states for working / idle / waiting-on-input / crashed, not just alive.",
+      "probe": "Synthetic user 'Riley' triage run 2026-06-15.",
+      "delta": "Every sidebar dot is green = 'tmux session exists'. Idle, stuck, and crashed sessions all look identical, so triage (the whole job) fails at a glance.",
+      "evidence": ".converge/synthetic-user.md report: 'every session looks green/active; it tells me THAT things are running, not WHICH one needs me'",
+      "next_action": "Derive a real state per session (output flowing -> working; quiet -> idle; pane matches an input/(y/n) prompt or traceback -> needs-attention; gone -> dead) and color the dot/border by it.",
+      "adapter": "synthetic-user:riley",
+      "source_file": ".converge/converge-rows.json",
+      "weight": 1.0,
+      "proof_envelope": {},
+      "fails_to_test": [],
+      "bypassed_controls": [],
+      "side_effects": []
+    },
+    {
+      "target_id": "emux-web:ux02-needs-attention-surfacing",
+      "class": "missing",
+      "target": "Sessions blocked on input, on a (y/n) prompt, or showing a traceback bubble to the top with a badge.",
+      "probe": "Synthetic user run: scraper blocked on input(), tokut-8766 had a ConnectionResetError traceback \u2014 both 'needs a human'.",
+      "delta": "Neither is flagged anywhere; only caught by reading raw pane text.",
+      "evidence": ".converge/synthetic-user.md friction log #7",
+      "next_action": "Detect attention-needed patterns in pane tails and surface them (sort-to-top + badge) across grid/flow/activity.",
+      "adapter": "synthetic-user:riley",
+      "source_file": ".converge/converge-rows.json",
+      "weight": 1.0,
+      "proof_envelope": {},
+      "fails_to_test": [],
+      "bypassed_controls": [],
+      "side_effects": []
+    },
+    {
       "target_id": "emux-web:010-pytest-suite",
       "class": "pass_controlled_harness",
       "target": "The Python surface (session listing, capture/send payloads, change detection, agent detection, HTTP routing + guards, grid cache/eviction, cycle data) is covered by automated tests.",
@@ -4244,7 +4356,7 @@
     ".converge/pytest-rows.json",
     ".converge/real-surface-rows.json"
   ],
-  "captured_at": "2026-06-15T19:13:15Z",
+  "captured_at": "2026-06-15T21:08:04Z",
   "row_files": [
     ".converge/converge-rows.json",
     ".converge/pytest-rows.json",

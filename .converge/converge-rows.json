@@ -88,6 +88,67 @@
     }
   },
   {
+    "target_id": "emux-web:ux01-status-means-state",
+    "target": "A session's status signal answers 'which one needs me?' — distinct states for working / idle / waiting-on-input / crashed, not just alive.",
+    "probe": "Synthetic user 'Riley' triage run 2026-06-15.",
+    "delta": "Every sidebar dot is green = 'tmux session exists'. Idle, stuck, and crashed sessions all look identical, so triage (the whole job) fails at a glance.",
+    "class": "fail",
+    "evidence": ".converge/synthetic-user.md report: 'every session looks green/active; it tells me THAT things are running, not WHICH one needs me'",
+    "next_action": "Derive a real state per session (output flowing -> working; quiet -> idle; pane matches an input/(y/n) prompt or traceback -> needs-attention; gone -> dead) and color the dot/border by it.",
+    "adapter": "synthetic-user:riley",
+    "convergence_style": "exploratory_narrowing",
+    "required": true,
+    "why": "This is the question the cockpit exists to answer; decorative status defeats its purpose."
+  },
+  {
+    "target_id": "emux-web:ux02-needs-attention-surfacing",
+    "target": "Sessions blocked on input, on a (y/n) prompt, or showing a traceback bubble to the top with a badge.",
+    "probe": "Synthetic user run: scraper blocked on input(), tokut-8766 had a ConnectionResetError traceback — both 'needs a human'.",
+    "delta": "Neither is flagged anywhere; only caught by reading raw pane text.",
+    "class": "missing",
+    "evidence": ".converge/synthetic-user.md friction log #7",
+    "next_action": "Detect attention-needed patterns in pane tails and surface them (sort-to-top + badge) across grid/flow/activity.",
+    "adapter": "synthetic-user:riley",
+    "convergence_style": "consensus_evidence",
+    "required": true
+  },
+  {
+    "target_id": "emux-web:ux03-triage-in-sidebar",
+    "target": "The primary triage signal (recent-activity + idle-for-N) is visible where the user first looks — the sidebar — not only in the ACTIVITY tab.",
+    "probe": "Riley found the ACTIVITY sparkline view last; the sidebar dots carried no triage signal.",
+    "delta": "Real signal is buried one nav-tab away; 'active —' vs 'active 3s ago' is too subtle and everything reads 'active'.",
+    "class": "missing",
+    "evidence": ".converge/synthetic-user.md friction log #4,#5",
+    "next_action": "Put a tiny activity sparkline / 'idle N' on each sidebar card; reserve the word 'active' for sessions actually emitting.",
+    "adapter": "synthetic-user:riley",
+    "convergence_style": "regression_hardening",
+    "required": false
+  },
+  {
+    "target_id": "emux-web:ux04-click-affordance",
+    "target": "Clicking anywhere on a flow box opens its steer modal; the click target is obvious.",
+    "probe": "Riley's first click on a pane body was a no-op; only the title bar worked (needs reproduction — body click may have landed on empty canvas).",
+    "delta": "Either a real dead-zone or an unclear affordance; cost the user a step.",
+    "class": "missing",
+    "evidence": ".converge/synthetic-user.md friction log #2",
+    "next_action": "Reproduce a body-click; ensure the whole .fbox is the hit target and add a hover affordance (cursor/overlay 'click to steer').",
+    "adapter": "synthetic-user:riley",
+    "convergence_style": "exact_match",
+    "required": false
+  },
+  {
+    "target_id": "emux-web:ux05-agent-current-task",
+    "target": "A detected agent box shows a one-line 'currently: <task / idle at prompt>' instead of only the raw pane.",
+    "probe": "claude-refactor showed only the Claude Code welcome splash; no sense of what it had done.",
+    "delta": "Raw pane only; no task/recent-activity summary for detected agents.",
+    "class": "missing",
+    "evidence": ".converge/synthetic-user.md goal 3",
+    "next_action": "Heuristic 'currently' line from the pane tail for known agents (idle-at-prompt vs working vs awaiting-approval).",
+    "adapter": "synthetic-user:riley",
+    "convergence_style": "tolerance_band",
+    "required": false
+  },
+  {
     "target_id": "emux-web:041-empty-edge-inputs",
     "target": "Empty, huge, multiline, pasted, and control-bearing inputs behave predictably in the steer input and modal.",
     "probe": "Not tested. Empty send is guarded (if(!text)); other edges unknown.",

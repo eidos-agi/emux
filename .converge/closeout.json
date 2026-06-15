@@ -1,10 +1,10 @@
 {
   "ok": true,
   "state": "in_progress",
-  "captured_at": "2026-06-15T19:13:15Z",
+  "captured_at": "2026-06-15T21:08:04Z",
   "repo": "/Users/dshanklinbv/repos-eidos-agi/emux",
-  "score": 0.16,
-  "qualified_score": 1.0,
+  "score": 0.15384615384615385,
+  "qualified_score": 0.9615384615384616,
   "class_counts": {
     "match": 2,
     "rounding": 0,
@@ -14,8 +14,8 @@
     "pass_with_bypass": 1,
     "miss_small": 0,
     "miss_large": 0,
-    "fail": 0,
-    "missing": 2,
+    "fail": 1,
+    "missing": 6,
     "blocked": 0,
     "drift": 0,
     "regression": 0,
@@ -31,46 +31,22 @@
     "warnings": []
   },
   "next_target": {
-    "target_id": "emux-web:010-pytest-suite",
-    "class": "pass_controlled_harness",
-    "target": "The Python surface (session listing, capture/send payloads, change detection, agent detection, HTTP routing + guards, grid cache/eviction, cycle data) is covered by automated tests.",
-    "probe": "uv run pytest -q --junitxml -> 41 passed.",
-    "delta": "All green, but every tmux call is monkeypatched \u2014 these prove logic, not real tmux behavior or any browser rendering.",
-    "evidence": ".converge/pytest-rows.json (41 rows); /tmp/emux-junit.xml",
-    "next_action": "Keep green; do not let this stand in for real-surface proof of capture/send/render.",
-    "adapter": "converge:pytest",
+    "target_id": "emux-web:ux01-status-means-state",
+    "class": "fail",
+    "target": "A session's status signal answers 'which one needs me?' \u2014 distinct states for working / idle / waiting-on-input / crashed, not just alive.",
+    "probe": "Synthetic user 'Riley' triage run 2026-06-15.",
+    "delta": "Every sidebar dot is green = 'tmux session exists'. Idle, stuck, and crashed sessions all look identical, so triage (the whole job) fails at a glance.",
+    "evidence": ".converge/synthetic-user.md report: 'every session looks green/active; it tells me THAT things are running, not WHICH one needs me'",
+    "next_action": "Derive a real state per session (output flowing -> working; quiet -> idle; pane matches an input/(y/n) prompt or traceback -> needs-attention; gone -> dead) and color the dot/border by it.",
+    "adapter": "synthetic-user:riley",
     "source_file": ".converge/converge-rows.json",
     "weight": 1.0,
-    "proof_envelope": {
-      "environment": "ci/local-unit",
-      "surface": "pytest with mocked _run_tmux/_live_sessions/_pane_command",
-      "captured_at": "2026-06-15",
-      "bypassed_controls": [
-        "real tmux server",
-        "real pane content",
-        "real browser DOM/JS"
-      ],
-      "fails_to_test": [
-        "flow view renders without hanging in a real browser",
-        "send-keys actually reaches a live pane",
-        "agent detection against a real pane_current_command",
-        "mobile / accessibility / error-recovery UX"
-      ]
-    },
-    "fails_to_test": [
-      "flow view renders without hanging in a real browser",
-      "send-keys actually reaches a live pane",
-      "agent detection against a real pane_current_command",
-      "mobile / accessibility / error-recovery UX"
-    ],
-    "bypassed_controls": [
-      "real tmux server",
-      "real pane content",
-      "real browser DOM/JS"
-    ],
+    "proof_envelope": {},
+    "fails_to_test": [],
+    "bypassed_controls": [],
     "side_effects": []
   },
-  "next_command": "Keep green; do not let this stand in for real-surface proof of capture/send/render.",
+  "next_command": "Derive a real state per session (output flowing -> working; quiet -> idle; pane matches an input/(y/n) prompt or traceback -> needs-attention; gone -> dead) and color the dot/border by it.",
   "row_files": [
     ".converge/converge-rows.json",
     ".converge/pytest-rows.json",
