@@ -65,17 +65,25 @@
     }
   },
   {
-    "target_id": "emux-web:040-error-recovery",
-    "target": "When the daemon dies, a session is reaped, or capture fails, the UI shows a clear state and recovers without losing the user's draft.",
-    "probe": "Status shows 'daemon unreachable' on fetch failure; gone sessions render 'tmux session gone'. Not proven end-to-end.",
-    "delta": "Partial: failure copy exists, but draft preservation on send-failure and reconnect-after-daemon-restart are unproven.",
-    "class": "fail",
-    "evidence": "code paths in poll()/refreshScreen()/modalRefresh() catch blocks; no test or live proof of recovery",
-    "next_action": "Force daemon kill + restart with the modal open; verify status, auto-reconnect, and that an unsent draft survives.",
+    "target_id": "emux-web:040b-error-recovery-ui",
+    "target": "On daemon failure the modal keeps the user's unsent draft, shows a clear failure state, and auto-reconnects when the daemon returns.",
+    "probe": "Opened the steer modal, typed a draft, killed the daemon, clicked SEND, then restarted the daemon.",
+    "delta": "Fixed an optimistic-clear bug that dropped the draft on send-failure; now the draft is restored if the send does not land.",
+    "class": "pass_real_surface",
+    "evidence": "browser JS read 2026-06-15: after failed send input='print(...)' (kept), status='unreachable'; after daemon restart status auto-returned to 'live' with the draft intact",
+    "next_action": "Hold; re-verify if the send/poll flow changes. Server half is covered by the real-surface probe (emux-web:040-error-recovery).",
     "adapter": "human:browser",
     "convergence_style": "graceful_degradation",
     "required": true,
-    "why": "Failure handling is most of perceived quality for an always-on cockpit instrument."
+    "why": "Failure handling is most of perceived quality for an always-on cockpit instrument.",
+    "proof_envelope": {
+      "environment": "local-daemon, daemon killed and restarted under a live modal",
+      "surface": "browser steer modal (#modalinput / #modalstatus)",
+      "base_origin": "http://127.0.0.1:8689",
+      "captured_at": "2026-06-15",
+      "freshness_days": 7,
+      "fails_to_test": ["draft preservation in the chat-view composer (now unreachable via clicks)"]
+    }
   },
   {
     "target_id": "emux-web:041-empty-edge-inputs",

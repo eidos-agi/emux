@@ -975,9 +975,10 @@ async function sendText(){
   const inp=$("#input");const text=inp.value;
   if(!current||!text)return;
   inp.value="";addBubble("user","you",text);
-  const r=await api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({session:current.session,keys:text,literal:true,enter:true})});
-  if(!r.ok)addBubble("sys",null,"send failed: "+(r.error||"unknown"));
+  let ok=false;
+  try{const r=await api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session:current.session,keys:text,literal:true,enter:true})});ok=!!(r&&r.ok);}catch(e){}
+  if(!ok){addBubble("sys",null,"send failed — draft restored");if(!inp.value)inp.value=text;}
   setTimeout(refreshScreen,300);
 }
 
@@ -1050,12 +1051,24 @@ async function modalRefresh(){
   }catch(e){$("#modalstatus").textContent="unreachable";$("#modalstatus").style.color="var(--stale)";}
 }
 async function modalKeys(keys,literal,enter){
-  if(!modalSession)return;
-  await api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({session:modalSession.session,keys,literal,enter})});
-  setTimeout(modalRefresh,250);
+  if(!modalSession)return false;
+  try{
+    const r=await api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({session:modalSession.session,keys,literal,enter})});
+    setTimeout(modalRefresh,250);
+    return !!(r&&r.ok);
+  }catch(e){return false;}   // daemon down / network error
 }
-function modalSubmit(){const i=$("#modalinput");if(i.value){modalKeys(i.value,true,true);i.value="";}}
+function modalSubmit(){
+  const i=$("#modalinput");const text=i.value;if(!text)return;
+  i.value="";                                   // optimistic clear for snappy UX…
+  modalKeys(text,true,true).then(ok=>{
+    if(!ok){                                    // …but if it didn't land, give the draft back
+      if(!i.value)i.value=text;
+      const st=$("#modalstatus");st.textContent="send failed — draft kept";st.style.color="var(--stale)";
+    }
+  });
+}
 $("#modalsend").onclick=modalSubmit;
 $("#modalinput").addEventListener("keydown",e=>{if(e.key==="Enter")modalSubmit();});
 $("#modalclose").onclick=closeModal;

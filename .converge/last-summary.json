@@ -1,6 +1,6 @@
 {
-  "score": 0.10204081632653061,
-  "qualified_score": 0.9591836734693877,
+  "score": 0.14,
+  "qualified_score": 0.98,
   "current_rows": [
     {
       "target_id": "emux-web:000-north-star",
@@ -93,7 +93,7 @@
       "target_id": "emux-web:021-click-zoom-steer",
       "class": "pass_real_surface",
       "target": "Keystrokes sent via /api/send reach the real tmux pane and are observable via /api/capture.",
-      "probe": "POST /api/send marker CONVERGE_80247_1781549915 -> GET /api/capture",
+      "probe": "POST /api/send marker CONVERGE_84041_1781550542 -> GET /api/capture",
       "delta": "",
       "evidence": "marker observed in live pane",
       "next_action": "Hold; re-run this adapter to keep the proof fresh.",
@@ -174,17 +174,55 @@
     },
     {
       "target_id": "emux-web:040-error-recovery",
-      "class": "fail",
-      "target": "When the daemon dies, a session is reaped, or capture fails, the UI shows a clear state and recovers without losing the user's draft.",
-      "probe": "Status shows 'daemon unreachable' on fetch failure; gone sessions render 'tmux session gone'. Not proven end-to-end.",
-      "delta": "Partial: failure copy exists, but draft preservation on send-failure and reconnect-after-daemon-restart are unproven.",
-      "evidence": "code paths in poll()/refreshScreen()/modalRefresh() catch blocks; no test or live proof of recovery",
-      "next_action": "Force daemon kill + restart with the modal open; verify status, auto-reconnect, and that an unsent draft survives.",
+      "class": "pass_real_surface",
+      "target": "On failure (gone session / dead daemon) the API returns an actionable error and the UI keeps the user's draft.",
+      "probe": "POST /api/send to a nonexistent session",
+      "delta": "",
+      "evidence": "status=200, ok=False, error=tmux_send_failed",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+      "adapter": "converge:real-surface-probe",
+      "source_file": ".converge/real-surface-rows.json",
+      "weight": 1.0,
+      "proof_envelope": {
+        "environment": "real daemon + real tmux",
+        "surface": "live HTTP API + tmux server",
+        "base_origin": "http://127.0.0.1:8699",
+        "captured_at": "2026-06-15",
+        "freshness_days": 7,
+        "fails_to_test": [
+          "UI draft-preservation + auto-reconnect proven separately in-browser, not here"
+        ]
+      },
+      "fails_to_test": [
+        "UI draft-preservation + auto-reconnect proven separately in-browser, not here"
+      ],
+      "bypassed_controls": [],
+      "side_effects": []
+    },
+    {
+      "target_id": "emux-web:040b-error-recovery-ui",
+      "class": "pass_real_surface",
+      "target": "On daemon failure the modal keeps the user's unsent draft, shows a clear failure state, and auto-reconnects when the daemon returns.",
+      "probe": "Opened the steer modal, typed a draft, killed the daemon, clicked SEND, then restarted the daemon.",
+      "delta": "Fixed an optimistic-clear bug that dropped the draft on send-failure; now the draft is restored if the send does not land.",
+      "evidence": "browser JS read 2026-06-15: after failed send input='print(...)' (kept), status='unreachable'; after daemon restart status auto-returned to 'live' with the draft intact",
+      "next_action": "Hold; re-verify if the send/poll flow changes. Server half is covered by the real-surface probe (emux-web:040-error-recovery).",
       "adapter": "human:browser",
       "source_file": ".converge/converge-rows.json",
       "weight": 1.0,
-      "proof_envelope": {},
-      "fails_to_test": [],
+      "proof_envelope": {
+        "environment": "local-daemon, daemon killed and restarted under a live modal",
+        "surface": "browser steer modal (#modalinput / #modalstatus)",
+        "base_origin": "http://127.0.0.1:8689",
+        "captured_at": "2026-06-15",
+        "freshness_days": 7,
+        "fails_to_test": [
+          "draft preservation in the chat-view composer (now unreachable via clicks)"
+        ]
+      },
+      "fails_to_test": [
+        "draft preservation in the chat-view composer (now unreachable via clicks)"
+      ],
       "bypassed_controls": [],
       "side_effects": []
     },
@@ -1434,23 +1472,23 @@
     }
   ],
   "weighted_totals": {
-    "pass": 5.0,
+    "pass": 7.0,
     "qualified_pass": 42.0,
-    "fail": 1.0,
+    "fail": 0.0,
     "blocked": 1.0,
     "skip": 0.0,
-    "total": 49.0
+    "total": 50.0
   },
   "class_counts": {
     "match": 0,
     "rounding": 0,
     "pass": 0,
-    "pass_real_surface": 7,
+    "pass_real_surface": 9,
     "pass_controlled_harness": 43,
     "pass_with_bypass": 1,
     "miss_small": 0,
     "miss_large": 0,
-    "fail": 1,
+    "fail": 0,
     "missing": 4,
     "blocked": 0,
     "drift": 0,
@@ -1458,7 +1496,7 @@
     "skip": 0
   },
   "proof_surface_counts": {
-    "real_surface": 5,
+    "real_surface": 7,
     "controlled_harness": 42,
     "with_bypass": 0
   },
@@ -2643,10 +2681,37 @@
       "side_effects": []
     },
     {
+      "target_id": "emux-web:040b-error-recovery-ui",
+      "class": "pass_real_surface",
+      "target": "On daemon failure the modal keeps the user's unsent draft, shows a clear failure state, and auto-reconnects when the daemon returns.",
+      "probe": "Opened the steer modal, typed a draft, killed the daemon, clicked SEND, then restarted the daemon.",
+      "delta": "Fixed an optimistic-clear bug that dropped the draft on send-failure; now the draft is restored if the send does not land.",
+      "evidence": "browser JS read 2026-06-15: after failed send input='print(...)' (kept), status='unreachable'; after daemon restart status auto-returned to 'live' with the draft intact",
+      "next_action": "Hold; re-verify if the send/poll flow changes. Server half is covered by the real-surface probe (emux-web:040-error-recovery).",
+      "adapter": "human:browser",
+      "source_file": ".converge/converge-rows.json",
+      "weight": 1.0,
+      "proof_envelope": {
+        "environment": "local-daemon, daemon killed and restarted under a live modal",
+        "surface": "browser steer modal (#modalinput / #modalstatus)",
+        "base_origin": "http://127.0.0.1:8689",
+        "captured_at": "2026-06-15",
+        "freshness_days": 7,
+        "fails_to_test": [
+          "draft preservation in the chat-view composer (now unreachable via clicks)"
+        ]
+      },
+      "fails_to_test": [
+        "draft preservation in the chat-view composer (now unreachable via clicks)"
+      ],
+      "bypassed_controls": [],
+      "side_effects": []
+    },
+    {
       "target_id": "emux-web:021-click-zoom-steer",
       "class": "pass_real_surface",
       "target": "Keystrokes sent via /api/send reach the real tmux pane and are observable via /api/capture.",
-      "probe": "POST /api/send marker CONVERGE_80247_1781549915 -> GET /api/capture",
+      "probe": "POST /api/send marker CONVERGE_84041_1781550542 -> GET /api/capture",
       "delta": "",
       "evidence": "marker observed in live pane",
       "next_action": "Hold; re-run this adapter to keep the proof fresh.",
@@ -2694,6 +2759,33 @@
       },
       "fails_to_test": [
         "no authentication: a forged matching Host still works"
+      ],
+      "bypassed_controls": [],
+      "side_effects": []
+    },
+    {
+      "target_id": "emux-web:040-error-recovery",
+      "class": "pass_real_surface",
+      "target": "On failure (gone session / dead daemon) the API returns an actionable error and the UI keeps the user's draft.",
+      "probe": "POST /api/send to a nonexistent session",
+      "delta": "",
+      "evidence": "status=200, ok=False, error=tmux_send_failed",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+      "adapter": "converge:real-surface-probe",
+      "source_file": ".converge/real-surface-rows.json",
+      "weight": 1.0,
+      "proof_envelope": {
+        "environment": "real daemon + real tmux",
+        "surface": "live HTTP API + tmux server",
+        "base_origin": "http://127.0.0.1:8699",
+        "captured_at": "2026-06-15",
+        "freshness_days": 7,
+        "fails_to_test": [
+          "UI draft-preservation + auto-reconnect proven separately in-browser, not here"
+        ]
+      },
+      "fails_to_test": [
+        "UI draft-preservation + auto-reconnect proven separately in-browser, not here"
       ],
       "bypassed_controls": [],
       "side_effects": []
@@ -2800,6 +2892,20 @@
       "gap": "behavior when a pane dies mid-view"
     },
     {
+      "target_id": "emux-web:040b-error-recovery-ui:gap:draft-preservation-in-the-chat-view-composer-now-unreachable-via-clicks",
+      "class": "missing",
+      "target": "Prove untested surface: draft preservation in the chat-view composer (now unreachable via clicks)",
+      "probe": "No proof row supplied.",
+      "delta": "Generated from emux-web:040b-error-recovery-ui proof envelope.",
+      "evidence": "browser JS read 2026-06-15: after failed send input='print(...)' (kept), status='unreachable'; after daemon restart status auto-returned to 'live' with the draft intact",
+      "next_action": "Hold; re-verify if the send/poll flow changes. Server half is covered by the real-surface probe (emux-web:040-error-recovery).",
+      "adapter": "converge:proof-envelope",
+      "source_file": ".converge/converge-rows.json",
+      "weight": 1.0,
+      "generated_from": "emux-web:040b-error-recovery-ui",
+      "gap": "draft preservation in the chat-view composer (now unreachable via clicks)"
+    },
+    {
       "target_id": "emux-web:021-click-zoom-steer:gap:browser-modal-dom-rendering",
       "class": "missing",
       "target": "Prove untested surface: browser modal DOM rendering",
@@ -2840,26 +2946,24 @@
       "weight": 1.0,
       "generated_from": "emux-web:030-csrf-host-guard",
       "gap": "no authentication: a forged matching Host still works"
+    },
+    {
+      "target_id": "emux-web:040-error-recovery:gap:ui-draft-preservation-auto-reconnect-proven-separately-in-browser-not-here",
+      "class": "missing",
+      "target": "Prove untested surface: UI draft-preservation + auto-reconnect proven separately in-browser, not here",
+      "probe": "No proof row supplied.",
+      "delta": "Generated from emux-web:040-error-recovery proof envelope.",
+      "evidence": "status=200, ok=False, error=tmux_send_failed",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+      "adapter": "converge:proof-envelope",
+      "source_file": ".converge/real-surface-rows.json",
+      "weight": 1.0,
+      "generated_from": "emux-web:040-error-recovery",
+      "gap": "UI draft-preservation + auto-reconnect proven separately in-browser, not here"
     }
   ],
   "conflicts": [],
   "repair_rows": [
-    {
-      "target_id": "emux-web:040-error-recovery",
-      "class": "fail",
-      "target": "When the daemon dies, a session is reaped, or capture fails, the UI shows a clear state and recovers without losing the user's draft.",
-      "probe": "Status shows 'daemon unreachable' on fetch failure; gone sessions render 'tmux session gone'. Not proven end-to-end.",
-      "delta": "Partial: failure copy exists, but draft preservation on send-failure and reconnect-after-daemon-restart are unproven.",
-      "evidence": "code paths in poll()/refreshScreen()/modalRefresh() catch blocks; no test or live proof of recovery",
-      "next_action": "Force daemon kill + restart with the modal open; verify status, auto-reconnect, and that an unsent draft survives.",
-      "adapter": "human:browser",
-      "source_file": ".converge/converge-rows.json",
-      "weight": 1.0,
-      "proof_envelope": {},
-      "fails_to_test": [],
-      "bypassed_controls": [],
-      "side_effects": []
-    },
     {
       "target_id": "emux-web:000-north-star",
       "class": "missing",
@@ -4081,6 +4185,20 @@
       "gap": "behavior when a pane dies mid-view"
     },
     {
+      "target_id": "emux-web:040b-error-recovery-ui:gap:draft-preservation-in-the-chat-view-composer-now-unreachable-via-clicks",
+      "class": "missing",
+      "target": "Prove untested surface: draft preservation in the chat-view composer (now unreachable via clicks)",
+      "probe": "No proof row supplied.",
+      "delta": "Generated from emux-web:040b-error-recovery-ui proof envelope.",
+      "evidence": "browser JS read 2026-06-15: after failed send input='print(...)' (kept), status='unreachable'; after daemon restart status auto-returned to 'live' with the draft intact",
+      "next_action": "Hold; re-verify if the send/poll flow changes. Server half is covered by the real-surface probe (emux-web:040-error-recovery).",
+      "adapter": "converge:proof-envelope",
+      "source_file": ".converge/converge-rows.json",
+      "weight": 1.0,
+      "generated_from": "emux-web:040b-error-recovery-ui",
+      "gap": "draft preservation in the chat-view composer (now unreachable via clicks)"
+    },
+    {
       "target_id": "emux-web:021-click-zoom-steer:gap:browser-modal-dom-rendering",
       "class": "missing",
       "target": "Prove untested surface: browser modal DOM rendering",
@@ -4121,6 +4239,20 @@
       "weight": 1.0,
       "generated_from": "emux-web:030-csrf-host-guard",
       "gap": "no authentication: a forged matching Host still works"
+    },
+    {
+      "target_id": "emux-web:040-error-recovery:gap:ui-draft-preservation-auto-reconnect-proven-separately-in-browser-not-here",
+      "class": "missing",
+      "target": "Prove untested surface: UI draft-preservation + auto-reconnect proven separately in-browser, not here",
+      "probe": "No proof row supplied.",
+      "delta": "Generated from emux-web:040-error-recovery proof envelope.",
+      "evidence": "status=200, ok=False, error=tmux_send_failed",
+      "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+      "adapter": "converge:proof-envelope",
+      "source_file": ".converge/real-surface-rows.json",
+      "weight": 1.0,
+      "generated_from": "emux-web:040-error-recovery",
+      "gap": "UI draft-preservation + auto-reconnect proven separately in-browser, not here"
     }
   ],
   "source_files": [
@@ -4128,7 +4260,7 @@
     ".converge/pytest-rows.json",
     ".converge/real-surface-rows.json"
   ],
-  "captured_at": "2026-06-15T18:59:11Z",
+  "captured_at": "2026-06-15T19:11:51Z",
   "row_files": [
     ".converge/converge-rows.json",
     ".converge/pytest-rows.json",

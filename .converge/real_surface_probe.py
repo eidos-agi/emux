@@ -172,6 +172,19 @@ def main() -> int:
             fails=["no authentication: a forged matching Host still works"],
         )
 
+        # error recovery (server half): a send to a nonexistent session returns a
+        # clean, actionable failure the client can branch on — not a 500/crash.
+        st_bad, badr = http("POST", f"{base}/api/send", {"session": "no-such-session-xyz", "keys": "x"})
+        clean_fail = st_bad == 200 and isinstance(badr, dict) and badr.get("ok") is False and badr.get("error")
+        ok_all &= row(
+            "emux-web:040-error-recovery", bool(clean_fail),
+            "On failure (gone session / dead daemon) the API returns an actionable error and the UI keeps the user's draft.",
+            "POST /api/send to a nonexistent session",
+            f"status={st_bad}, ok={isinstance(badr, dict) and badr.get('ok')}, error={isinstance(badr, dict) and badr.get('error')}",
+            "Send failure was not a clean ok:false the client can act on.",
+            fails=["UI draft-preservation + auto-reconnect proven separately in-browser, not here"],
+        )
+
         # UI shell is served
         st, html = http("GET", f"{base}/")
         served = st == 200 and isinstance(html, str) and "EMUX" in html and "fbox" in html and "modal" in html
