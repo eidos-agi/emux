@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-06-15T18:52:27Z",
+  "title": "emux web \u2014 monitor + steer fleet UI",
+  "scope": "Record the target, proof envelope, known gaps, and next repair command.",
+  "ledgers": [
+    "emux-web-monitor-steer-fleet-ui.md"
+  ],
+  "row_files": [
+    ".converge/converge-rows.json",
+    ".converge/pytest-rows.json"
+  ],
+  "contracts": [],
+  "proofs": [],
+  "next_command": "uv run pytest -q && emux web (manual real-surface checks at http://127.0.0.1:8689)",
+  "replay_commands": {},
+  "artifact_retention": {
+    "archive_after_days": 90,
+    "mode": "plan_by_default"
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "ok": true,
+  "state": "in_progress",
+  "captured_at": "2026-06-15T18:54:49Z",
+  "repo": "/Users/dshanklinbv/repos-eidos-agi/emux",
+  "score": 0.06382978723404255,
+  "qualified_score": 0.9574468085106383,
+  "class_counts": {
+    "match": 0,
+    "rounding": 0,
+    "pass": 0,
+    "pass_real_surface": 4,
+    "pass_controlled_harness": 43,
+    "pass_with_bypass": 1,
+    "miss_small": 0,
+    "miss_large": 0,
+    "fail": 1,
+    "missing": 4,
+    "blocked": 0,
+    "drift": 0,
+    "regression": 0,
+    "skip": 0
+  },
+  "regression_count": 0,
+  "drift_count": 0,
+  "generated_gap_count": 10,
+  "doctor": {
+    "ok": true,
+    "repo": "/Users/dshanklinbv/repos-eidos-agi/emux",
+    "failures": [],
+    "warnings": []
+  },
+  "next_target": {
+    "target_id": "emux-web:040-error-recovery",
+    "class": "fail",
+    "target": "When the daemon dies, a session is reaped, or capture fails, the UI shows a clear state and recovers without losing the user's draft.",
+    "probe": "Status shows 'daemon unreachable' on fetch failure; gone sessions render 'tmux session gone'. Not proven end-to-end.",
+    "delta": "Partial: failure copy exists, but draft preservation on send-failure and reconnect-after-daemon-restart are unproven.",
+    "evidence": "code paths in poll()/refreshScreen()/modalRefresh() catch blocks; no test or live proof of recovery",
+    "next_action": "Force daemon kill + restart with the modal open; verify status, auto-reconnect, and that an unsent draft survives.",
+    "adapter": "human:browser",
+    "source_file": ".converge/converge-rows.json",
+    "weight": 1.0,
+    "proof_envelope": {},
+    "fails_to_test": [],
+    "bypassed_controls": [],
+    "side_effects": []
+  },
+  "next_command": "Force daemon kill + restart with the modal open; verify status, auto-reconnect, and that an unsent draft survives.",
+  "row_files": [
+    ".converge/converge-rows.json",
+    ".converge/pytest-rows.json"
+  ]
+}
