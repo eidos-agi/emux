@@ -1,15 +1,15 @@
 {
-  "score": 0.14,
-  "qualified_score": 0.98,
+  "score": 0.16,
+  "qualified_score": 1.0,
   "current_rows": [
     {
       "target_id": "emux-web:000-north-star",
-      "class": "missing",
+      "class": "match",
       "target": "Watch and steer several local agent/tmux sessions from one screen, with a manages-hierarchy flow of live panes and click-to-zoom steering.",
-      "probe": "briefs/north-star in chat; flow + grid + modal shipped and demoed.",
-      "delta": "North star is stated in conversation, not in a repo doc the next engineer can read.",
-      "evidence": "conversation 2026-06-12..15; no committed NORTH-STAR / brief in the emux repo",
-      "next_action": "Write a short docs/north-star.md (target user, the job, success signal, non-goals: not the deployed/hosted fleet, no auth).",
+      "probe": "docs/north-star.md committed: job, target user, success signal, explicit non-goals.",
+      "delta": "Closed \u2014 intent now lives in the repo, not only in chat.",
+      "evidence": "docs/north-star.md",
+      "next_action": "Hold; revise if scope changes (e.g. mobile or hosted-fleet stops being a non-goal).",
       "adapter": "human",
       "source_file": ".converge/converge-rows.json",
       "weight": 1.0,
@@ -260,12 +260,12 @@
     },
     {
       "target_id": "emux-web:043-mobile-layout",
-      "class": "missing",
+      "class": "match",
       "target": "The cockpit remains usable on a narrow viewport (or explicitly declares desktop-only as a non-goal).",
-      "probe": "Designed desktop-first (280px fixed sidebar, 1200px flow canvas). Never opened on mobile.",
-      "delta": "No mobile proof and no explicit non-goal.",
-      "evidence": "fixed-width layout in CSS",
-      "next_action": "Decide: declare desktop-only in the north-star doc, or add a responsive breakpoint. Cheapest correct answer is probably the non-goal.",
+      "probe": "docs/north-star.md declares desktop-first; mobile is an explicit non-goal.",
+      "delta": "Closed by scoping decision (not a responsive build).",
+      "evidence": "docs/north-star.md (Non-goals: Desktop-first)",
+      "next_action": "Revisit only if mobile stops being a non-goal.",
       "adapter": "human",
       "source_file": ".converge/converge-rows.json",
       "weight": 1.0,
@@ -1472,15 +1472,15 @@
     }
   ],
   "weighted_totals": {
-    "pass": 7.0,
+    "pass": 8.0,
     "qualified_pass": 42.0,
     "fail": 0.0,
-    "blocked": 1.0,
+    "blocked": 0.0,
     "skip": 0.0,
     "total": 50.0
   },
   "class_counts": {
-    "match": 0,
+    "match": 2,
     "rounding": 0,
     "pass": 0,
     "pass_real_surface": 9,
@@ -1489,7 +1489,7 @@
     "miss_small": 0,
     "miss_large": 0,
     "fail": 0,
-    "missing": 4,
+    "missing": 2,
     "blocked": 0,
     "drift": 0,
     "regression": 0,
@@ -2965,22 +2965,6 @@
   "conflicts": [],
   "repair_rows": [
     {
-      "target_id": "emux-web:000-north-star",
-      "class": "missing",
-      "target": "Watch and steer several local agent/tmux sessions from one screen, with a manages-hierarchy flow of live panes and click-to-zoom steering.",
-      "probe": "briefs/north-star in chat; flow + grid + modal shipped and demoed.",
-      "delta": "North star is stated in conversation, not in a repo doc the next engineer can read.",
-      "evidence": "conversation 2026-06-12..15; no committed NORTH-STAR / brief in the emux repo",
-      "next_action": "Write a short docs/north-star.md (target user, the job, success signal, non-goals: not the deployed/hosted fleet, no auth).",
-      "adapter": "human",
-      "source_file": ".converge/converge-rows.json",
-      "weight": 1.0,
-      "proof_envelope": {},
-      "fails_to_test": [],
-      "bypassed_controls": [],
-      "side_effects": []
-    },
-    {
       "target_id": "emux-web:010-pytest-suite",
       "class": "pass_controlled_harness",
       "target": "The Python surface (session listing, capture/send payloads, change detection, agent detection, HTTP routing + guards, grid cache/eviction, cycle data) is covered by automated tests.",
@@ -4260,7 +4244,7 @@
     ".converge/pytest-rows.json",
     ".converge/real-surface-rows.json"
   ],
-  "captured_at": "2026-06-15T19:11:51Z",
+  "captured_at": "2026-06-15T19:13:15Z",
   "row_files": [
     ".converge/converge-rows.json",
     ".converge/pytest-rows.json",

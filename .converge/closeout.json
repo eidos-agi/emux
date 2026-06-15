@@ -1,12 +1,12 @@
 {
   "ok": true,
   "state": "in_progress",
-  "captured_at": "2026-06-15T19:11:51Z",
+  "captured_at": "2026-06-15T19:13:15Z",
   "repo": "/Users/dshanklinbv/repos-eidos-agi/emux",
-  "score": 0.14,
-  "qualified_score": 0.98,
+  "score": 0.16,
+  "qualified_score": 1.0,
   "class_counts": {
-    "match": 0,
+    "match": 2,
     "rounding": 0,
     "pass": 0,
     "pass_real_surface": 9,
@@ -15,7 +15,7 @@
     "miss_small": 0,
     "miss_large": 0,
     "fail": 0,
-    "missing": 4,
+    "missing": 2,
     "blocked": 0,
     "drift": 0,
     "regression": 0,
@@ -31,22 +31,46 @@
     "warnings": []
   },
   "next_target": {
-    "target_id": "emux-web:000-north-star",
-    "class": "missing",
-    "target": "Watch and steer several local agent/tmux sessions from one screen, with a manages-hierarchy flow of live panes and click-to-zoom steering.",
-    "probe": "briefs/north-star in chat; flow + grid + modal shipped and demoed.",
-    "delta": "North star is stated in conversation, not in a repo doc the next engineer can read.",
-    "evidence": "conversation 2026-06-12..15; no committed NORTH-STAR / brief in the emux repo",
-    "next_action": "Write a short docs/north-star.md (target user, the job, success signal, non-goals: not the deployed/hosted fleet, no auth).",
-    "adapter": "human",
+    "target_id": "emux-web:010-pytest-suite",
+    "class": "pass_controlled_harness",
+    "target": "The Python surface (session listing, capture/send payloads, change detection, agent detection, HTTP routing + guards, grid cache/eviction, cycle data) is covered by automated tests.",
+    "probe": "uv run pytest -q --junitxml -> 41 passed.",
+    "delta": "All green, but every tmux call is monkeypatched \u2014 these prove logic, not real tmux behavior or any browser rendering.",
+    "evidence": ".converge/pytest-rows.json (41 rows); /tmp/emux-junit.xml",
+    "next_action": "Keep green; do not let this stand in for real-surface proof of capture/send/render.",
+    "adapter": "converge:pytest",
     "source_file": ".converge/converge-rows.json",
     "weight": 1.0,
-    "proof_envelope": {},
-    "fails_to_test": [],
-    "bypassed_controls": [],
+    "proof_envelope": {
+      "environment": "ci/local-unit",
+      "surface": "pytest with mocked _run_tmux/_live_sessions/_pane_command",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux server",
+        "real pane content",
+        "real browser DOM/JS"
+      ],
+      "fails_to_test": [
+        "flow view renders without hanging in a real browser",
+        "send-keys actually reaches a live pane",
+        "agent detection against a real pane_current_command",
+        "mobile / accessibility / error-recovery UX"
+      ]
+    },
+    "fails_to_test": [
+      "flow view renders without hanging in a real browser",
+      "send-keys actually reaches a live pane",
+      "agent detection against a real pane_current_command",
+      "mobile / accessibility / error-recovery UX"
+    ],
+    "bypassed_controls": [
+      "real tmux server",
+      "real pane content",
+      "real browser DOM/JS"
+    ],
     "side_effects": []
   },
-  "next_command": "Write a short docs/north-star.md (target user, the job, success signal, non-goals: not the deployed/hosted fleet, no auth).",
+  "next_command": "Keep green; do not let this stand in for real-surface proof of capture/send/render.",
   "row_files": [
     ".converge/converge-rows.json",
     ".converge/pytest-rows.json",
