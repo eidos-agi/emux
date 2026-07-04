@@ -120,21 +120,24 @@ def test_pursue_types_then_declares_done(monkeypatch):
 
 
 def test_pursue_stall_propagates(monkeypatch):
+    """A persistent stall (both the step and its retry) aborts with model_stalled."""
     from emux import server
 
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
-    monkeypatch.setattr(server, "_capture_text", lambda s, n: "screen")
+    monkeypatch.setattr(server, "_observe", lambda s, n, retries=1: "screen")
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
     monkeypatch.setattr(server, "_pursue_decide", lambda *a, **k: {"stall": "no JSON in model reply"})
     out = server.pursue("sess", "goal", max_steps=3)
     assert not out["ok"] and out["error"] == "model_stalled"
 
 
 def test_pursue_hits_max_steps(monkeypatch):
-    """A model that only ever says 'wait' must terminate at max_steps, not loop."""
+    """A model that only ever says 'wait' must terminate at max_steps, not loop.
+    ('wait' isn't an active action, so it never trips stuck-detection.)"""
     from emux import server
 
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
-    monkeypatch.setattr(server, "_capture_text", lambda s, n: "screen")
+    monkeypatch.setattr(server, "_observe", lambda s, n, retries=1: "screen")
     monkeypatch.setattr(server, "_wait_stable", lambda *a, **k: "screen")
     monkeypatch.setattr(server, "_pursue_decide",
                         lambda *a, **k: {"action": "wait", "model": server._NAV_MODEL_DEFAULT})
@@ -154,6 +157,60 @@ def test_pursue_decide_rejects_bad_action(monkeypatch):
     monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: _P())
     out = server._pursue_decide(["m"], "goal", "screen", [])
     assert "stall" in out and "bad action" in out["stall"]
+
+
+def test_pursue_aborts_when_session_gone(monkeypatch):
+    """A dropped/killed session (ssh disconnect) is detected, not flailed against."""
+    from emux import server
+
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_session_alive", lambda s: False)
+    out = server.pursue("sess", "goal", max_steps=5)
+    assert not out["ok"] and out["error"] == "session_gone"
+
+
+def test_pursue_aborts_on_blank_screen(monkeypatch):
+    """Session alive but rendering nothing → blank_screen, not a wasted run."""
+    from emux import server
+
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_session_alive", lambda s: True)
+    monkeypatch.setattr(server, "_capture_text", lambda s, n: "")  # always blank
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+    out = server.pursue("sess", "goal", max_steps=5)
+    assert not out["ok"] and out["error"] == "blank_screen"
+
+
+def test_pursue_recovers_from_transient_stall(monkeypatch):
+    """A one-off stall is retried after a re-observe; the run continues to done."""
+    from emux import server
+
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_observe", lambda s, n, retries=1: "a screen")
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+    decisions = iter([
+        {"stall": "no JSON in model reply"},                       # transient
+        {"action": "done", "success": True, "summary": "ok", "model": server._NAV_MODEL_DEFAULT},
+    ])
+    monkeypatch.setattr(server, "_pursue_decide", lambda *a, **k: next(decisions))
+    out = server.pursue("sess", "goal", max_steps=5)
+    assert out["ok"] and out["reached"] == "done"  # recovered, didn't abort
+
+
+def test_pursue_detects_stuck_loop(monkeypatch):
+    """Repeated actions that never change the screen abort with stuck_no_progress
+    instead of silently burning to max_steps."""
+    from emux import server
+
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_observe", lambda s, n, retries=1: "frozen screen")
+    monkeypatch.setattr(server, "_wait_stable", lambda *a, **k: "frozen screen")  # never changes
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, "", ""))
+    monkeypatch.setattr(server, "_pursue_decide",
+                        lambda *a, **k: {"action": "keys", "keys": ["Down"], "model": server._NAV_MODEL_DEFAULT})
+    out = server.pursue("sess", "goal", max_steps=15)
+    assert not out["ok"] and out["error"] == "stuck_no_progress"
+    assert len(out["steps"]) == server._STUCK_LIMIT  # gave up at the backstop, not max_steps
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")

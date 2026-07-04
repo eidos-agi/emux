@@ -791,6 +791,38 @@ def _pursue_decide(
     return {"stall": last.get("stall", "unknown"), **last}
 
 
+def _session_alive(session: str) -> bool:
+    """True if the tmux session still exists (detects an ssh drop / kill)."""
+    try:
+        return _run_tmux(["has-session", "-t", session])[0] == 0
+    except FileNotFoundError:
+        return False
+
+
+def _observe(session: str, capture_lines: int, retries: int = 1) -> str | None:
+    """Capture a settled, ANSI-stripped screen, retrying a transient blank/error.
+
+    Returns the text, or None if the session is gone. An empty string means the
+    session is alive but rendered nothing after the retries (a distinct signal)."""
+    for attempt in range(retries + 1):
+        if not _session_alive(session):
+            return None
+        try:
+            txt = _strip_ansi(_capture_text(session, capture_lines))
+        except (RuntimeError, FileNotFoundError):
+            txt = ""
+        if txt.strip():
+            return txt
+        time.sleep(0.5)  # transient blank (mid-redraw / just-cleared) — try once more
+    return ""
+
+
+# How many consecutive no-effect actions before goal mode gives up. The model is
+# also TOLD it's stuck (via a history note) well before this, so it can recover
+# itself; this is only the backstop against an infinite ineffective loop.
+_STUCK_LIMIT = 3
+
+
 def pursue(
     target: str,
     goal: str,
@@ -819,13 +851,35 @@ def pursue(
     chain = [model] if model else [_NAV_MODEL_DEFAULT, _NAV_MODEL_ESCALATE]
 
     history: list[str] = []
+    no_progress = 0  # consecutive actions that changed nothing on screen
     for step in range(max_steps):
-        try:
-            screen = _strip_ansi(_capture_text(session, capture_lines))
-        except (RuntimeError, FileNotFoundError) as e:
-            return {"ok": False, "error": "capture_failed", "stderr": str(e), "steps": history}
+        # --- observe, recovering from a dead session or a transient blank ---
+        screen = _observe(session, capture_lines)
+        if screen is None:
+            return {"ok": False, "error": "session_gone",
+                    "detail": "tmux session vanished (ssh dropped or killed)", "steps": history}
+        if not screen.strip():
+            return {"ok": False, "error": "blank_screen",
+                    "detail": "session alive but rendered nothing", "steps": history}
 
-        d = _pursue_decide(chain, goal, screen, history)
+        # Tell the model when its recent actions aren't moving the UI, so it can
+        # change tactics (Escape, a different item) before we give up.
+        ctx = history
+        if no_progress:
+            ctx = history + [f"NOTE: the last {no_progress} action(s) did not change the "
+                             "screen — you appear stuck; try a DIFFERENT action (e.g. Escape, "
+                             "a different menu item), or 'done' with success=false if impossible."]
+
+        # --- decide, retrying once on a transient stall (re-observe first) ---
+        d = _pursue_decide(chain, goal, screen, ctx)
+        if "stall" in d:
+            time.sleep(1.0)
+            rescreen = _observe(session, capture_lines)
+            if rescreen is None:
+                return {"ok": False, "error": "session_gone", "steps": history}
+            if rescreen and rescreen.strip():
+                d = _pursue_decide(chain, goal, rescreen, ctx)
+                screen = rescreen
         if "stall" in d:
             return {"ok": False, "error": "model_stalled", "detail": d["stall"],
                     "raw": d.get("raw"), "steps": history, "screen": screen}
@@ -851,11 +905,22 @@ def pursue(
                 _run_tmux(["send-keys", "-t", session, "Enter"])
             history.append(f"step {step + 1}: type={d['text']!r} submit={bool(d.get('submit'))} ({thought!r}){esc}")
 
-        # Let the UI react, then re-observe a settled frame next loop.
+        # Let the UI react, then re-observe a settled frame.
         settled = _wait_stable(session, capture_lines, settle_seconds, 0.8, wait_cap)
-        history[-1] += f" -> {_tail(settled)}"
 
-    final = _strip_ansi(_capture_text(session, capture_lines))
+        # --- stuck detection: an active action that changed nothing ---
+        if settled == screen:
+            no_progress += 1
+            history[-1] += f" -> {_tail(settled)} [NO CHANGE x{no_progress}]"
+            if no_progress >= _STUCK_LIMIT:
+                return {"ok": False, "error": "stuck_no_progress",
+                        "detail": f"{no_progress} consecutive actions changed nothing",
+                        "steps": history, "screen": settled}
+        else:
+            no_progress = 0
+            history[-1] += f" -> {_tail(settled)}"
+
+    final = _observe(session, capture_lines) or ""
     return {"ok": False, "error": "max_steps_reached", "steps": history, "screen": final}
 
 
@@ -883,6 +948,13 @@ async def tmux_goal(
 
     Still keystrokes-into-a-TUI — it cannot exec shell or do anything a person at
     that terminal couldn't. emux never spawns; create the session first.
+
+    Recovers from: a flaky model step (escalates Haiku→Sonnet), a transient
+    stall or blank capture (re-observe + retry once), a no-progress loop (warns
+    the model, then aborts `stuck_no_progress` at the backstop), and a dropped
+    session (`session_gone`). It does NOT gate destructive actions — `Enter` and
+    free text are permitted, so a goal that leads to a "Delete? [y]" confirm will
+    press it. Scope the goal accordingly, or point it at a read-only surface.
 
     Args:
         target: tmux session name, or registry name if `by_registry_name=True`.
