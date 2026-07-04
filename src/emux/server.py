@@ -362,6 +362,24 @@ def _reply_delta(before: str, after: str) -> str:
     return "\n".join(line for line in added if line.strip())
 
 
+# Generic "the TUI AI is actively generating" signals. Used to avoid sending
+# Escape (which would interrupt generation) when clearing a stale composer draft.
+# Caller-supplied busy_markers extend these; these patterns catch a bare spinner
+# with no marker — a live elapsed timer, or Claude Code's "esc to interrupt" hint.
+_GENERATING_PATTERNS = (
+    re.compile(r"esc to interrupt", re.I),
+    re.compile(r"\b\d+s\s*·"),   # live elapsed timer, e.g. "12s ·" / "(9s · thinking)"
+    re.compile(r"·\s*\d+s\b"),   # "· 12s"
+)
+
+
+def _looks_generating(screen: str, busy_markers: list[str] | None = None) -> bool:
+    """True if the pane looks like an AI mid-generation — must NOT be Escaped."""
+    if any(m.lower() in screen.lower() for m in (busy_markers or [])):
+        return True
+    return any(p.search(screen) for p in _GENERATING_PATTERNS)
+
+
 def converse(
     target: str,
     prompt: str,
@@ -373,6 +391,7 @@ def converse(
     by_registry_name: bool = False,
     strip_ansi: bool = True,
     busy_markers: list[str] | None = None,
+    clear_first: bool = True,
 ) -> dict[str, Any]:
     """Send `prompt` to a session running a TUI AI, wait for it to stop
     responding, and return the reply. Synchronous core shared by the MCP tool
@@ -395,6 +414,14 @@ def converse(
     except (RuntimeError, FileNotFoundError) as e:
         return {"ok": False, "error": "capture_failed", "stderr": str(e), "session": session}
 
+    # Clear a stale/restored composer draft before typing a fresh prompt — but ONLY
+    # when the pane is idle. Escape mid-generation would interrupt the AI's thinking
+    # (verified: the wrong-time Escape kills it). A resumed session (e.g. `claude
+    # --resume`) restores an unsent draft that otherwise swallows the submit Enter,
+    # so without this the prompt never lands.
+    if clear_first and not _looks_generating(before, busy_markers):
+        _run_tmux(["send-keys", "-t", session, "Escape"])
+        time.sleep(0.15)
     # Type the prompt literally (-l so a sentence is never parsed as key names),
     # then Enter as a real key.
     if _run_tmux(["send-keys", "-t", session, "-l", prompt])[0] != 0:
