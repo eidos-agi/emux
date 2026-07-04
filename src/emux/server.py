@@ -508,7 +508,11 @@ async def tmux_ask(
 # The model call goes through the `claude -p` CLI (fixed-cost subscription tool)
 # — NEVER the Anthropic API. A fast model is plenty for "which key next".
 
+# Fast model for the per-keystroke decision; escalate to a stronger one only
+# when a step stalls (model error or no usable action). Intelligence when it
+# matters, cheap the rest of the time.
 _NAV_MODEL_DEFAULT = os.environ.get("EMUX_NAV_MODEL", "claude-haiku-4-5-20251001")
+_NAV_MODEL_ESCALATE = os.environ.get("EMUX_NAV_MODEL_ESCALATE", "claude-sonnet-5")
 
 # tmux key names the model is allowed to emit (guards against it inventing keys).
 _NAV_ALLOWED_KEYS = {
@@ -558,6 +562,31 @@ def _claude_decide(model: str, goal: str, screen: str, history: list[str]) -> di
         return {"_error": "unparseable JSON from model", "raw": out[:400]}
 
 
+def _decide_step(
+    models: list[str], goal: str, screen: str, history: list[str]
+) -> dict[str, Any]:
+    """Get a usable navigation step, escalating through `models` on a stall.
+
+    A "stall" is a model/parse error OR a valid reply with no action (no text and
+    no allowed keys) and not done. Returns the first usable decision with the
+    validated `keys`/`text` attached and `model` used, or the last failure."""
+    last: dict[str, Any] = {}
+    for model in models:
+        decision = _claude_decide(model, goal, screen, history)
+        if "_error" in decision:
+            last = {"stall": decision["_error"], "raw": decision.get("raw"), "model": model}
+            continue
+        if decision.get("done"):
+            return {"done": True, "thought": decision.get("thought"), "model": model}
+        text = (decision.get("text") or "").strip()
+        keys = [k for k in (decision.get("keys") or []) if k in _NAV_ALLOWED_KEYS]
+        if text or keys:
+            return {"done": False, "text": text, "keys": keys,
+                    "thought": decision.get("thought"), "model": model}
+        last = {"stall": "no_action", "thought": decision.get("thought"), "model": model}
+    return {"stall": last.get("stall", "unknown"), **last}
+
+
 def navigate(
     target: str,
     goal: str,
@@ -582,7 +611,9 @@ def navigate(
         if target not in registry:
             return {"ok": False, "error": "not_registered", "name": target}
         session = registry[target]["session"]
-    model = model or _NAV_MODEL_DEFAULT
+    # Escalation chain: fast model, then the stronger one on a stall. A caller-
+    # pinned `model` overrides both (no escalation — they asked for that model).
+    chain = [model] if model else [_NAV_MODEL_DEFAULT, _NAV_MODEL_ESCALATE]
 
     history: list[str] = []
     for step in range(max_steps):
@@ -594,23 +625,22 @@ def navigate(
         if until and until in screen:
             return {"ok": True, "reached": "until", "steps": history, "screen": screen}
 
-        decision = _claude_decide(model, goal, screen, history)
-        if "_error" in decision:
-            return {"ok": False, "error": decision["_error"], "raw": decision.get("raw"), "steps": history}
+        decision = _decide_step(chain, goal, screen, history)
+        if "stall" in decision:
+            return {"ok": False, "error": "model_stalled", "detail": decision["stall"],
+                    "thought": decision.get("thought"), "raw": decision.get("raw"),
+                    "steps": history, "screen": screen}
         if decision.get("done"):
             return {"ok": True, "reached": "model_done", "steps": history,
                     "thought": decision.get("thought"), "screen": screen}
 
-        text = (decision.get("text") or "").strip()
-        keys = [k for k in (decision.get("keys") or []) if k in _NAV_ALLOWED_KEYS]
-        if not text and not keys:
-            return {"ok": False, "error": "model_returned_no_action",
-                    "thought": decision.get("thought"), "steps": history, "screen": screen}
+        text, keys = decision["text"], decision["keys"]
         if text:
             _run_tmux(["send-keys", "-t", session, "-l", text])
         for k in keys:
             _run_tmux(["send-keys", "-t", session, k])
-        history.append(f"step {step + 1}: {decision.get('thought','')!r} text={text!r} keys={keys}")
+        esc = "" if decision["model"] == chain[0] else f" [escalated:{decision['model']}]"
+        history.append(f"step {step + 1}: {decision.get('thought','')!r} text={text!r} keys={keys}{esc}")
         time.sleep(step_pause)
 
     final = _strip_ansi(_capture_text(session, capture_lines))

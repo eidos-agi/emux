@@ -61,17 +61,38 @@ def test_navigate_drives_keys_until_done(monkeypatch):
     assert ["send-keys", "-t", "sess", "Enter"] in sent
 
 
-def test_navigate_rejects_unknown_keys(monkeypatch):
-    """Keys not in the allowlist are dropped; a step with no valid action errors."""
+def test_navigate_escalates_on_stall(monkeypatch):
+    """Fast model returns only unknown keys (a stall) → escalate to the stronger
+    model, which returns a valid action. The escalated model's keys are sent."""
+    from emux import server
+
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_capture_text", lambda s, n: "a menu")
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+    sent: list[list[str]] = []
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: sent.append(args) or (0, "", ""))
+
+    def fake_decide(model, goal, screen, history):
+        if model == server._NAV_MODEL_DEFAULT:
+            return {"done": False, "text": "", "keys": ["F13"]}  # unknown key -> stall
+        return {"done": True, "thought": "escalated saw the goal"}  # sonnet resolves it
+
+    monkeypatch.setattr(server, "_claude_decide", fake_decide)
+    out = server.navigate("sess", "goal", max_steps=2)
+    assert out["ok"] and out["reached"] == "model_done"
+
+
+def test_navigate_stalls_when_all_models_fail(monkeypatch):
+    """If every model in the chain stalls, navigate reports model_stalled."""
     from emux import server
 
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
     monkeypatch.setattr(server, "_capture_text", lambda s, n: "a menu")
     monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, "", ""))
     monkeypatch.setattr(server, "_claude_decide",
-                        lambda *a, **k: {"done": False, "text": "", "keys": ["F13", "Meta-x"]})
+                        lambda *a, **k: {"done": False, "text": "", "keys": ["F13"]})
     out = server.navigate("sess", "goal", max_steps=2)
-    assert not out["ok"] and out["error"] == "model_returned_no_action"
+    assert not out["ok"] and out["error"] == "model_stalled"
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
