@@ -22,6 +22,7 @@ import difflib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -38,6 +39,53 @@ REGISTRY_PATH = Path(
     or os.environ.get("TMUX_MCP_REGISTRY")  # back-compat with prior name
     or (Path.home() / ".config" / "emux" / "registry.json")
 )
+
+
+_STATE_DIR = Path(os.environ.get("EMUX_STATE") or (Path.home() / ".local" / "state" / "emux"))
+_LOG_DIR = _STATE_DIR / "logs"
+
+
+def _log_path(name: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name) or "session"
+    return _LOG_DIR / f"{safe}.log"
+
+
+def _start_stream_log(session: str, name: str | None = None) -> bool:
+    """Stream every character emux watches on this pane to a durable append-only
+    log (tmux pipe-pane). This is emux's memory: complete and replayable, and far
+    faster to read than re-capturing the pane. One pipe per pane — re-arming
+    replaces it; we append so history is never truncated. Best-effort, never raises.
+
+    pipe-pane only captures forward from when it's armed (arms on register/drive),
+    not retroactively — the point is durable memory from that moment on."""
+    if _resolve_tmux() is None:
+        return False
+    try:
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    path = _log_path(name or session)
+    code, _, _ = _run_tmux(["pipe-pane", "-t", session, f"cat >> {shlex.quote(str(path))}"])
+    return code == 0
+
+
+def _read_log(name: str, lines: int | None = None, strip: bool = True) -> str:
+    """Read a session's durable log. strip=True removes ANSI for reading/grep;
+    strip=False returns the raw byte stream for exact replay."""
+    path = _log_path(name)
+    if not path.exists():
+        return ""
+    # newline="" so terminal carriage-returns survive raw (a bare \r is a cursor
+    # move, not a line break); universal-newline mode would mangle the stream.
+    with path.open(encoding="utf-8", errors="ignore", newline="") as f:
+        data = f.read()
+    if strip:
+        data = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", data)     # CSI
+        data = re.sub(r"\x1b\][^\x07]*(?:\x07|\x1b\\)", "", data)  # OSC
+        data = data.replace("\r", "")
+    if lines:
+        data = "\n".join(data.splitlines()[-lines:])
+    return data
 
 
 def _resolve_tmux() -> str | None:
@@ -176,6 +224,7 @@ async def tmux_register(
     }
     registry[name] = entry
     _save_registry(registry)
+    _start_stream_log(session, name)  # arm durable logging the moment we watch it
     live_names = {s["name"] for s in _live_sessions()}
     return {
         "ok": True,
@@ -362,6 +411,24 @@ def _reply_delta(before: str, after: str) -> str:
     return "\n".join(line for line in added if line.strip())
 
 
+# Generic "the TUI AI is actively generating" signals. Used to avoid sending
+# Escape (which would interrupt generation) when clearing a stale composer draft.
+# Caller-supplied busy_markers extend these; these patterns catch a bare spinner
+# with no marker — a live elapsed timer, or Claude Code's "esc to interrupt" hint.
+_GENERATING_PATTERNS = (
+    re.compile(r"esc to interrupt", re.I),
+    re.compile(r"\b\d+s\s*·"),   # live elapsed timer, e.g. "12s ·" / "(9s · thinking)"
+    re.compile(r"·\s*\d+s\b"),   # "· 12s"
+)
+
+
+def _looks_generating(screen: str, busy_markers: list[str] | None = None) -> bool:
+    """True if the pane looks like an AI mid-generation — must NOT be Escaped."""
+    if any(m.lower() in screen.lower() for m in (busy_markers or [])):
+        return True
+    return any(p.search(screen) for p in _GENERATING_PATTERNS)
+
+
 def converse(
     target: str,
     prompt: str,
@@ -373,6 +440,7 @@ def converse(
     by_registry_name: bool = False,
     strip_ansi: bool = True,
     busy_markers: list[str] | None = None,
+    clear_first: bool = True,
 ) -> dict[str, Any]:
     """Send `prompt` to a session running a TUI AI, wait for it to stop
     responding, and return the reply. Synchronous core shared by the MCP tool
@@ -390,11 +458,20 @@ def converse(
             return {"ok": False, "error": "not_registered", "name": target}
         session = registry[target]["session"]
 
+    _start_stream_log(session, target)  # ensure this driven pane is being logged
     try:
         before = _capture_text(session, capture_lines)
     except (RuntimeError, FileNotFoundError) as e:
         return {"ok": False, "error": "capture_failed", "stderr": str(e), "session": session}
 
+    # Clear a stale/restored composer draft before typing a fresh prompt — but ONLY
+    # when the pane is idle. Escape mid-generation would interrupt the AI's thinking
+    # (verified: the wrong-time Escape kills it). A resumed session (e.g. `claude
+    # --resume`) restores an unsent draft that otherwise swallows the submit Enter,
+    # so without this the prompt never lands.
+    if clear_first and not _looks_generating(before, busy_markers):
+        _run_tmux(["send-keys", "-t", session, "Escape"])
+        time.sleep(0.15)
     # Type the prompt literally (-l so a sentence is never parsed as key names),
     # then Enter as a real key.
     if _run_tmux(["send-keys", "-t", session, "-l", prompt])[0] != 0:

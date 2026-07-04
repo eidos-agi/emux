@@ -18,8 +18,11 @@ import pytest
 
 
 def test_import():
+    import re
+
     import emux
-    assert emux.__version__ == "0.3.0"
+    # Format check, not an exact pin — so a version bump never breaks the suite.
+    assert re.fullmatch(r"\d+\.\d+\.\d+", emux.__version__)
 
 
 def test_server_module_loads():
