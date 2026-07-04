@@ -19,7 +19,7 @@ import pytest
 
 def test_import():
     import emux
-    assert emux.__version__ == "0.1.0"
+    assert emux.__version__ == "0.3.0"
 
 
 def test_server_module_loads():

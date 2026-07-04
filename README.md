@@ -1,17 +1,27 @@
 # emux
 
-> **Eidos mux.** Pick up where you left off in tmux. A TUI session picker for humans + an MCP server for agents — same registry, same sessions, same operating model.
+> **Eidos mux.** Pick up where you left off in tmux, and let an agent drive it. A TUI session picker for humans + an MCP server for agents to observe, converse with, navigate, and autonomously pursue goals through existing sessions — never spawning or killing them. Same registry, same sessions, same operating model.
 
 ## What it does
 
-Two front-ends over one shared registry of named tmux sessions:
+Three front-ends over one shared registry of named tmux sessions:
 
 ```
 emux              → TUI picker. Lists registered + live sessions.
                     Pick one → tmux attach. Stale entries flagged.
 
-emux mcp          → MCP server. Six tools for agents to drive
-                    sessions: list, register, send, capture, run.
+emux mcp          → MCP server. Tools for agents to drive sessions:
+                    list, register, send, capture, run — plus the
+                    drive tiers: ask, navigate, goal (see below).
+
+emux ask          → Send a prompt to an AI in a session, wait for its
+                    reply to settle, print it.
+emux navigate     → Model-driven: reach a target screen through a TUI.
+emux goal         → Autonomous: pursue a whole task through a TUI.
+
+emux web          → Web daemon. Browser UI that monitors any session
+                    like a chatbot: live pane is the bot's side of
+                    the chat, input bar types into the session.
 
 emux ls           → Print registered + live sessions (non-interactive,
                     CI-friendly).
@@ -93,7 +103,7 @@ session lifecycle.
 
 ## MCP server
 
-Six tools, exposed via `emux mcp`:
+Tools exposed via `emux mcp`:
 
 | Tool | What it does |
 |---|---|
@@ -103,6 +113,32 @@ Six tools, exposed via `emux mcp`:
 | `tmux_send(target, keys, enter, by_registry_name)` | Send keystrokes |
 | `tmux_capture(target, lines, by_registry_name)` | Read pane + scrollback |
 | `tmux_run(target, command, wait_seconds, ...)` | Convenience: send + sleep + capture |
+| `tmux_ask(target, prompt, ...)` | Send a prompt, wait for the reply to **settle**, return it |
+| `tmux_navigate(target, goal, until?, ...)` | Model-driven: reach a target screen through a TUI |
+| `tmux_goal(target, goal, ...)` | Autonomous: pursue a whole task through a TUI |
+
+### Driving another AI through its TUI
+
+The last three tools are a ladder of increasing autonomy over an AI (or any
+interactive program) running in a session — `railway.new`'s agent, a
+`claude`/`codex`/`aider` REPL, an installer:
+
+| Tier | Reaches | Intelligence |
+|---|---|---|
+| `send` / `capture` / `run` | raw keystrokes + screen | none (mechanical) |
+| **`ask`** | a settled reply | dumb settle-timer — waits until the pane stops changing (a fixed sleep can't, since a reply streams for an unknown time) |
+| **`navigate`** | a target *screen* | a model reads each screen and picks keystrokes toward a stated goal |
+| **`goal`** | a whole *task done* | an autonomous observe → act → judge loop, with recovery |
+
+**Recovery** (`navigate` / `goal`): escalates the model Haiku→Sonnet on a stall,
+retries a transient blank/stall capture, detects a stuck loop, and aborts
+cleanly if the session dies (`session_gone`) instead of flailing. **Not** gated:
+destructive actions — scope the goal, or point it at a read-only surface.
+
+> **Requires the `claude` CLI on `PATH`** — `navigate` and `goal` make model
+> calls via `claude -p` (a fixed-cost subscription tool, never the raw API).
+> `send`/`capture`/`run`/`ask` need only tmux. Tune the models with
+> `$EMUX_NAV_MODEL` (default Haiku) and `$EMUX_NAV_MODEL_ESCALATE` (default Sonnet).
 
 Example: agent drives a registered session.
 
@@ -122,6 +158,51 @@ result = await tmux_run(
 )
 print(result["content"])  # tmux pane contents after the command
 ```
+
+## Web daemon
+
+`emux web` starts a persistent local HTTP server with monitoring + chat views:
+
+```bash
+emux web                  # http://127.0.0.1:8689
+emux web --port 9000 --open
+```
+
+Five views over the same registry:
+
+- **Grid** — every session as a live mini-pane tile, all streaming at once (2s poll). Tiles glow when their pane changed in the last few seconds; click one to drop into chat.
+- **Groups** — the same tiles sectioned by registry tag (`#prod`, `#agents`, …), with `untagged` and `unregistered` sections at the end. A session with multiple tags appears in each of its groups.
+- **Activity** — one row per session with a 60-sample change-detection strip (lit cell = the pane moved during that sample) and a "last active" age. Detection ignores cursor blinks and spinner frames (braille/block glyphs are stripped before comparison) so an idle session with a thinking spinner doesn't read as busy. Tracking lives in the daemon, so every browser tab sees the same history.
+- **Flow** — agent topology as a layered hierarchy: orchestrators on top, the agents they drive below, connected by directed **manages** arrows. Each node is a **live mini tmux pane** with a title bar showing the session name and the **detected AI/tool** running in it — Claude Code (✳), Codex (◇), Gemini (♊), Hermes (☿), Aider (✦), or the raw process name otherwise — so you watch the whole fleet working at once. Detection reads tmux's live `pane_current_command`, falling back to a content signature for node-wrapped CLIs that all report as `node`. Built from registry relationships (`emux register boss main --manages worker-1 worker-2`, or the `manages` arg on the MCP `tmux_register` tool); sessions in no relationship sit in an "unconnected" row at the bottom. (Edges reflect *declared* intent in the registry, not observed traffic.) The panes stream live in place (the layout only rebuilds when the topology changes). **Click any box to zoom into a modal** with the full live screen and an input bar to prompt/steer that session — control chips (`^C`, `ESC`, `⏎`, `↑`, `TAB`) included; `Esc` or click-outside closes it.
+- **Chat** — pick any session (sidebar or any tile/node). Its pane renders as a **live screen that updates in place** — it's the rendered terminal, so a full-screen TUI like Claude Code or vim mutates rather than scrolls — with your keystrokes logged as a chat above it. The input bar sends what you type into the session verbatim (`send-keys -l` + Enter); control chips (`^C`, `ESC`, `⏎`, `↑`, `TAB`) send named keys for steering interactive programs.
+
+One background thread captures every live pane on a timer into a shared cache, so N tabs watching M sessions cost one capture sweep, not N×M; dead sessions are evicted from the cache as tmux reaps them.
+
+**Niceties:** keys `1`–`4` switch views and `Esc` leaves chat; the last view is remembered across reloads; a sidebar **filter** narrows by name; tile/row ages are color-tiered by recency; sessions show **uptime** and an **attached** marker; the tab title shows the live count (and flashes when a watched chat session changes in the background); polling pauses on a hidden tab. A wrap toggle, copy-attach button, and per-message timestamps live in the chat view.
+
+API: `GET /healthz` (unauthenticated liveness), `GET /api/sessions`, `GET /api/grid?lines=` (captures + activity for all live panes in one call), `GET /api/capture?session=&lines=`, `POST /api/send {session, keys, literal, enter}`. The `/api/*` routes enforce the Host/Origin guards above. Same operations the MCP server exposes, over HTTP.
+
+### Security
+
+Localhost is **not** a security boundary — any web page open in your browser can issue requests to a localhost port. So the API:
+
+- rejects `/api/*` requests whose `Host` header isn't a loopback name (DNS-rebinding defense), and
+- rejects `POST /api/send` carrying a cross-origin `Origin` header (CSRF defense — a forged keystroke-injection request from another tab).
+
+There is still **no authentication**. Keep the bind on `127.0.0.1`; only use `--host` on a network you fully trust.
+
+### Running it as a real service
+
+`emux web` backgrounded by hand dies on logout/reboot. To keep it running, install the generated launchd agent (macOS):
+
+```bash
+emux web --print-launchd > ~/Library/LaunchAgents/com.eidos.emux-web.plist
+launchctl load ~/Library/LaunchAgents/com.eidos.emux-web.plist
+```
+
+It sets `RunAtLoad` + `KeepAlive`, logging to `/tmp/emux-web{,.err}.log`.
+
+**Security:** binds `127.0.0.1` and has **no auth** — anything that can reach the port can type into your tmux sessions. `--host 0.0.0.0` prints a warning; only do it on a network you trust end to end.
 
 ## Design principles
 
@@ -154,7 +235,8 @@ For backwards compatibility with the prior name (`tmux-mcp`), `$TMUX_MCP_REGISTR
 - **Doesn't bypass auth or approvals.** If the controlled session asks Claude Code for login, MFA, approval, or a human decision, Emux only sees and sends terminal text.
 - **Doesn't strip ANSI.** Capture content includes raw bytes from tmux. Strip with `re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)` if you need clean output.
 - **Doesn't proxy MCP from inside tmux.** If the tmux session is running its own MCP server, emux only sees the stdin/stdout text — not the structured MCP messages.
-- **Doesn't long-poll.** `tmux_run`'s `wait_seconds` is a fixed sleep. For long commands, prefer `tmux_send` + polling `tmux_capture` until you see the prompt return.
+- **`tmux_run` doesn't wait for streaming output.** Its `wait_seconds` is a fixed sleep — fine for a command that finishes fast. For an AI whose reply streams in over an unknown time, use `tmux_ask` (settles automatically) instead.
+- **Doesn't gate destructive actions.** `navigate`/`goal` send whatever keystrokes the model chooses, including `Enter` on a confirm. Scope goals accordingly.
 
 ## Claude Code in tmux
 

@@ -1,3 +1,3 @@
-"""emux — eidos mux. TUI session picker + MCP server for tmux."""
+"""emux — eidos mux. TUI session picker + MCP server + web daemon for tmux."""
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"

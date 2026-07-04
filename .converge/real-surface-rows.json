@@ -1,0 +1,144 @@
+[
+  {
+    "target_id": "emux-web:rs-healthz",
+    "target": "Daemon answers /healthz.",
+    "probe": "GET http://127.0.0.1:8699/healthz",
+    "class": "pass_real_surface",
+    "evidence": "healthz ok, version reported, converge-probe among live",
+    "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+    "adapter": "converge:real-surface-probe",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "proof_envelope": {
+      "environment": "real daemon + real tmux",
+      "surface": "live HTTP API + tmux server",
+      "base_origin": "http://127.0.0.1:8699",
+      "captured_at": "2026-06-15",
+      "freshness_days": 7
+    }
+  },
+  {
+    "target_id": "emux-web:rs-grid-capture",
+    "target": "/api/grid returns the live session with a real pane capture.",
+    "probe": "GET http://127.0.0.1:8699/api/grid -> session 'converge-probe'",
+    "class": "pass_real_surface",
+    "evidence": "session present live=True, has content key=True",
+    "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+    "adapter": "converge:real-surface-probe",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "proof_envelope": {
+      "environment": "real daemon + real tmux",
+      "surface": "live HTTP API + tmux server",
+      "base_origin": "http://127.0.0.1:8699",
+      "captured_at": "2026-06-15",
+      "freshness_days": 7
+    }
+  },
+  {
+    "target_id": "emux-web:021-click-zoom-steer",
+    "target": "Keystrokes sent via /api/send reach the real tmux pane and are observable via /api/capture.",
+    "probe": "POST /api/send marker CONVERGE_84041_1781550542 -> GET /api/capture",
+    "class": "pass_real_surface",
+    "evidence": "marker observed in live pane",
+    "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+    "adapter": "converge:real-surface-probe",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "proof_envelope": {
+      "environment": "real daemon + real tmux",
+      "surface": "live HTTP API + tmux server",
+      "base_origin": "http://127.0.0.1:8699",
+      "captured_at": "2026-06-15",
+      "freshness_days": 7,
+      "fails_to_test": [
+        "browser modal DOM rendering",
+        "control-key chips (^C/ESC/Tab)"
+      ]
+    }
+  },
+  {
+    "target_id": "emux-web:030-csrf-host-guard",
+    "target": "API rejects foreign Host (DNS-rebind) and cross-origin POST (CSRF).",
+    "probe": "GET /api/sessions Host:evil -> ; POST /api/send Origin:evil ->",
+    "class": "pass_real_surface",
+    "evidence": "foreign-host status=403, cross-origin status=403 (want 403/403)",
+    "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+    "adapter": "converge:real-surface-probe",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "proof_envelope": {
+      "environment": "real daemon + real tmux",
+      "surface": "live HTTP API + tmux server",
+      "base_origin": "http://127.0.0.1:8699",
+      "captured_at": "2026-06-15",
+      "freshness_days": 7,
+      "fails_to_test": [
+        "no authentication: a forged matching Host still works"
+      ]
+    }
+  },
+  {
+    "target_id": "emux-web:040-error-recovery",
+    "target": "On failure (gone session / dead daemon) the API returns an actionable error and the UI keeps the user's draft.",
+    "probe": "POST /api/send to a nonexistent session",
+    "class": "pass_real_surface",
+    "evidence": "status=200, ok=False, error=tmux_send_failed",
+    "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+    "adapter": "converge:real-surface-probe",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "proof_envelope": {
+      "environment": "real daemon + real tmux",
+      "surface": "live HTTP API + tmux server",
+      "base_origin": "http://127.0.0.1:8699",
+      "captured_at": "2026-06-15",
+      "freshness_days": 7,
+      "fails_to_test": [
+        "UI draft-preservation + auto-reconnect proven separately in-browser, not here"
+      ]
+    }
+  },
+  {
+    "target_id": "emux-web:rs-ui-served",
+    "target": "GET / serves the UI shell (brand, flow boxes, steer modal markup).",
+    "probe": "GET http://127.0.0.1:8699/",
+    "class": "pass_real_surface",
+    "evidence": "status=200, contains EMUX/fbox/modal markup=True",
+    "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+    "adapter": "converge:real-surface-probe",
+    "convergence_style": "regression_hardening",
+    "required": false,
+    "proof_envelope": {
+      "environment": "real daemon + real tmux",
+      "surface": "live HTTP API + tmux server",
+      "base_origin": "http://127.0.0.1:8699",
+      "captured_at": "2026-06-15",
+      "freshness_days": 7,
+      "fails_to_test": [
+        "this proves the HTML/JS is delivered, NOT that it renders \u2014 see browser-render gap"
+      ]
+    }
+  },
+  {
+    "target_id": "emux-web:022-agent-detection-real",
+    "target": "Agent detection reflects the real foreground process (a python process is detected as python).",
+    "probe": "start python in pane -> GET /api/grid agent.label",
+    "class": "pass_real_surface",
+    "evidence": "detected agent label = 'python3.12'",
+    "next_action": "Hold; re-run this adapter to keep the proof fresh.",
+    "adapter": "converge:real-surface-probe",
+    "convergence_style": "regression_hardening",
+    "required": false,
+    "proof_envelope": {
+      "environment": "real daemon + real tmux",
+      "surface": "live HTTP API + tmux server",
+      "base_origin": "http://127.0.0.1:8699",
+      "captured_at": "2026-06-15",
+      "freshness_days": 7,
+      "fails_to_test": [
+        "node-wrapped CLIs (Claude/Gemini) rely on content signatures, proven only manually"
+      ]
+    }
+  }
+]

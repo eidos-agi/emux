@@ -2,6 +2,7 @@
 
   emux              → TUI picker (registered + live tmux sessions)
   emux mcp          → start the MCP server
+  emux web          → start the web daemon (chat-style session monitor)
   emux register …   → CLI register
   emux ls           → list registered + live sessions
   emux send …        → send keys to a registered/live session
@@ -41,6 +42,9 @@ from .server import (
     _resolve_tmux,
     _run_tmux,
     _save_registry,
+    converse,
+    navigate,
+    pursue,
     run_mcp_server,
     tmux_capture,
     tmux_run,
@@ -159,6 +163,75 @@ def cmd_ls() -> int:
     return 0
 
 
+def cmd_ask(args: argparse.Namespace) -> int:
+    """Send a prompt to an AI running in a tmux session, print its reply.
+
+    The session must already be running the AI (emux never spawns) and sitting
+    at its input prompt. Waits until the pane stops changing before reading.
+    """
+    if _resolve_tmux() is None:
+        print("emux: tmux not found on PATH.", file=sys.stderr)
+        return 2
+    result = converse(
+        target=args.target,
+        prompt=args.prompt,
+        settle_seconds=args.settle,
+        max_seconds=args.max,
+        by_registry_name=args.by_name,
+        busy_markers=args.busy or None,
+    )
+    if not result.get("ok"):
+        print(f"emux ask: {result.get('error', 'failed')}", file=sys.stderr)
+        return 1
+    if args.screen:
+        print(result["screen"])
+    else:
+        print(result["reply"] or "(no new output — the AI may still be responding)")
+    if not result["settled"]:
+        print(f"\n[emux: hit {args.max:g}s cap; reply may be truncated]", file=sys.stderr)
+    return 0
+
+
+def cmd_navigate(args: argparse.Namespace) -> int:
+    """Drive a session's TUI toward a goal using a model to pick keystrokes."""
+    if _resolve_tmux() is None:
+        print("emux: tmux not found on PATH.", file=sys.stderr)
+        return 2
+    result = navigate(
+        target=args.target,
+        goal=args.goal,
+        until=args.until,
+        max_steps=args.max_steps,
+        by_registry_name=args.by_name,
+    )
+    if not result.get("ok"):
+        print(f"emux navigate: {result.get('error', 'failed')}", file=sys.stderr)
+        for s in result.get("steps", []):
+            print(f"  {s}", file=sys.stderr)
+        return 1
+    print(f"reached ({result['reached']}) in {len(result.get('steps', []))} step(s)")
+    return 0
+
+
+def cmd_goal(args: argparse.Namespace) -> int:
+    """Pursue a goal in a session's TUI: observe → act → repeat until done."""
+    if _resolve_tmux() is None:
+        print("emux: tmux not found on PATH.", file=sys.stderr)
+        return 2
+    result = pursue(
+        target=args.target,
+        goal=args.goal,
+        max_steps=args.max_steps,
+        by_registry_name=args.by_name,
+    )
+    for s in result.get("steps", []):
+        print(f"  {s}", file=sys.stderr)
+    if not result.get("ok"):
+        print(f"emux goal: {result.get('error', 'failed')} ({result.get('detail','')})", file=sys.stderr)
+        return 1
+    verdict = "achieved" if result.get("success") else "not achievable"
+    print(f"goal {verdict} in {len(result.get('steps', []))} step(s): {result.get('summary','')}")
+    return 0 if result.get("success") else 1
 def _watch_targets(
     registry: dict[str, dict[str, Any]],
     live: list[dict[str, Any]],
@@ -304,6 +377,7 @@ def cmd_register(args: argparse.Namespace) -> int:
         "session": args.session,
         "description": args.description,
         "tags": args.tags or [],
+        "manages": args.manages or [],
         "registered_at": int(time.time()),
     }
     _save_registry(registry)
@@ -538,6 +612,35 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("mcp", help="start the emux MCP server (stdio)")
     sub.add_parser("ls", help="print registered + live sessions (non-interactive)")
 
+    p_ask = sub.add_parser("ask", help="send a prompt to an AI in a tmux session, wait for it to settle, print the reply")
+    p_ask.add_argument("target", help="tmux session name (or registry name with -n)")
+    p_ask.add_argument("prompt", help="the message to send to the AI")
+    p_ask.add_argument("-n", "--by-name", action="store_true", help="resolve target via the registry")
+    p_ask.add_argument("--settle", type=float, default=2.5, help="reply is done once the pane is unchanged this long (default 2.5s)")
+    p_ask.add_argument("--max", type=float, default=90.0, help="hard cap on total wait (default 90s)")
+    p_ask.add_argument("-b", "--busy", action="append", metavar="MARKER",
+                       help="substring meaning the AI is still working (e.g. 'thinking'); never settle while on screen. Repeatable.")
+    p_ask.add_argument("--screen", action="store_true", help="print the full settled pane instead of just the reply delta")
+
+    p_nav = sub.add_parser("navigate", help="drive a session's TUI toward a goal, letting a model (claude -p) pick keystrokes")
+    p_nav.add_argument("target", help="tmux session name (or registry name with -n)")
+    p_nav.add_argument("goal", help="plain-English description of where to get to")
+    p_nav.add_argument("-n", "--by-name", action="store_true", help="resolve target via the registry")
+    p_nav.add_argument("--until", default=None, help="stop early if this substring appears on screen")
+    p_nav.add_argument("--max-steps", type=int, default=12, help="max navigation steps (default 12)")
+
+    p_goal = sub.add_parser("goal", help="pursue a GOAL in a session's TUI autonomously (observe→act→repeat until done)")
+    p_goal.add_argument("target", help="tmux session name (or registry name with -n)")
+    p_goal.add_argument("goal", help="what to accomplish, in plain English")
+    p_goal.add_argument("-n", "--by-name", action="store_true", help="resolve target via the registry")
+    p_goal.add_argument("--max-steps", type=int, default=15, help="max observe/act cycles (default 15)")
+
+    p_web = sub.add_parser("web", help="start the web daemon — monitor sessions in a browser (grid/groups/activity/flow/chat)")
+    p_web.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1; no auth — keep it local)")
+    p_web.add_argument("--port", type=int, default=8689, help="port (default 8689)")
+    p_web.add_argument("--open", action="store_true", help="open the browser after starting")
+    p_web.add_argument("--print-launchd", action="store_true",
+                       help="print a launchd plist that keeps the daemon running, then exit")
     p_watch = sub.add_parser("watch", help="watch registered + live sessions in one terminal")
     p_watch.add_argument("--once", action="store_true", help="render one snapshot and exit")
     p_watch.add_argument("--no-clear", action="store_true", help="do not clear screen between refreshes")
@@ -551,6 +654,8 @@ def main(argv: list[str] | None = None) -> int:
     p_reg.add_argument("session")
     p_reg.add_argument("-d", "--description", default=None)
     p_reg.add_argument("-t", "--tags", nargs="*")
+    p_reg.add_argument("-m", "--manages", nargs="*",
+                       help="other registered names (or session ids) this agent manages — drawn as arrows in `emux web` flow view")
 
     p_unreg = sub.add_parser("unregister", help="remove a session from the registry")
     p_unreg.add_argument("name")
@@ -596,8 +701,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "mcp":
         run_mcp_server()
         return 0
+    if args.cmd == "web":
+        if args.print_launchd:
+            from .web import launchd_plist
+            print(launchd_plist(host=args.host, port=args.port), end="")
+            return 0
+        from .web import run_web
+        return run_web(host=args.host, port=args.port, open_browser=args.open)
     if args.cmd == "ls":
         return cmd_ls()
+    if args.cmd == "ask":
+        return cmd_ask(args)
+    if args.cmd == "navigate":
+        return cmd_navigate(args)
+    if args.cmd == "goal":
+        return cmd_goal(args)
     if args.cmd == "watch":
         return cmd_watch(args)
     if args.cmd == "register":

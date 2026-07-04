@@ -1,0 +1,232 @@
+[
+  {
+    "target_id": "emux-web:000-north-star",
+    "target": "Watch and steer several local agent/tmux sessions from one screen, with a manages-hierarchy flow of live panes and click-to-zoom steering.",
+    "probe": "docs/north-star.md committed: job, target user, success signal, explicit non-goals.",
+    "delta": "Closed \u2014 intent now lives in the repo, not only in chat.",
+    "class": "match",
+    "evidence": "docs/north-star.md",
+    "next_action": "Hold; revise if scope changes (e.g. mobile or hosted-fleet stops being a non-goal).",
+    "adapter": "human",
+    "convergence_style": "exploratory_narrowing",
+    "required": true,
+    "why": "A demo can dazzle while the actual job stays undocumented; the next session re-derives intent from chat."
+  },
+  {
+    "target_id": "emux-web:010-pytest-suite",
+    "target": "The Python surface (session listing, capture/send payloads, change detection, agent detection, HTTP routing + guards, grid cache/eviction, cycle data) is covered by automated tests.",
+    "probe": "uv run pytest -q --junitxml -> 41 passed.",
+    "delta": "All green, but every tmux call is monkeypatched \u2014 these prove logic, not real tmux behavior or any browser rendering.",
+    "class": "pass_controlled_harness",
+    "evidence": ".converge/pytest-rows.json (41 rows); /tmp/emux-junit.xml",
+    "next_action": "Keep green; do not let this stand in for real-surface proof of capture/send/render.",
+    "adapter": "converge:pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "proof_envelope": {
+      "environment": "ci/local-unit",
+      "surface": "pytest with mocked _run_tmux/_live_sessions/_pane_command",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux server",
+        "real pane content",
+        "real browser DOM/JS"
+      ],
+      "fails_to_test": [
+        "flow view renders without hanging in a real browser",
+        "send-keys actually reaches a live pane",
+        "agent detection against a real pane_current_command",
+        "mobile / accessibility / error-recovery UX"
+      ]
+    }
+  },
+  {
+    "target_id": "emux-web:020-flow-live-panes",
+    "target": "The flow view renders each session as a LIVE mini tmux pane in the manages hierarchy, streaming in place without flicker.",
+    "probe": "Loaded FLOW at http://127.0.0.1:8689 with a real boss->{lead-a,lead-b}->{worker,worker2} tree; panes updated in place.",
+    "delta": "Proven once, by eye, in this session \u2014 no repeatable artifact or assertion.",
+    "class": "pass_real_surface",
+    "evidence": "browser screenshots ss_92733pc9e, ss_5610kw1rz (2026-06-15)",
+    "next_action": "Capture a re-runnable browser proof (Playwright/claude-in-chrome script) that asserts N .fbox elements with non-empty live content and no console errors.",
+    "adapter": "human:browser",
+    "convergence_style": "consensus_evidence",
+    "required": true,
+    "proof_envelope": {
+      "environment": "local-daemon",
+      "surface": "browser flow view",
+      "base_origin": "http://127.0.0.1:8689",
+      "captured_at": "2026-06-15",
+      "freshness_days": 7,
+      "fails_to_test": [
+        "repeatable assertion",
+        "behavior under many sessions",
+        "behavior when a pane dies mid-view"
+      ]
+    }
+  },
+  {
+    "target_id": "emux-web:040b-error-recovery-ui",
+    "target": "On daemon failure the modal keeps the user's unsent draft, shows a clear failure state, and auto-reconnects when the daemon returns.",
+    "probe": "Opened the steer modal, typed a draft, killed the daemon, clicked SEND, then restarted the daemon.",
+    "delta": "Fixed an optimistic-clear bug that dropped the draft on send-failure; now the draft is restored if the send does not land.",
+    "class": "pass_real_surface",
+    "evidence": "browser JS read 2026-06-15: after failed send input='print(...)' (kept), status='unreachable'; after daemon restart status auto-returned to 'live' with the draft intact",
+    "next_action": "Hold; re-verify if the send/poll flow changes. Server half is covered by the real-surface probe (emux-web:040-error-recovery).",
+    "adapter": "human:browser",
+    "convergence_style": "graceful_degradation",
+    "required": true,
+    "why": "Failure handling is most of perceived quality for an always-on cockpit instrument.",
+    "proof_envelope": {
+      "environment": "local-daemon, daemon killed and restarted under a live modal",
+      "surface": "browser steer modal (#modalinput / #modalstatus)",
+      "base_origin": "http://127.0.0.1:8689",
+      "captured_at": "2026-06-15",
+      "freshness_days": 7,
+      "fails_to_test": [
+        "draft preservation in the chat-view composer (now unreachable via clicks)"
+      ]
+    }
+  },
+  {
+    "target_id": "emux-web:ux01-status-means-state",
+    "target": "A session's status signal answers 'which one needs me?' — distinct states for working / idle / waiting-on-input / crashed, not just alive.",
+    "probe": "Synthetic user 'Riley' triage run 2026-06-15.",
+    "delta": "Every sidebar dot is green = 'tmux session exists'. Idle, stuck, and crashed sessions all look identical, so triage (the whole job) fails at a glance.",
+    "class": "fail",
+    "evidence": ".converge/synthetic-user.md report: 'every session looks green/active; it tells me THAT things are running, not WHICH one needs me'",
+    "next_action": "Derive a real state per session (output flowing -> working; quiet -> idle; pane matches an input/(y/n) prompt or traceback -> needs-attention; gone -> dead) and color the dot/border by it.",
+    "adapter": "synthetic-user:riley",
+    "convergence_style": "exploratory_narrowing",
+    "required": true,
+    "why": "This is the question the cockpit exists to answer; decorative status defeats its purpose."
+  },
+  {
+    "target_id": "emux-web:ux02-needs-attention-surfacing",
+    "target": "Sessions blocked on input, on a (y/n) prompt, or showing a traceback bubble to the top with a badge.",
+    "probe": "Synthetic user run: scraper blocked on input(), tokut-8766 had a ConnectionResetError traceback — both 'needs a human'.",
+    "delta": "Neither is flagged anywhere; only caught by reading raw pane text.",
+    "class": "missing",
+    "evidence": ".converge/synthetic-user.md friction log #7",
+    "next_action": "Detect attention-needed patterns in pane tails and surface them (sort-to-top + badge) across grid/flow/activity.",
+    "adapter": "synthetic-user:riley",
+    "convergence_style": "consensus_evidence",
+    "required": true
+  },
+  {
+    "target_id": "emux-web:ux03-triage-in-sidebar",
+    "target": "The primary triage signal (recent-activity + idle-for-N) is visible where the user first looks — the sidebar — not only in the ACTIVITY tab.",
+    "probe": "Riley found the ACTIVITY sparkline view last; the sidebar dots carried no triage signal.",
+    "delta": "Real signal is buried one nav-tab away; 'active —' vs 'active 3s ago' is too subtle and everything reads 'active'.",
+    "class": "missing",
+    "evidence": ".converge/synthetic-user.md friction log #4,#5",
+    "next_action": "Put a tiny activity sparkline / 'idle N' on each sidebar card; reserve the word 'active' for sessions actually emitting.",
+    "adapter": "synthetic-user:riley",
+    "convergence_style": "regression_hardening",
+    "required": false
+  },
+  {
+    "target_id": "emux-web:ux04-click-affordance",
+    "target": "Clicking anywhere on a flow box opens its steer modal; the click target is obvious.",
+    "probe": "Riley's first click on a pane body was a no-op; only the title bar worked (needs reproduction — body click may have landed on empty canvas).",
+    "delta": "Either a real dead-zone or an unclear affordance; cost the user a step.",
+    "class": "missing",
+    "evidence": ".converge/synthetic-user.md friction log #2",
+    "next_action": "Reproduce a body-click; ensure the whole .fbox is the hit target and add a hover affordance (cursor/overlay 'click to steer').",
+    "adapter": "synthetic-user:riley",
+    "convergence_style": "exact_match",
+    "required": false
+  },
+  {
+    "target_id": "emux-web:ux05-agent-current-task",
+    "target": "A detected agent box shows a one-line 'currently: <task / idle at prompt>' instead of only the raw pane.",
+    "probe": "claude-refactor showed only the Claude Code welcome splash; no sense of what it had done.",
+    "delta": "Raw pane only; no task/recent-activity summary for detected agents.",
+    "class": "missing",
+    "evidence": ".converge/synthetic-user.md goal 3",
+    "next_action": "Heuristic 'currently' line from the pane tail for known agents (idle-at-prompt vs working vs awaiting-approval).",
+    "adapter": "synthetic-user:riley",
+    "convergence_style": "tolerance_band",
+    "required": false
+  },
+  {
+    "target_id": "emux-web:041-empty-edge-inputs",
+    "target": "Empty, huge, multiline, pasted, and control-bearing inputs behave predictably in the steer input and modal.",
+    "probe": "Not tested. Empty send is guarded (if(!text)); other edges unknown.",
+    "delta": "No edge-input proof.",
+    "class": "missing",
+    "evidence": "none",
+    "next_action": "Exercise empty/huge/multiline/paste in the modal input; confirm send behavior and that send-keys -l handles them.",
+    "adapter": "human:browser",
+    "convergence_style": "exact_match",
+    "required": false
+  },
+  {
+    "target_id": "emux-web:042-accessibility",
+    "target": "The UI is usable by keyboard, screen reader, visible focus, and sufficient contrast; the modal traps focus and Esc closes it.",
+    "probe": "Esc closes modal and number keys switch views (verified). No screen-reader semantics, focus-trap, or contrast audit.",
+    "delta": "Keyboard partially proven; assistive-tech and contrast unproven.",
+    "class": "missing",
+    "evidence": "keyboard handlers present in code; no a11y audit",
+    "next_action": "Run an automated a11y check on the page; add aria roles to modal/dialog and verify focus trap.",
+    "adapter": "human:browser",
+    "convergence_style": "regression_hardening",
+    "required": false
+  },
+  {
+    "target_id": "emux-web:043-mobile-layout",
+    "target": "The cockpit remains usable on a narrow viewport (or explicitly declares desktop-only as a non-goal).",
+    "probe": "docs/north-star.md declares desktop-first; mobile is an explicit non-goal.",
+    "delta": "Closed by scoping decision (not a responsive build).",
+    "class": "match",
+    "evidence": "docs/north-star.md (Non-goals: Desktop-first)",
+    "next_action": "Revisit only if mobile stops being a non-goal.",
+    "adapter": "human",
+    "convergence_style": "graceful_degradation",
+    "required": false
+  },
+  {
+    "target_id": "emux-web:050-daemon-as-service",
+    "target": "`emux web` survives logout/reboot as a real service (launchd), matching the README's persistence claim.",
+    "probe": "`emux web --print-launchd` emits a RunAtLoad/KeepAlive plist (test asserts it is well-formed). Never actually installed or reboot-tested.",
+    "delta": "The plist is generated and shaped right, but 'persistent daemon' is unproven on a real machine.",
+    "class": "pass_with_bypass",
+    "evidence": "test_launchd_plist_is_well_formed; README install steps",
+    "next_action": "Install the plist, launchctl load, kill the process, confirm KeepAlive restarts it; optionally a reboot check.",
+    "adapter": "human",
+    "convergence_style": "consensus_evidence",
+    "required": false,
+    "proof_envelope": {
+      "environment": "string-generation only",
+      "surface": "launchd plist text",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "never loaded into launchd",
+        "never reboot-tested"
+      ],
+      "fails_to_test": [
+        "RunAtLoad on real login",
+        "KeepAlive restart on crash"
+      ]
+    }
+  },
+  {
+    "target_id": "emux-web:060-flow-recursion-guard",
+    "target": "A cyclic manages relationship (A->B->A) renders without hanging the browser.",
+    "probe": "Live-demoed a 3-node cycle earlier; harness test pins that grid_payload carries both loop edges.",
+    "delta": "Real-surface (no hang) verified by eye; only the data layer is automated.",
+    "class": "pass_controlled_harness",
+    "evidence": "test_flow_handles_recursive_manages_cycle; browser cycle demo 2026-06-12",
+    "next_action": "Optional: scripted browser proof that a cyclic registry renders and the JS guard terminates.",
+    "adapter": "converge:pytest",
+    "convergence_style": "regression_hardening",
+    "required": false,
+    "proof_envelope": {
+      "environment": "local-unit + manual browser",
+      "surface": "grid_payload data + manual flow render",
+      "captured_at": "2026-06-15",
+      "fails_to_test": [
+        "automated assertion that the JS BFS guard terminates"
+      ]
+    }
+  }
+]

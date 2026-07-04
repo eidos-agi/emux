@@ -1,0 +1,863 @@
+[
+  {
+    "target_id": "pytest:tests.test_basic::test_import",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_basic::test_import",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_basic::test_load_registry_handles_corrupt_file",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_basic::test_load_registry_handles_corrupt_file",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_basic::test_load_registry_returns_empty_when_missing",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_basic::test_load_registry_returns_empty_when_missing",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_basic::test_register_and_unregister_round_trip",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_basic::test_register_and_unregister_round_trip",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_basic::test_registry_round_trip",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_basic::test_registry_round_trip",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_basic::test_resolve_tmux_returns_string_or_none",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_basic::test_resolve_tmux_returns_string_or_none",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_basic::test_send_by_registry_name_resolves",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_basic::test_send_by_registry_name_resolves",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_basic::test_send_by_registry_name_unknown_returns_error",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_basic::test_send_by_registry_name_unknown_returns_error",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_basic::test_server_module_loads",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_basic::test_server_module_loads",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_basic::test_tmux_capture_handles_missing_tmux",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_basic::test_tmux_capture_handles_missing_tmux",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_basic::test_tmux_send_handles_missing_tmux",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_basic::test_tmux_send_handles_missing_tmux",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_basic::test_tmux_sessions_handles_missing_tmux",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_basic::test_tmux_sessions_handles_missing_tmux",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_basic::test_unregister_unknown_returns_error",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_basic::test_unregister_unknown_returns_error",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_capture_payload_reports_failure",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_capture_payload_reports_failure",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_detect_agent_falls_back_to_content_signature",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_detect_agent_falls_back_to_content_signature",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_detect_agent_from_pane_command",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_detect_agent_from_pane_command",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_flow_handles_recursive_manages_cycle",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_flow_handles_recursive_manages_cycle",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_grid_payload_attaches_agent",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_grid_payload_attaches_agent",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_grid_payload_stale_session_has_no_capture",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_grid_payload_stale_session_has_no_capture",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_http_capture",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_http_capture",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_http_capture_requires_session",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_http_capture_requires_session",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_http_grid",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_http_grid",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_http_healthz_is_unguarded",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_http_healthz_is_unguarded",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_http_rejects_foreign_host",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_http_rejects_foreign_host",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_http_send",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_http_send",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_http_send_allows_same_origin",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_http_send_allows_same_origin",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_http_send_rejects_bad_body",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_http_send_rejects_bad_body",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_http_send_rejects_cross_origin",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_http_send_rejects_cross_origin",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_http_serves_ui",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_http_serves_ui",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_http_sessions",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_http_sessions",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_http_unknown_route_404",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_http_unknown_route_404",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_launchd_plist_is_well_formed",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_launchd_plist_is_well_formed",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_normalize_collapses_spinner_and_cursor_noise",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_normalize_collapses_spinner_and_cursor_noise",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_observe_ignores_spinner_frame_change",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_observe_ignores_spinner_frame_change",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_poll_once_evicts_dead_sessions",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_poll_once_evicts_dead_sessions",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_poll_once_tracks_activity_then_grid_reads_cache",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_poll_once_tracks_activity_then_grid_reads_cache",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_send_payload_literal_sends_text_then_enter",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_send_payload_literal_sends_text_then_enter",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_send_payload_named_key",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_send_payload_named_key",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_sessions_payload_includes_created_unix",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_sessions_payload_includes_created_unix",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_sessions_payload_merges_registry_and_live",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_sessions_payload_merges_registry_and_live",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  },
+  {
+    "target_id": "pytest:tests.test_web::test_sessions_payload_without_tmux",
+    "target": "pass",
+    "probe": "pass",
+    "delta": "",
+    "class": "pass_controlled_harness",
+    "evidence": "pytest:tests.test_web::test_sessions_payload_without_tmux",
+    "next_action": "",
+    "adapter": "pytest",
+    "convergence_style": "regression_hardening",
+    "required": true,
+    "weight": 1,
+    "proof_envelope": {
+      "surface": "pytest mocked tmux",
+      "captured_at": "2026-06-15",
+      "bypassed_controls": [
+        "real tmux",
+        "real browser"
+      ]
+    }
+  }
+]
