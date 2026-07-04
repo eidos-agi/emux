@@ -688,6 +688,216 @@ async def tmux_navigate(
     )
 
 
+# ---- pursue: goal mode -----------------------------------------------------
+#
+# navigate() reaches a SCREEN; pursue() reaches a GOAL. It's the full loop:
+# observe → decide one action (navigate keys / type a message or field value /
+# wait for a streamed reply / declare done) → act → observe again, until the
+# model judges the goal met (or impossible) or max_steps is hit. Same escalation
+# (Haiku → Sonnet on a stall) and the same keystroke allowlist as navigate.
+#
+# It's still keystrokes-into-a-TUI — no shell exec, no new powers — just a longer
+# leash and a done-judgment about the goal rather than a single screen.
+
+_PURSUE_ACTIONS = ("keys", "type", "wait", "done")
+
+
+def _wait_stable(
+    session: str, capture_lines: int, settle_seconds: float, poll: float, cap: float
+) -> str:
+    """Poll the pane until it's unchanged for settle_seconds (or cap). Returns
+    the settled, ANSI-stripped screen. Used so the model always judges a settled
+    frame, and for the explicit 'wait' action after sending a message to an AI."""
+    last: str | None = None
+    stable = 0.0
+    waited = 0.0
+    while waited < cap:
+        time.sleep(poll)
+        waited += poll
+        try:
+            cur = _strip_ansi(_capture_text(session, capture_lines))
+        except (RuntimeError, FileNotFoundError):
+            break
+        if cur == last:
+            stable += poll
+            if stable >= settle_seconds:
+                break
+        else:
+            stable = 0.0
+            last = cur
+    return last if last is not None else ""
+
+
+def _pursue_decide(
+    chain: list[str], goal: str, screen: str, history: list[str]
+) -> dict[str, Any]:
+    """Ask the model for the next goal-mode action, escalating on a stall.
+
+    Returns a validated action dict {action, ...} or {stall: <reason>}."""
+    claude = shutil.which("claude")
+    if claude is None:
+        return {"stall": "claude CLI not on PATH (needed for goal mode)"}
+    hist = "\n".join(f"  - {h}" for h in history[-10:]) or "  (none yet)"
+    prompt = (
+        "You are pursuing a GOAL by operating a terminal UI. Each turn, look at "
+        "the current SCREEN and history, and choose ONE action to make progress.\n\n"
+        f"GOAL: {goal}\n\n"
+        f"HISTORY (your prior actions + what you observed):\n{hist}\n\n"
+        f"CURRENT SCREEN:\n<<<\n{screen}\n>>>\n\n"
+        "Reply with ONE line of JSON, nothing else. One of:\n"
+        '  {\"thought\":\"..\",\"action\":\"keys\",\"keys\":[<tmux key names>]}\n'
+        '  {\"thought\":\"..\",\"action\":\"type\",\"text\":\"..\",\"submit\":true}\n'
+        '  {\"thought\":\"..\",\"action\":\"wait\"}\n'
+        '  {\"thought\":\"..\",\"action\":\"done\",\"success\":true,\"summary\":\"..\"}\n\n'
+        f"Allowed key names: {sorted(_NAV_ALLOWED_KEYS)}.\n"
+        "- 'keys' to navigate menus (e.g. [\"Down\",\"Enter\"]).\n"
+        "- 'type' to enter a message, answer, or field value; submit=true presses Enter.\n"
+        "- 'wait' if a reply is still streaming / the screen is mid-update.\n"
+        "- 'done' when the GOAL is achieved (success=true) or clearly impossible "
+        "(success=false); summary states the outcome / answer.\n"
+        "Prefer the fewest actions. Never invent a key outside the allowed list."
+    )
+    last: dict[str, Any] = {}
+    for model in chain:
+        try:
+            proc = subprocess.run([claude, "-p", prompt, "--model", model],
+                                  capture_output=True, text=True, timeout=90)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            last = {"stall": f"claude -p failed: {e}", "model": model}
+            continue
+        m = re.search(r"\{.*\}", proc.stdout or "", re.DOTALL)
+        if not m:
+            last = {"stall": "no JSON in model reply", "raw": (proc.stdout or "")[:400], "model": model}
+            continue
+        try:
+            d = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            last = {"stall": "unparseable JSON", "raw": (proc.stdout or "")[:400], "model": model}
+            continue
+        action = d.get("action")
+        if action not in _PURSUE_ACTIONS:
+            last = {"stall": f"bad action {action!r}", "model": model}
+            continue
+        if action == "keys":
+            d["keys"] = [k for k in (d.get("keys") or []) if k in _NAV_ALLOWED_KEYS]
+            if not d["keys"]:
+                last = {"stall": "no valid keys", "model": model}
+                continue
+        if action == "type" and not (d.get("text") or "").strip():
+            last = {"stall": "type with empty text", "model": model}
+            continue
+        d["model"] = model
+        return d
+    return {"stall": last.get("stall", "unknown"), **last}
+
+
+def pursue(
+    target: str,
+    goal: str,
+    max_steps: int = 15,
+    settle_seconds: float = 2.5,
+    wait_cap: float = 60.0,
+    capture_lines: int = 200,
+    model: str | None = None,
+    by_registry_name: bool = False,
+) -> dict[str, Any]:
+    """Pursue `goal` in a tmux TUI: observe → act → observe until done.
+
+    The autonomous goal loop over navigate/ask primitives. Each step the model
+    picks one action (keys / type / wait / done); after acting, emux waits for the
+    screen to settle before the next observation, so the model reasons over a
+    stable frame and can read an agent's reply. emux never spawns — the session
+    must already exist and be running whatever UI the goal concerns."""
+    if _resolve_tmux() is None:
+        return {"ok": False, "error": "tmux_not_installed"}
+    session = target
+    if by_registry_name:
+        registry = _load_registry()
+        if target not in registry:
+            return {"ok": False, "error": "not_registered", "name": target}
+        session = registry[target]["session"]
+    chain = [model] if model else [_NAV_MODEL_DEFAULT, _NAV_MODEL_ESCALATE]
+
+    history: list[str] = []
+    for step in range(max_steps):
+        try:
+            screen = _strip_ansi(_capture_text(session, capture_lines))
+        except (RuntimeError, FileNotFoundError) as e:
+            return {"ok": False, "error": "capture_failed", "stderr": str(e), "steps": history}
+
+        d = _pursue_decide(chain, goal, screen, history)
+        if "stall" in d:
+            return {"ok": False, "error": "model_stalled", "detail": d["stall"],
+                    "raw": d.get("raw"), "steps": history, "screen": screen}
+
+        action = d["action"]
+        esc = "" if d.get("model") == chain[0] else f" [escalated:{d.get('model')}]"
+        thought = d.get("thought", "")
+
+        if action == "done":
+            return {"ok": True, "reached": "done", "success": bool(d.get("success", True)),
+                    "summary": d.get("summary", ""), "steps": history, "screen": screen}
+        if action == "wait":
+            screen = _wait_stable(session, capture_lines, settle_seconds, 0.8, wait_cap)
+            history.append(f"step {step + 1}: wait{esc} — observed: {_tail(screen)}")
+            continue
+        if action == "keys":
+            for k in d["keys"]:
+                _run_tmux(["send-keys", "-t", session, k])
+            history.append(f"step {step + 1}: keys={d['keys']} ({thought!r}){esc}")
+        elif action == "type":
+            _run_tmux(["send-keys", "-t", session, "-l", d["text"]])
+            if d.get("submit"):
+                _run_tmux(["send-keys", "-t", session, "Enter"])
+            history.append(f"step {step + 1}: type={d['text']!r} submit={bool(d.get('submit'))} ({thought!r}){esc}")
+
+        # Let the UI react, then re-observe a settled frame next loop.
+        settled = _wait_stable(session, capture_lines, settle_seconds, 0.8, wait_cap)
+        history[-1] += f" -> {_tail(settled)}"
+
+    final = _strip_ansi(_capture_text(session, capture_lines))
+    return {"ok": False, "error": "max_steps_reached", "steps": history, "screen": final}
+
+
+def _tail(screen: str, n: int = 3) -> str:
+    """Last n non-blank lines of a screen, one line, for compact history."""
+    lines = [ln.strip() for ln in screen.splitlines() if ln.strip()]
+    return " | ".join(lines[-n:])[:240]
+
+
+@mcp.tool()
+async def tmux_goal(
+    target: str,
+    goal: str,
+    max_steps: int = 15,
+    by_registry_name: bool = False,
+) -> dict[str, Any]:
+    """Pursue a GOAL in a tmux TUI autonomously — observe, act, repeat until done.
+
+    Goal mode: the level above tmux_navigate. Where navigate reaches a screen,
+    this keeps going until the whole task is done — walking menus, typing
+    messages/answers/field values, waiting for streamed replies, and judging
+    completion. Each step a model (`claude -p`, fixed-cost — never the API) picks
+    one action: navigate keys, type text, wait, or done. Escalates Haiku→Sonnet
+    on a stall; keystrokes are allowlist-restricted.
+
+    Still keystrokes-into-a-TUI — it cannot exec shell or do anything a person at
+    that terminal couldn't. emux never spawns; create the session first.
+
+    Args:
+        target: tmux session name, or registry name if `by_registry_name=True`.
+        goal: What to accomplish, e.g. "Ask the Railway agent to list my services,
+            then tell me which have a cron schedule."
+        max_steps: Max observe/act cycles before giving up (default 15).
+        by_registry_name: Resolve `target` via the registry.
+
+    Returns:
+        {ok, reached:"done", success, summary, steps:[...], screen} on completion;
+        {ok:false, error, steps, screen} on stall / max_steps.
+    """
+    return await asyncio.to_thread(pursue, target, goal, max_steps, 2.5, 60.0, 200, None, by_registry_name)
+
+
 def run_mcp_server() -> None:
     """Start the emux MCP server (stdio transport).
 

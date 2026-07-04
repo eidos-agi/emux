@@ -28,6 +28,7 @@ from .server import (
     _save_registry,
     converse,
     navigate,
+    pursue,
     run_mcp_server,
 )
 
@@ -193,6 +194,27 @@ def cmd_navigate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_goal(args: argparse.Namespace) -> int:
+    """Pursue a goal in a session's TUI: observe → act → repeat until done."""
+    if _resolve_tmux() is None:
+        print("emux: tmux not found on PATH.", file=sys.stderr)
+        return 2
+    result = pursue(
+        target=args.target,
+        goal=args.goal,
+        max_steps=args.max_steps,
+        by_registry_name=args.by_name,
+    )
+    for s in result.get("steps", []):
+        print(f"  {s}", file=sys.stderr)
+    if not result.get("ok"):
+        print(f"emux goal: {result.get('error', 'failed')} ({result.get('detail','')})", file=sys.stderr)
+        return 1
+    verdict = "achieved" if result.get("success") else "not achievable"
+    print(f"goal {verdict} in {len(result.get('steps', []))} step(s): {result.get('summary','')}")
+    return 0 if result.get("success") else 1
+
+
 def cmd_register(args: argparse.Namespace) -> int:
     """Non-interactive register command for scripting."""
     import time
@@ -248,6 +270,12 @@ def main(argv: list[str] | None = None) -> int:
     p_nav.add_argument("--until", default=None, help="stop early if this substring appears on screen")
     p_nav.add_argument("--max-steps", type=int, default=12, help="max navigation steps (default 12)")
 
+    p_goal = sub.add_parser("goal", help="pursue a GOAL in a session's TUI autonomously (observe→act→repeat until done)")
+    p_goal.add_argument("target", help="tmux session name (or registry name with -n)")
+    p_goal.add_argument("goal", help="what to accomplish, in plain English")
+    p_goal.add_argument("-n", "--by-name", action="store_true", help="resolve target via the registry")
+    p_goal.add_argument("--max-steps", type=int, default=15, help="max observe/act cycles (default 15)")
+
     p_web = sub.add_parser("web", help="start the web daemon — monitor sessions in a browser (grid/groups/activity/flow/chat)")
     p_web.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1; no auth — keep it local)")
     p_web.add_argument("--port", type=int, default=8689, help="port (default 8689)")
@@ -287,6 +315,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_ask(args)
     if args.cmd == "navigate":
         return cmd_navigate(args)
+    if args.cmd == "goal":
+        return cmd_goal(args)
     if args.cmd == "register":
         return cmd_register(args)
     if args.cmd == "unregister":

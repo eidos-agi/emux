@@ -95,6 +95,67 @@ def test_navigate_stalls_when_all_models_fail(monkeypatch):
     assert not out["ok"] and out["error"] == "model_stalled"
 
 
+def test_pursue_types_then_declares_done(monkeypatch):
+    """Goal loop: model types a message, then next turn declares the goal done."""
+    from emux import server
+
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_capture_text", lambda s, n: "prompt >")
+    monkeypatch.setattr(server, "_wait_stable", lambda *a, **k: "agent replied: 3 services")
+    sent: list[list[str]] = []
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: sent.append(args) or (0, "", ""))
+
+    steps = iter([
+        {"action": "type", "text": "list my services", "submit": True, "thought": "ask", "model": server._NAV_MODEL_DEFAULT},
+        {"action": "done", "success": True, "summary": "3 services", "model": server._NAV_MODEL_DEFAULT},
+    ])
+    monkeypatch.setattr(server, "_pursue_decide", lambda *a, **k: next(steps))
+
+    out = server.pursue("sess", "find out how many services I have", max_steps=5)
+    assert out["ok"] and out["reached"] == "done" and out["success"] is True
+    assert out["summary"] == "3 services"
+    # It typed the message and submitted it.
+    assert ["send-keys", "-t", "sess", "-l", "list my services"] in sent
+    assert ["send-keys", "-t", "sess", "Enter"] in sent
+
+
+def test_pursue_stall_propagates(monkeypatch):
+    from emux import server
+
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_capture_text", lambda s, n: "screen")
+    monkeypatch.setattr(server, "_pursue_decide", lambda *a, **k: {"stall": "no JSON in model reply"})
+    out = server.pursue("sess", "goal", max_steps=3)
+    assert not out["ok"] and out["error"] == "model_stalled"
+
+
+def test_pursue_hits_max_steps(monkeypatch):
+    """A model that only ever says 'wait' must terminate at max_steps, not loop."""
+    from emux import server
+
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_capture_text", lambda s, n: "screen")
+    monkeypatch.setattr(server, "_wait_stable", lambda *a, **k: "screen")
+    monkeypatch.setattr(server, "_pursue_decide",
+                        lambda *a, **k: {"action": "wait", "model": server._NAV_MODEL_DEFAULT})
+    out = server.pursue("sess", "goal", max_steps=3)
+    assert not out["ok"] and out["error"] == "max_steps_reached"
+    assert len(out["steps"]) == 3
+
+
+def test_pursue_decide_rejects_bad_action(monkeypatch):
+    """_pursue_decide stalls on an unknown action name rather than passing it through."""
+    from emux import server
+
+    monkeypatch.setattr(server.shutil, "which", lambda _n: "/usr/bin/claude")
+
+    class _P:
+        stdout = '{"action": "sudo", "text": "rm"}'
+    monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: _P())
+    out = server._pursue_decide(["m"], "goal", "screen", [])
+    assert "stall" in out and "bad action" in out["stall"]
+
+
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
 def test_converse_against_cat_echo():
     """`cat` echoes stdin — a deterministic stand-in for a TUI AI. converse
