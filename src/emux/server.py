@@ -847,6 +847,58 @@ def _observe(session: str, capture_lines: int, retries: int = 1) -> str | None:
 _STUCK_LIMIT = 3
 
 
+# ---- telos: drift-guard for the goal loop ----------------------------------
+#
+# When enabled, pursue() reports each iteration to telos-md (the eidos drift-
+# guard). telos records the whole run — a north star, a tick per step, a close —
+# and returns a signal; if it ever says "stop" (drift or no-progress by telos's
+# own judgment) the goal loop aborts. This is the first weld between emux (the
+# hands) and telos (the conscience): an autonomous loop watched by an external
+# guard, and a durable record of what the agent did.
+#
+# Opt-in and best-effort: if telos-md isn't on PATH or a call fails, the loop
+# proceeds unguarded — telos never breaks a run. All emux goal runs are tracked
+# in one telos home ($EMUX_TELOS_HOME, default ~/.local/share/emux/telos) so
+# `telos-md traffic --repo-path <that>` shows every autonomous run.
+
+_TELOS_METRIC = "reach the goal through the TUI without drifting or stalling"
+
+
+def _telos_available() -> bool:
+    return shutil.which("telos-md") is not None
+
+
+def _telos_home() -> str:
+    home = os.environ.get("EMUX_TELOS_HOME") or str(
+        Path.home() / ".local" / "share" / "emux" / "telos"
+    )
+    p = Path(home)
+    p.mkdir(parents=True, exist_ok=True)
+    if not (p / ".git").exists():  # telos anchors .telos/ inside a git repo
+        subprocess.run(["git", "init", "-q"], cwd=home, capture_output=True)
+    return home
+
+
+def _telos_call(args: list[str], home: str) -> dict[str, Any] | None:
+    """Run a telos-md subcommand with --json; parsed dict or None on any failure."""
+    try:
+        proc = subprocess.run(
+            ["telos-md", *args, "--repo-path", home, "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    m = re.search(r"\{.*\}", proc.stdout or "", re.DOTALL)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return None
+
+
 def pursue(
     target: str,
     goal: str,
@@ -856,6 +908,7 @@ def pursue(
     capture_lines: int = 200,
     model: str | None = None,
     by_registry_name: bool = False,
+    telos: bool = False,
 ) -> dict[str, Any]:
     """Pursue `goal` in a tmux TUI: observe → act → observe until done.
 
@@ -863,7 +916,12 @@ def pursue(
     picks one action (keys / type / wait / done); after acting, emux waits for the
     screen to settle before the next observation, so the model reasons over a
     stable frame and can read an agent's reply. emux never spawns — the session
-    must already exist and be running whatever UI the goal concerns."""
+    must already exist and be running whatever UI the goal concerns.
+
+    telos=True routes the run through the telos-md drift-guard: a north star is
+    opened for `goal`, each step ticks telos, a telos `stop` signal aborts the
+    loop (`telos_stop`), and the north star is closed (reached/abandoned) on exit.
+    Best-effort — a missing telos-md just means the loop runs unguarded."""
     if _resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
     session = target
@@ -874,6 +932,40 @@ def pursue(
         session = registry[target]["session"]
     chain = [model] if model else [_NAV_MODEL_DEFAULT, _NAV_MODEL_ESCALATE]
 
+    # Open a telos north star for this run, if requested and available.
+    ns_id: str | None = None
+    thome: str | None = None
+    if telos and _telos_available():
+        thome = _telos_home()
+        opened = _telos_call(
+            ["set-north-star", "--goal", goal, "--metric", _TELOS_METRIC], thome
+        )
+        ns_id = (opened or {}).get("north_star_id")
+
+    result = _pursue_core(
+        session, goal, chain, max_steps, settle_seconds, wait_cap,
+        capture_lines, ns_id, thome,
+    )
+
+    if ns_id and thome:  # close the north star with a terminal outcome
+        outcome = "reached" if result.get("ok") and result.get("success") else "abandoned"
+        _telos_call(["close", "--north-star-id", ns_id, "--outcome", outcome], thome)
+        result["telos"] = {"north_star_id": ns_id, "outcome": outcome}
+    return result
+
+
+def _pursue_core(
+    session: str,
+    goal: str,
+    chain: list[str],
+    max_steps: int,
+    settle_seconds: float,
+    wait_cap: float,
+    capture_lines: int,
+    ns_id: str | None = None,
+    thome: str | None = None,
+) -> dict[str, Any]:
+    """The observe→act→judge loop. Ticks telos each step when ns_id is set."""
     history: list[str] = []
     no_progress = 0  # consecutive actions that changed nothing on screen
     for step in range(max_steps):
@@ -944,6 +1036,23 @@ def pursue(
             no_progress = 0
             history[-1] += f" -> {_tail(settled)}"
 
+        # --- telos drift-guard: report this step; honor a stop signal ---
+        if ns_id and thome:
+            tick = _telos_call(
+                ["tick", "--north-star-id", ns_id,
+                 "--action-summary", (thought or action)[:200],
+                 # measurement is the settled UI signature: it stays constant
+                 # when the agent is stuck, so telos's zero-delta guard fires.
+                 "--measurement", _tail(settled, 2) or "(blank)"],
+                thome,
+            )
+            if tick and tick.get("signal") == "stop":
+                why = tick.get("drift_category") or tick.get("heading") or "drift"
+                history[-1] += f" [telos STOP: {why}]"
+                return {"ok": False, "error": "telos_stop",
+                        "detail": f"telos halted the run: {why}",
+                        "steps": history, "screen": settled}
+
     final = _observe(session, capture_lines) or ""
     return {"ok": False, "error": "max_steps_reached", "steps": history, "screen": final}
 
@@ -960,6 +1069,7 @@ async def tmux_goal(
     goal: str,
     max_steps: int = 15,
     by_registry_name: bool = False,
+    telos: bool = False,
 ) -> dict[str, Any]:
     """Pursue a GOAL in a tmux TUI autonomously — observe, act, repeat until done.
 
@@ -986,12 +1096,18 @@ async def tmux_goal(
             then tell me which have a cron schedule."
         max_steps: Max observe/act cycles before giving up (default 15).
         by_registry_name: Resolve `target` via the registry.
+        telos: Route the run through the telos-md drift-guard — record it as a
+            north star, tick each step, and abort (`telos_stop`) if telos signals
+            drift/no-progress. Best-effort; no-op if telos-md isn't installed.
 
     Returns:
         {ok, reached:"done", success, summary, steps:[...], screen} on completion;
-        {ok:false, error, steps, screen} on stall / max_steps.
+        {ok:false, error, steps, screen} on stall / max_steps; `telos` block when
+        the drift-guard was engaged.
     """
-    return await asyncio.to_thread(pursue, target, goal, max_steps, 2.5, 60.0, 200, None, by_registry_name)
+    return await asyncio.to_thread(
+        pursue, target, goal, max_steps, 2.5, 60.0, 200, None, by_registry_name, telos
+    )
 
 
 def run_mcp_server() -> None:

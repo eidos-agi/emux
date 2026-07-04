@@ -135,6 +135,16 @@ retries a transient blank/stall capture, detects a stuck loop, and aborts
 cleanly if the session dies (`session_gone`) instead of flailing. **Not** gated:
 destructive actions — scope the goal, or point it at a read-only surface.
 
+**Drift-guard** (`goal --telos` / `tmux_goal(telos=True)`): route an autonomous
+run through [telos-md](https://github.com/eidos-agi/telos.md). emux opens a telos
+north star for the goal, **ticks it every step**, and **aborts (`telos_stop`) if
+telos signals drift or no-progress** — an independent conscience over the loop.
+Every run is also *recorded* (north star + ticks + close: reached/abandoned) in
+one telos home (`$EMUX_TELOS_HOME`, default `~/.local/share/emux/telos`), so
+`telos-md traffic --repo-path <that>` shows every autonomous run emux has driven.
+Opt-in and best-effort — if `telos-md` isn't on `PATH` the loop just runs
+unguarded. (Also enabled by `$EMUX_TELOS=1`.)
+
 > **Requires the `claude` CLI on `PATH`** — `navigate` and `goal` make model
 > calls via `claude -p` (a fixed-cost subscription tool, never the raw API).
 > `send`/`capture`/`run`/`ask` need only tmux. Tune the models with

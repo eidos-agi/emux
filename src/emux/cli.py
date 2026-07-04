@@ -223,15 +223,20 @@ def cmd_goal(args: argparse.Namespace) -> int:
         goal=args.goal,
         max_steps=args.max_steps,
         by_registry_name=args.by_name,
+        telos=args.telos or bool(os.environ.get("EMUX_TELOS")),
     )
     for s in result.get("steps", []):
         print(f"  {s}", file=sys.stderr)
+    if tel := result.get("telos"):
+        print(f"[telos: {tel['north_star_id']} closed {tel['outcome']}]", file=sys.stderr)
     if not result.get("ok"):
         print(f"emux goal: {result.get('error', 'failed')} ({result.get('detail','')})", file=sys.stderr)
         return 1
     verdict = "achieved" if result.get("success") else "not achievable"
     print(f"goal {verdict} in {len(result.get('steps', []))} step(s): {result.get('summary','')}")
     return 0 if result.get("success") else 1
+
+
 def _watch_targets(
     registry: dict[str, dict[str, Any]],
     live: list[dict[str, Any]],
@@ -634,6 +639,7 @@ def main(argv: list[str] | None = None) -> int:
     p_goal.add_argument("goal", help="what to accomplish, in plain English")
     p_goal.add_argument("-n", "--by-name", action="store_true", help="resolve target via the registry")
     p_goal.add_argument("--max-steps", type=int, default=15, help="max observe/act cycles (default 15)")
+    p_goal.add_argument("--telos", action="store_true", help="guard the run with the telos-md drift-guard (record it; abort on a telos stop signal). Also on via $EMUX_TELOS")
 
     p_web = sub.add_parser("web", help="start the web daemon — monitor sessions in a browser (grid/groups/activity/flow/chat)")
     p_web.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1; no auth — keep it local)")

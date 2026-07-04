@@ -252,6 +252,88 @@ def test_converse_reports_session_gone(monkeypatch):
     assert not out["ok"] and out["error"] == "session_gone"
 
 
+def _telos_env(monkeypatch, tick_return):
+    """Wire a fake telos-md; return the list of subcommand-arg-lists it received."""
+    from emux import server
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(server, "_telos_available", lambda: True)
+    monkeypatch.setattr(server, "_telos_home", lambda: "/tmp/emux-telos-test")
+
+    def fake_call(args, home):
+        calls.append(args)
+        if args[0] == "set-north-star":
+            return {"north_star_id": "ns_test"}
+        if args[0] == "tick":
+            return tick_return
+        return {}
+
+    monkeypatch.setattr(server, "_telos_call", fake_call)
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_observe", lambda s, n, retries=1: "a screen")
+    monkeypatch.setattr(server, "_wait_stable", lambda *a, **k: "moved screen")
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, "", ""))
+    return calls
+
+
+def test_pursue_telos_opens_ticks_and_closes(monkeypatch):
+    """telos=True opens a north star, ticks each step, closes 'reached' on success."""
+    from emux import server
+
+    calls = _telos_env(monkeypatch, {"signal": "continue", "heading": "on course"})
+    decisions = iter([
+        {"action": "type", "text": "hi", "submit": True, "thought": "ask", "model": server._NAV_MODEL_DEFAULT},
+        {"action": "done", "success": True, "summary": "ok", "model": server._NAV_MODEL_DEFAULT},
+    ])
+    monkeypatch.setattr(server, "_pursue_decide", lambda *a, **k: next(decisions))
+    out = server.pursue("sess", "do a thing", max_steps=5, telos=True)
+    assert out["ok"] and out["success"]
+    subs = [c[0] for c in calls]
+    assert "set-north-star" in subs and "tick" in subs
+    assert calls[-1][0] == "close" and "reached" in calls[-1]
+    assert out["telos"]["outcome"] == "reached"
+
+
+def test_pursue_telos_stop_aborts(monkeypatch):
+    """A telos 'stop' signal halts the loop and closes the north star 'abandoned'."""
+    from emux import server
+
+    calls = _telos_env(monkeypatch, {"signal": "stop", "drift_category": "scope-creep"})
+    monkeypatch.setattr(server, "_pursue_decide",
+                        lambda *a, **k: {"action": "keys", "keys": ["Down"], "model": server._NAV_MODEL_DEFAULT})
+    out = server.pursue("sess", "goal", max_steps=5, telos=True)
+    assert not out["ok"] and out["error"] == "telos_stop"
+    assert calls[-1][0] == "close" and "abandoned" in calls[-1]
+
+
+def test_pursue_no_telos_by_default(monkeypatch):
+    from emux import server
+
+    fired = {"n": 0}
+    monkeypatch.setattr(server, "_telos_call", lambda *a, **k: fired.__setitem__("n", fired["n"] + 1))
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_observe", lambda s, n, retries=1: "x")
+    monkeypatch.setattr(server, "_pursue_decide",
+                        lambda *a, **k: {"action": "done", "success": True, "summary": "", "model": server._NAV_MODEL_DEFAULT})
+    out = server.pursue("sess", "goal")  # telos defaults off
+    assert out["ok"] and "telos" not in out and fired["n"] == 0
+
+
+def test_pursue_telos_unavailable_runs_unguarded(monkeypatch):
+    """telos=True but telos-md absent → run proceeds, no telos calls, no crash."""
+    from emux import server
+
+    fired = {"n": 0}
+    monkeypatch.setattr(server, "_telos_available", lambda: False)
+    monkeypatch.setattr(server, "_telos_call", lambda *a, **k: fired.__setitem__("n", fired["n"] + 1))
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_observe", lambda s, n, retries=1: "x")
+    monkeypatch.setattr(server, "_pursue_decide",
+                        lambda *a, **k: {"action": "done", "success": True, "summary": "", "model": server._NAV_MODEL_DEFAULT})
+    out = server.pursue("sess", "goal", telos=True)
+    assert out["ok"] and "telos" not in out and fired["n"] == 0
+
+
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
 def test_converse_against_cat_echo():
     """`cat` echoes stdin — a deterministic stand-in for a TUI AI. converse
