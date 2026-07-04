@@ -1,0 +1,17 @@
+{
+  "kind": {
+    "type": "tool",
+    "signals": [
+      "single_capability",
+      "uvx_shim",
+      "mcp_server"
+    ]
+  },
+  "audit": {
+    "audited_by": "pending",
+    "audit_version": "STANDARD.md",
+    "audit_date": "2026-05-31",
+    "grade": "PENDING",
+    "audit_doc": "AUDITS/emux.md"
+  }
+}

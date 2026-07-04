@@ -151,7 +151,7 @@ async def tmux_register(
     Use this to remember "this is the session running my claude prod loop" or
     "this is the test shell" so future calls can refer to it by `name` rather
     than the raw tmux `session` identifier. The registry persists at
-    ~/.config/tmux-mcp/registry.json (override with $TMUX_MCP_REGISTRY).
+    ~/.config/emux/registry.json (override with $EMUX_REGISTRY).
 
     Args:
         name: The friendly name to register under (e.g., "claude-prod").

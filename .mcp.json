@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "emux": {
+      "transport": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/Users/dshanklin/repos-eidos-agi/emux",
+        "emux",
+        "mcp"
+      ],
+      "tool_timeout_sec": 600
+    }
+  }
+}
