@@ -1,0 +1,32 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate release
+        env:
+          GIT_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          TAG_VERSION=${GIT_TAG#v}
+          if [ "$VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag $TAG_VERSION does not match pyproject.toml version $VERSION"; exit 1
+          fi
+          grep -q "## v${TAG_VERSION}" CHANGELOG.md || grep -q "\[${TAG_VERSION}\]" CHANGELOG.md || { echo "::error::No CHANGELOG entry for v${TAG_VERSION}"; exit 1; }
+      - run: pip install build
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1

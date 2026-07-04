@@ -1,0 +1,45 @@
+{
+  "name": "emux",
+  "version": "0.1.0",
+  "description": "Eidos mux: TUI picker and MCP server for named tmux sessions.",
+  "author": {
+    "name": "Eidos AGI",
+    "email": "daniel@eidosagi.com",
+    "url": "https://github.com/eidos-agi"
+  },
+  "homepage": "https://github.com/eidos-agi/emux",
+  "repository": "https://github.com/eidos-agi/emux",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "tmux",
+    "codex",
+    "claude-code",
+    "terminal",
+    "session-control",
+    "automation"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Emux",
+    "shortDescription": "Control named tmux sessions from agents.",
+    "longDescription": "Emux gives Codex and Claude Code a shared registry for existing tmux sessions plus MCP tools to list sessions, register friendly names, send keys, capture panes, and run command-plus-capture loops. It never spawns or kills tmux sessions; it only observes and drives sessions the user already owns.",
+    "developerName": "Eidos AGI",
+    "category": "Developer Tools",
+    "capabilities": [
+      "MCP",
+      "Terminal Control",
+      "Session Registry",
+      "Automation"
+    ],
+    "websiteURL": "https://github.com/eidos-agi/emux",
+    "privacyPolicyURL": "https://github.com/eidos-agi/emux/blob/main/SECURITY.md",
+    "termsOfServiceURL": "https://github.com/eidos-agi/emux",
+    "defaultPrompt": [
+      "Use Emux to list my tmux sessions.",
+      "Register this Claude Code tmux session with Emux.",
+      "Capture the latest output from a named tmux session."
+    ],
+    "brandColor": "#0F766E"
+  }
+}

@@ -6,4 +6,5 @@ dist/
 build/
 .pytest_cache/
 .ruff_cache/
+.superpowers/
 uv.lock

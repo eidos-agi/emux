@@ -1,6 +1,6 @@
 # emux
 
-> **Eidos mux.** Pick up where you left off in tmux. A TUI session picker for humans + an MCP server for agents — same registry, same sessions, same operating model.
+> **Eidos mux.** Pick up where you left off in tmux, and let an agent drive it. A TUI session picker for humans + an MCP server for agents to observe, converse with, navigate, and autonomously pursue goals through existing sessions — never spawning or killing them. Same registry, same sessions, same operating model.
 
 ## What it does
 
@@ -10,8 +10,18 @@ Three front-ends over one shared registry of named tmux sessions:
 emux              → TUI picker. Lists registered + live sessions.
                     Pick one → tmux attach. Stale entries flagged.
 
-emux mcp          → MCP server. Six tools for agents to drive
-                    sessions: list, register, send, capture, run.
+emux mcp          → MCP server. Tools for agents to drive sessions:
+                    list, register, send, capture, run — plus the
+                    drive tiers: ask, navigate, goal (see below).
+
+emux ask          → Send a prompt to an AI in a session, wait for its
+                    reply to settle, print it.
+emux navigate     → Model-driven: reach a target screen through a TUI.
+emux goal         → Autonomous: pursue a whole task through a TUI.
+
+emux web          → Web daemon. Browser UI that monitors any session
+                    like a chatbot: live pane is the bot's side of
+                    the chat, input bar types into the session.
 
 emux web          → Web daemon. Browser UI that monitors any session
                     like a chatbot: live pane is the bot's side of
@@ -19,6 +29,12 @@ emux web          → Web daemon. Browser UI that monitors any session
 
 emux ls           → Print registered + live sessions (non-interactive,
                     CI-friendly).
+emux watch        → Watch many registered/live sessions in one terminal.
+emux send         → Send keys or text to a registered/live session.
+emux interrupt    → Send C-c to a registered/live session.
+emux capture      → Capture pane output from a registered/live session.
+emux run          → Send a command, wait, and capture output.
+emux head         → Open a real terminal head attached to a session.
 emux register     → Register a session under a friendly name.
 emux unregister   → Drop a registered name. Doesn't touch tmux.
 ```
@@ -37,17 +53,17 @@ The registry is the same surface for both. Register once interactively, drive fo
 
 ## Install
 
-Via uvx (no pre-install):
+Until the first PyPI release, run directly from Git or from a local checkout:
 
 ```bash
-uvx --from emux emux                  # TUI picker
-uvx --from emux emux mcp              # MCP server
+uvx --from git+https://github.com/eidos-agi/emux.git emux       # TUI picker
+uvx --from git+https://github.com/eidos-agi/emux.git emux mcp   # MCP server
 ```
 
 In a Claude Code marketplace plugin, the `.mcp.json` looks like:
 
 ```json
-{"emux": {"command": "uvx", "args": ["--from", "emux", "emux", "mcp"]}}
+{"emux": {"command": "uv", "args": ["run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "emux", "mcp"]}}
 ```
 
 Local development:
@@ -58,34 +74,40 @@ cd emux
 uv sync
 uv pip install -e ".[dev]"
 uv run pytest
+uv run ruff check .
 ```
 
 ## TUI picker
 
-Running `emux` with no arguments opens a numbered list of choices:
+Running `emux` with no arguments opens a Textual picker with a filter box,
+number-key shortcuts, grouped session lists, and a live preview pane:
 
 ```
-emux v0.1.0 — pick a session to attach
+Registered (live)
+   1  ●  claude-prod  → main
 
-   1  claude-prod   → main           live    — production claude session  #prod #claude
-   2  test-shell    → scratch        live    — scratch tmux for testing   #test
-   3  long-build    → backfill       STALE — tmux session gone   — overnight ETL run
-   4  experiments   unregistered live tmux session
-   5  (register new)  register a new session by typing name + tmux session id
+Registered (stale)
+   2  ●  long-build  → backfill
 
-  pick [1-5], or q to quit:
+Unregistered live tmux
+   3  ○  experiments  unregistered
+
+Actions
+   4  ⊕  (register new)
 ```
 
 - **Registered + live** entries attach immediately on selection (`tmux attach -t <session>`).
-- **Stale** registered entries explain that the underlying tmux session is gone; you can pick again, unregister it, or re-register against a live session.
-- **Live but unregistered** entries offer to register them inline before attaching.
+- **Stale** registered entries warn that the underlying tmux session is gone; they do not attach.
+- **Live but unregistered** entries attach on Enter and can be registered with `r`.
 - **(register new)** prompts for `name`, `session id`, optional `description`, and tags, then optionally attaches.
 
-The TUI is intentionally minimal: stdlib `input()`, no external TUI library. Works in any terminal, including remote SSH, dumb terminals, and CI shells.
+The picker is a terminal UI, not a terminal owner. Sessions are registered with
+Emux for discovery and attached via Emux when selected. tmux still owns the
+session lifecycle.
 
 ## MCP server
 
-Six tools, exposed via `emux mcp`:
+Tools exposed via `emux mcp`:
 
 | Tool | What it does |
 |---|---|
@@ -95,6 +117,47 @@ Six tools, exposed via `emux mcp`:
 | `tmux_send(target, keys, enter, by_registry_name)` | Send keystrokes |
 | `tmux_capture(target, lines, by_registry_name)` | Read pane + scrollback |
 | `tmux_run(target, command, wait_seconds, ...)` | Convenience: send + sleep + capture |
+| `tmux_ask(target, prompt, ...)` | Send a prompt, wait for the reply to **settle**, return it |
+| `tmux_navigate(target, goal, until?, ...)` | Model-driven: reach a target screen through a TUI |
+| `tmux_goal(target, goal, ...)` | Autonomous: pursue a whole task through a TUI |
+
+### Driving another AI through its TUI
+
+The last three tools are a ladder of increasing autonomy over an AI (or any
+interactive program) running in a session — `railway.new`'s agent, a
+`claude`/`codex`/`aider` REPL, an installer:
+
+| Tier | Reaches | Intelligence |
+|---|---|---|
+| `send` / `capture` / `run` | raw keystrokes + screen | none (mechanical) |
+| **`ask`** | a settled reply | dumb settle-timer — waits until the pane stops changing (a fixed sleep can't, since a reply streams for an unknown time) |
+| **`navigate`** | a target *screen* | a model reads each screen and picks keystrokes toward a stated goal |
+| **`goal`** | a whole *task done* | an autonomous observe → act → judge loop, with recovery |
+
+**Recovery** (`navigate` / `goal`): escalates the model Haiku→Sonnet on a stall,
+retries a transient blank/stall capture, detects a stuck loop, and aborts
+cleanly if the session dies (`session_gone`) instead of flailing.
+
+**Destructive-action gate** (`navigate` / `goal`, on by default): the run is
+blocked (`blocked_dangerous`) if a step would type a destructive command
+(`rm -rf`, `DROP TABLE`, force-push…) or confirm a destructive on-screen prompt
+("Delete? [y]"). It's a heuristic denylist, not a sandbox — disable with `--yolo`
+(or `$EMUX_ALLOW_DANGEROUS`) when you know the surface is safe.
+
+**Drift-guard** (`goal --telos` / `tmux_goal(telos=True)`): route an autonomous
+run through [telos-md](https://github.com/eidos-agi/telos.md). emux opens a telos
+north star for the goal, **ticks it every step**, and **aborts (`telos_stop`) if
+telos signals drift or no-progress** — an independent conscience over the loop.
+Every run is also *recorded* (north star + ticks + close: reached/abandoned) in
+one telos home (`$EMUX_TELOS_HOME`, default `~/.local/share/emux/telos`), so
+`telos-md traffic --repo-path <that>` shows every autonomous run emux has driven.
+Opt-in and best-effort — if `telos-md` isn't on `PATH` the loop just runs
+unguarded. (Also enabled by `$EMUX_TELOS=1`.)
+
+> **Requires the `claude` CLI on `PATH`** — `navigate` and `goal` make model
+> calls via `claude -p` (a fixed-cost subscription tool, never the raw API).
+> `send`/`capture`/`run`/`ask` need only tmux. Tune the models with
+> `$EMUX_NAV_MODEL` (default Haiku) and `$EMUX_NAV_MODEL_ESCALATE` (default Sonnet).
 
 Example: agent drives a registered session.
 
@@ -165,7 +228,7 @@ It sets `RunAtLoad` + `KeepAlive`, logging to `/tmp/emux-web{,.err}.log`.
 - **Existing sessions only.** Never spawns, never kills tmux sessions. Lifecycle is the user's. emux just observes and drives.
 - **Registry is metadata only.** Live state always comes from `tmux list-sessions`. Stale entries are flagged, not auto-deleted — the user decides.
 - **One registry for both surfaces.** TUI and MCP read and write the same JSON. Register interactively, drive from an agent. Or the reverse.
-- **Stdlib TUI.** No `prompt_toolkit`, no `textual`, no `rich`. The picker is `input()` + a numbered list. Keeps install footprint tiny and works in every terminal.
+- **Textual TUI.** The picker uses Textual for filtering, preview, keyboard shortcuts, and grouped session state.
 - **No magic, no recursion guards.** Sending `claude` keystrokes into a session that's already running emux's MCP gives you the recursion you asked for. Be deliberate.
 
 ## Storage
@@ -188,9 +251,80 @@ For backwards compatibility with the prior name (`tmux-mcp`), `$TMUX_MCP_REGISTR
 ## What it does NOT do
 
 - **Doesn't spawn tmux sessions.** Use `tmux new-session` yourself; emux is read/drive only.
+- **Doesn't bypass auth or approvals.** If the controlled session asks Claude Code for login, MFA, approval, or a human decision, Emux only sees and sends terminal text.
 - **Doesn't strip ANSI.** Capture content includes raw bytes from tmux. Strip with `re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)` if you need clean output.
 - **Doesn't proxy MCP from inside tmux.** If the tmux session is running its own MCP server, emux only sees the stdin/stdout text — not the structured MCP messages.
-- **Doesn't long-poll.** `tmux_run`'s `wait_seconds` is a fixed sleep. For long commands, prefer `tmux_send` + polling `tmux_capture` until you see the prompt return.
+- **`tmux_run` doesn't wait for streaming output.** Its `wait_seconds` is a fixed sleep — fine for a command that finishes fast. For an AI whose reply streams in over an unknown time, use `tmux_ask` (settles automatically) instead.
+- **Doesn't gate destructive actions.** `navigate`/`goal` send whatever keystrokes the model chooses, including `Enter` on a confirm. Scope goals accordingly.
+
+## Claude Code in tmux
+
+Emux can control Claude Code when Claude Code is already running inside tmux:
+
+```bash
+tmux new -s claude-code
+claude
+```
+
+From another terminal or agent, register and drive that existing session:
+
+```bash
+emux register claude-code claude-code -d "Claude Code terminal" -t claude local
+```
+
+Agents can then use `tmux_run(..., by_registry_name=True)` or separate
+send/capture calls against `claude-code`.
+
+## Watching many sessions
+
+Use `emux watch` to watch all registered sessions plus live unregistered tmux
+sessions in one refreshing terminal dashboard:
+
+```bash
+emux watch
+emux watch --filter claude
+emux watch --registered-only
+emux watch --once --lines 12
+```
+
+This is a watcher, not a supervisor. It repeatedly captures visible pane
+content with `tmux capture-pane`; it does not send input, create sessions, or
+decide whether a Claude Code session is blocked.
+
+## Controlling while watching
+
+Keep `emux watch` running in one terminal, then use the control commands from
+another terminal or agent. CLI targets are registry names by default:
+
+```bash
+emux interrupt claude-code
+emux send claude-code "continue, but only run the focused test"
+emux capture claude-code --lines 80
+emux run claude-code "uv run pytest tests/test_basic.py -q" --wait 3 --lines 120
+```
+
+Use `--session` when you want to target a raw tmux session name instead of a
+registered Emux name:
+
+```bash
+emux send --session scratch "pwd"
+```
+
+## Opening a terminal head
+
+Use `emux head` when you want a real terminal attached to a registered session:
+
+```bash
+emux head claude-code
+emux head claude-code --terminal iterm
+emux head claude-code --terminal terminal
+emux head claude-code --print-command
+```
+
+On macOS, `emux head` tries iTerm2/iTerm first and falls back to Terminal.app if
+iTerm is unavailable or not responding. The head runs `tmux attach -t <session>`
+inside the terminal app, so paste, raw keys, `Ctrl-C`, scrollback, resizing, and
+Claude Code's own terminal UI stay native.
 
 ## License
 
