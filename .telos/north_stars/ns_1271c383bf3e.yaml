@@ -1,0 +1,11 @@
+id: "ns_1271c383bf3e"
+project_id: "40d7aac0-0687-452e-a182-3ebd79c26e5d"
+goal: "Let an agent pick up and drive EXISTING tmux sessions — observe, converse, navigate, and autonomously pursue goals through their TUIs — without ever owning session lifecycle (never spawn, never kill). Autonomous operation (goal mode) is part of emux's purpose, layered on the same observe-and-drive substrate."
+metric: "Invariant holds: src/ drives sessions only via send-keys/capture-pane/has-session/list-sessions and NEVER new-session/kill-session; each new capability honors existing-sessions-only."
+stop_max_iters: null
+stop_zero_delta_n: 4
+signature: null
+created_at: "2026-07-04T02:38:34.193320+00:00"
+closed_at: null
+outcome: null
+repo_path: "/Users/dshanklinbv/repos-eidos-agi/emux"
