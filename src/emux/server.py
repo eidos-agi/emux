@@ -828,7 +828,7 @@ def _observe(session: str, capture_lines: int, retries: int = 1) -> str | None:
 
     Returns the text, or None if the session is gone. An empty string means the
     session is alive but rendered nothing after the retries (a distinct signal)."""
-    for attempt in range(retries + 1):
+    for _ in range(retries + 1):
         if not _session_alive(session):
             return None
         try:
