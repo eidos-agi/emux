@@ -203,6 +203,7 @@ def cmd_navigate(args: argparse.Namespace) -> int:
         until=args.until,
         max_steps=args.max_steps,
         by_registry_name=args.by_name,
+        allow_dangerous=args.yolo or bool(os.environ.get("EMUX_ALLOW_DANGEROUS")),
     )
     if not result.get("ok"):
         print(f"emux navigate: {result.get('error', 'failed')}", file=sys.stderr)
@@ -224,6 +225,7 @@ def cmd_goal(args: argparse.Namespace) -> int:
         max_steps=args.max_steps,
         by_registry_name=args.by_name,
         telos=args.telos or bool(os.environ.get("EMUX_TELOS")),
+        allow_dangerous=args.yolo or bool(os.environ.get("EMUX_ALLOW_DANGEROUS")),
     )
     for s in result.get("steps", []):
         print(f"  {s}", file=sys.stderr)
@@ -633,6 +635,7 @@ def main(argv: list[str] | None = None) -> int:
     p_nav.add_argument("-n", "--by-name", action="store_true", help="resolve target via the registry")
     p_nav.add_argument("--until", default=None, help="stop early if this substring appears on screen")
     p_nav.add_argument("--max-steps", type=int, default=12, help="max navigation steps (default 12)")
+    p_nav.add_argument("--yolo", action="store_true", help="disable the destructive-action gate (also via $EMUX_ALLOW_DANGEROUS)")
 
     p_goal = sub.add_parser("goal", help="pursue a GOAL in a session's TUI autonomously (observe→act→repeat until done)")
     p_goal.add_argument("target", help="tmux session name (or registry name with -n)")
@@ -640,6 +643,7 @@ def main(argv: list[str] | None = None) -> int:
     p_goal.add_argument("-n", "--by-name", action="store_true", help="resolve target via the registry")
     p_goal.add_argument("--max-steps", type=int, default=15, help="max observe/act cycles (default 15)")
     p_goal.add_argument("--telos", action="store_true", help="guard the run with the telos-md drift-guard (record it; abort on a telos stop signal). Also on via $EMUX_TELOS")
+    p_goal.add_argument("--yolo", action="store_true", help="disable the destructive-action gate (also via $EMUX_ALLOW_DANGEROUS)")
 
     p_web = sub.add_parser("web", help="start the web daemon — monitor sessions in a browser (grid/groups/activity/flow/chat)")
     p_web.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1; no auth — keep it local)")

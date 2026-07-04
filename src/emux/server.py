@@ -532,6 +532,41 @@ _NAV_ALLOWED_KEYS = {
     "C-c", "C-d", "C-u", "C-k", "C-a", "C-e",
 }
 
+# ---- destructive-action gate -----------------------------------------------
+#
+# navigate/goal send whatever keystrokes the model picks — including confirming
+# a "Delete? [y]" prompt. This gate blocks two cases (unless allow_dangerous):
+#   1. the model types a destructive command (rm -rf, DROP TABLE, force-push…);
+#   2. a destructive confirmation is on screen AND the action would confirm it.
+# ponytail: heuristic denylist, not a sandbox — the upgrade path is an
+# interactive confirm callback. It errs toward blocking; opt out with --yolo.
+
+_DANGER_TEXT = re.compile(
+    r"(?i)(\brm\s+-[rf]{1,2}\b|\bdrop\s+(table|database)\b|\btruncate\s+table\b|"
+    r"git\s+push\b.*--force|git\s+reset\s+--hard|\bmkfs\b|\bdd\s+if=|>\s*/dev/sd|"
+    r"\bshutdown\b|\breboot\b|\bformat\s+[a-z]:)"
+)
+_DANGER_SCREEN = re.compile(
+    r"(?i)(permanently\s+delete|cannot\s+be\s+undone|are\s+you\s+sure|"
+    r"this\s+will\s+delete|\birreversible\b|force[- ]?push|\boverwrite\b|"
+    r"\bdestroy\b|delete\s+all|drop\s+the\b|\bpermanent(ly)?\b)"
+)
+_CONFIRM_KEYS = {"Enter", "Space", "y", "Y"}
+
+
+def _danger_reason(screen: str, text: str, keys: list[str], submit: bool) -> str | None:
+    """Why an action is destructive, or None if safe."""
+    if text and _DANGER_TEXT.search(text):
+        return f"types a destructive command: {text!r}"
+    confirming = (
+        submit
+        or any(k in _CONFIRM_KEYS for k in keys)
+        or (text.strip().lower() in {"y", "yes"} if text else False)
+    )
+    if confirming and (m := _DANGER_SCREEN.search(screen or "")):
+        return f"would confirm a destructive prompt (screen shows {m.group(0)!r})"
+    return None
+
 
 def _claude_decide(model: str, goal: str, screen: str, history: list[str]) -> dict[str, Any]:
     """Ask `claude -p` for the next navigation step. Returns the parsed JSON
@@ -607,6 +642,7 @@ def navigate(
     capture_lines: int = 200,
     model: str | None = None,
     by_registry_name: bool = False,
+    allow_dangerous: bool = False,
 ) -> dict[str, Any]:
     """Drive a tmux session's TUI toward `goal` using a model to pick keystrokes.
 
@@ -659,6 +695,9 @@ def navigate(
                     "thought": decision.get("thought"), "screen": screen}
 
         text, keys = decision["text"], decision["keys"]
+        if not allow_dangerous and (danger := _danger_reason(screen, text, keys, submit=False)):
+            return {"ok": False, "error": "blocked_dangerous", "detail": danger,
+                    "thought": decision.get("thought"), "steps": history, "screen": screen}
         if text:
             _run_tmux(["send-keys", "-t", session, "-l", text])
         for k in keys:
@@ -679,6 +718,7 @@ async def tmux_navigate(
     max_steps: int = 12,
     step_pause: float = 1.5,
     by_registry_name: bool = False,
+    allow_dangerous: bool = False,
 ) -> dict[str, Any]:
     """Drive a tmux session's TUI toward a goal, letting a model pick keystrokes.
 
@@ -702,13 +742,18 @@ async def tmux_navigate(
         step_pause: Seconds to wait after each keystroke batch for the UI to
             update (default 1.5).
         by_registry_name: Resolve `target` via the registry.
+        allow_dangerous: Off by default — the run is blocked (`blocked_dangerous`)
+            if it would type a destructive command or confirm a destructive
+            on-screen prompt. Set True to disable the gate.
 
     Returns:
         {ok, reached: "model_done"|"until", steps: [...], screen} on success;
-        {ok: false, error, steps, screen} if it stalls or hits max_steps.
+        {ok: false, error, steps, screen} if it stalls, hits max_steps, or is
+        blocked (`blocked_dangerous`).
     """
     return await asyncio.to_thread(
-        navigate, target, goal, until, max_steps, step_pause, 200, None, by_registry_name
+        navigate, target, goal, until, max_steps, step_pause, 200, None,
+        by_registry_name, allow_dangerous,
     )
 
 
@@ -909,6 +954,7 @@ def pursue(
     model: str | None = None,
     by_registry_name: bool = False,
     telos: bool = False,
+    allow_dangerous: bool = False,
 ) -> dict[str, Any]:
     """Pursue `goal` in a tmux TUI: observe → act → observe until done.
 
@@ -944,7 +990,7 @@ def pursue(
 
     result = _pursue_core(
         session, goal, chain, max_steps, settle_seconds, wait_cap,
-        capture_lines, ns_id, thome,
+        capture_lines, ns_id, thome, allow_dangerous,
     )
 
     if ns_id and thome:  # close the north star with a terminal outcome
@@ -964,6 +1010,7 @@ def _pursue_core(
     capture_lines: int,
     ns_id: str | None = None,
     thome: str | None = None,
+    allow_dangerous: bool = False,
 ) -> dict[str, Any]:
     """The observe→act→judge loop. Ticks telos each step when ns_id is set."""
     history: list[str] = []
@@ -1011,6 +1058,17 @@ def _pursue_core(
             screen = _wait_stable(session, capture_lines, settle_seconds, 0.8, wait_cap)
             history.append(f"step {step + 1}: wait{esc} — observed: {_tail(screen)}")
             continue
+        # --- destructive-action gate (unless explicitly allowed) ---
+        if not allow_dangerous:
+            danger = (
+                _danger_reason(screen, "", d["keys"], submit=False) if action == "keys"
+                else _danger_reason(screen, d["text"], [], submit=bool(d.get("submit")))
+            )
+            if danger:
+                history.append(f"step {step + 1}: BLOCKED ({thought!r}) — {danger}")
+                return {"ok": False, "error": "blocked_dangerous", "detail": danger,
+                        "steps": history, "screen": screen}
+
         if action == "keys":
             for k in d["keys"]:
                 _run_tmux(["send-keys", "-t", session, k])
@@ -1070,6 +1128,7 @@ async def tmux_goal(
     max_steps: int = 15,
     by_registry_name: bool = False,
     telos: bool = False,
+    allow_dangerous: bool = False,
 ) -> dict[str, Any]:
     """Pursue a GOAL in a tmux TUI autonomously — observe, act, repeat until done.
 
@@ -1086,9 +1145,15 @@ async def tmux_goal(
     Recovers from: a flaky model step (escalates Haiku→Sonnet), a transient
     stall or blank capture (re-observe + retry once), a no-progress loop (warns
     the model, then aborts `stuck_no_progress` at the backstop), and a dropped
-    session (`session_gone`). It does NOT gate destructive actions — `Enter` and
-    free text are permitted, so a goal that leads to a "Delete? [y]" confirm will
-    press it. Scope the goal accordingly, or point it at a read-only surface.
+    session (`session_gone`).
+
+    Safety: by default a **destructive-action gate** blocks the run
+    (`blocked_dangerous`) if a step would type a destructive command (rm -rf,
+    DROP TABLE, force-push…) or confirm a destructive on-screen prompt
+    ("Delete? [y]"). It's a heuristic denylist, not a sandbox — set
+    `allow_dangerous=True` to disable it. Still keystrokes-into-a-TUI — it cannot
+    exec shell or do anything a person at that terminal couldn't. emux never
+    spawns; create the session first.
 
     Args:
         target: tmux session name, or registry name if `by_registry_name=True`.
@@ -1099,14 +1164,16 @@ async def tmux_goal(
         telos: Route the run through the telos-md drift-guard — record it as a
             north star, tick each step, and abort (`telos_stop`) if telos signals
             drift/no-progress. Best-effort; no-op if telos-md isn't installed.
+        allow_dangerous: Disable the destructive-action gate (default off).
 
     Returns:
         {ok, reached:"done", success, summary, steps:[...], screen} on completion;
-        {ok:false, error, steps, screen} on stall / max_steps; `telos` block when
-        the drift-guard was engaged.
+        {ok:false, error, steps, screen} on stall / max_steps / blocked_dangerous;
+        `telos` block when the drift-guard was engaged.
     """
     return await asyncio.to_thread(
-        pursue, target, goal, max_steps, 2.5, 60.0, 200, None, by_registry_name, telos
+        pursue, target, goal, max_steps, 2.5, 60.0, 200, None,
+        by_registry_name, telos, allow_dangerous,
     )
 
 
