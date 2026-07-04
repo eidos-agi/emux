@@ -29,9 +29,9 @@ def test_navigate_stops_on_until_without_model(monkeypatch):
     from emux import server
 
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
-    monkeypatch.setattr(server, "_capture_text", lambda s, n: "Message the agent…")
+    monkeypatch.setattr(server, "_observe", lambda s, n, retries=1: "Message the agent…")
     called = {"decide": 0}
-    monkeypatch.setattr(server, "_claude_decide",
+    monkeypatch.setattr(server, "_decide_step",
                         lambda *a, **k: called.__setitem__("decide", called["decide"] + 1) or {"done": True})
     out = server.navigate("sess", "reach the prompt", until="Message the agent")
     assert out["ok"] and out["reached"] == "until"
@@ -211,6 +211,45 @@ def test_pursue_detects_stuck_loop(monkeypatch):
     out = server.pursue("sess", "goal", max_steps=15)
     assert not out["ok"] and out["error"] == "stuck_no_progress"
     assert len(out["steps"]) == server._STUCK_LIMIT  # gave up at the backstop, not max_steps
+
+
+def test_navigate_aborts_when_session_gone(monkeypatch):
+    """navigate detects a dropped session instead of aborting capture_failed."""
+    from emux import server
+
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_session_alive", lambda s: False)
+    out = server.navigate("sess", "reach the prompt", max_steps=3)
+    assert not out["ok"] and out["error"] == "session_gone"
+
+
+def test_navigate_recovers_from_transient_stall(monkeypatch):
+    """A one-off stall is retried after a re-observe; navigation continues to done."""
+    from emux import server
+
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_observe", lambda s, n, retries=1: "a menu")
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+    decisions = iter([
+        {"stall": "no JSON in model reply"},                       # transient
+        {"done": True, "thought": "there", "model": server._NAV_MODEL_DEFAULT},
+    ])
+    monkeypatch.setattr(server, "_decide_step", lambda *a, **k: next(decisions))
+    out = server.navigate("sess", "goal", max_steps=3)
+    assert out["ok"] and out["reached"] == "model_done"
+
+
+def test_converse_reports_session_gone(monkeypatch):
+    """If the session dies mid-wait, converse returns session_gone, not a false settle."""
+    from emux import server
+
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_capture_text", lambda s, n: "before")
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, "", ""))
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(server, "_session_alive", lambda s: False)  # dies immediately
+    out = server.converse("sess", "hello", poll_interval=0.1, max_seconds=5)
+    assert not out["ok"] and out["error"] == "session_gone"
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")

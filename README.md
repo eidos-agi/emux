@@ -1,6 +1,6 @@
 # emux
 
-> **Eidos mux.** Pick up where you left off in tmux. A TUI session picker for humans + an MCP server for agents — same registry, same sessions, same operating model.
+> **Eidos mux.** Pick up where you left off in tmux, and let an agent drive it. A TUI session picker for humans + an MCP server for agents to observe, converse with, navigate, and autonomously pursue goals through existing sessions — never spawning or killing them. Same registry, same sessions, same operating model.
 
 ## What it does
 
@@ -10,8 +10,14 @@ Three front-ends over one shared registry of named tmux sessions:
 emux              → TUI picker. Lists registered + live sessions.
                     Pick one → tmux attach. Stale entries flagged.
 
-emux mcp          → MCP server. Six tools for agents to drive
-                    sessions: list, register, send, capture, run.
+emux mcp          → MCP server. Tools for agents to drive sessions:
+                    list, register, send, capture, run — plus the
+                    drive tiers: ask, navigate, goal (see below).
+
+emux ask          → Send a prompt to an AI in a session, wait for its
+                    reply to settle, print it.
+emux navigate     → Model-driven: reach a target screen through a TUI.
+emux goal         → Autonomous: pursue a whole task through a TUI.
 
 emux web          → Web daemon. Browser UI that monitors any session
                     like a chatbot: live pane is the bot's side of
@@ -85,7 +91,7 @@ The TUI is intentionally minimal: stdlib `input()`, no external TUI library. Wor
 
 ## MCP server
 
-Six tools, exposed via `emux mcp`:
+Tools exposed via `emux mcp`:
 
 | Tool | What it does |
 |---|---|
@@ -95,6 +101,32 @@ Six tools, exposed via `emux mcp`:
 | `tmux_send(target, keys, enter, by_registry_name)` | Send keystrokes |
 | `tmux_capture(target, lines, by_registry_name)` | Read pane + scrollback |
 | `tmux_run(target, command, wait_seconds, ...)` | Convenience: send + sleep + capture |
+| `tmux_ask(target, prompt, ...)` | Send a prompt, wait for the reply to **settle**, return it |
+| `tmux_navigate(target, goal, until?, ...)` | Model-driven: reach a target screen through a TUI |
+| `tmux_goal(target, goal, ...)` | Autonomous: pursue a whole task through a TUI |
+
+### Driving another AI through its TUI
+
+The last three tools are a ladder of increasing autonomy over an AI (or any
+interactive program) running in a session — `railway.new`'s agent, a
+`claude`/`codex`/`aider` REPL, an installer:
+
+| Tier | Reaches | Intelligence |
+|---|---|---|
+| `send` / `capture` / `run` | raw keystrokes + screen | none (mechanical) |
+| **`ask`** | a settled reply | dumb settle-timer — waits until the pane stops changing (a fixed sleep can't, since a reply streams for an unknown time) |
+| **`navigate`** | a target *screen* | a model reads each screen and picks keystrokes toward a stated goal |
+| **`goal`** | a whole *task done* | an autonomous observe → act → judge loop, with recovery |
+
+**Recovery** (`navigate` / `goal`): escalates the model Haiku→Sonnet on a stall,
+retries a transient blank/stall capture, detects a stuck loop, and aborts
+cleanly if the session dies (`session_gone`) instead of flailing. **Not** gated:
+destructive actions — scope the goal, or point it at a read-only surface.
+
+> **Requires the `claude` CLI on `PATH`** — `navigate` and `goal` make model
+> calls via `claude -p` (a fixed-cost subscription tool, never the raw API).
+> `send`/`capture`/`run`/`ask` need only tmux. Tune the models with
+> `$EMUX_NAV_MODEL` (default Haiku) and `$EMUX_NAV_MODEL_ESCALATE` (default Sonnet).
 
 Example: agent drives a registered session.
 
@@ -190,7 +222,8 @@ For backwards compatibility with the prior name (`tmux-mcp`), `$TMUX_MCP_REGISTR
 - **Doesn't spawn tmux sessions.** Use `tmux new-session` yourself; emux is read/drive only.
 - **Doesn't strip ANSI.** Capture content includes raw bytes from tmux. Strip with `re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)` if you need clean output.
 - **Doesn't proxy MCP from inside tmux.** If the tmux session is running its own MCP server, emux only sees the stdin/stdout text — not the structured MCP messages.
-- **Doesn't long-poll.** `tmux_run`'s `wait_seconds` is a fixed sleep. For long commands, prefer `tmux_send` + polling `tmux_capture` until you see the prompt return.
+- **`tmux_run` doesn't wait for streaming output.** Its `wait_seconds` is a fixed sleep — fine for a command that finishes fast. For an AI whose reply streams in over an unknown time, use `tmux_ask` (settles automatically) instead.
+- **Doesn't gate destructive actions.** `navigate`/`goal` send whatever keystrokes the model chooses, including `Enter` on a confirm. Scope goals accordingly.
 
 ## License
 

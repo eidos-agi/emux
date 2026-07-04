@@ -402,16 +402,22 @@ def converse(
     if submit:
         _run_tmux(["send-keys", "-t", session, "Enter"])
 
-    # Wait until the pane is unchanged for `settle_seconds` (or time out).
+    # Wait until the pane is unchanged for `settle_seconds` (or time out). If the
+    # session dies mid-wait, stop and say so rather than reporting a false settle.
     last: str | None = None
     stable_for = 0.0
     elapsed = 0.0
+    died = False
     while elapsed < max_seconds:
         time.sleep(poll_interval)
         elapsed += poll_interval
+        if not _session_alive(session):
+            died = True
+            break
         try:
             cur = _capture_text(session, capture_lines)
         except (RuntimeError, FileNotFoundError):
+            died = not _session_alive(session)
             break
         busy = bool(busy_markers) and any(m in cur for m in busy_markers)
         if cur == last and not busy:
@@ -421,6 +427,11 @@ def converse(
         else:
             stable_for = 0.0
             last = cur
+
+    if died:
+        return {"ok": False, "error": "session_gone", "target": target,
+                "resolved_session": session, "prompt": prompt,
+                "detail": "tmux session vanished mid-reply"}
 
     after = last if last is not None else before
     reply = _reply_delta(before, after)
@@ -617,15 +628,28 @@ def navigate(
 
     history: list[str] = []
     for step in range(max_steps):
-        try:
-            screen = _strip_ansi(_capture_text(session, capture_lines))
-        except (RuntimeError, FileNotFoundError) as e:
-            return {"ok": False, "error": "capture_failed", "stderr": str(e), "steps": history}
+        # Observe with recovery from a dead session or a transient blank frame.
+        screen = _observe(session, capture_lines)
+        if screen is None:
+            return {"ok": False, "error": "session_gone",
+                    "detail": "tmux session vanished (ssh dropped or killed)", "steps": history}
+        if not screen.strip():
+            return {"ok": False, "error": "blank_screen",
+                    "detail": "session alive but rendered nothing", "steps": history}
         # Hard stop: caller-supplied target string already visible.
         if until and until in screen:
             return {"ok": True, "reached": "until", "steps": history, "screen": screen}
 
         decision = _decide_step(chain, goal, screen, history)
+        if "stall" in decision:
+            # Transient stall: re-observe once and retry before giving up.
+            time.sleep(1.0)
+            rescreen = _observe(session, capture_lines)
+            if rescreen is None:
+                return {"ok": False, "error": "session_gone", "steps": history}
+            if rescreen.strip():
+                decision = _decide_step(chain, goal, rescreen, history)
+                screen = rescreen
         if "stall" in decision:
             return {"ok": False, "error": "model_stalled", "detail": decision["stall"],
                     "thought": decision.get("thought"), "raw": decision.get("raw"),
@@ -643,7 +667,7 @@ def navigate(
         history.append(f"step {step + 1}: {decision.get('thought','')!r} text={text!r} keys={keys}{esc}")
         time.sleep(step_pause)
 
-    final = _strip_ansi(_capture_text(session, capture_lines))
+    final = _observe(session, capture_lines) or ""
     return {"ok": False, "error": "max_steps_reached", "steps": history, "screen": final}
 
 
