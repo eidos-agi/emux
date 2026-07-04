@@ -39,9 +39,11 @@ from . import __version__
 from .server import (
     _live_sessions,
     _load_registry,
+    _read_log,
     _resolve_tmux,
     _run_tmux,
     _save_registry,
+    _start_stream_log,
     converse,
     navigate,
     pursue,
@@ -388,7 +390,20 @@ def cmd_register(args: argparse.Namespace) -> int:
         "registered_at": int(time.time()),
     }
     _save_registry(registry)
+    _start_stream_log(args.session, args.name)  # arm durable logging on register
     print(f"registered '{args.name}' → {args.session}")
+    return 0
+
+
+def cmd_log(args: argparse.Namespace) -> int:
+    """Print a session's durable character log — the complete history emux
+    streamed via pipe-pane, not an ephemeral pane snapshot."""
+    out = _read_log(args.name, lines=args.lines, strip=not args.raw)
+    if not out.strip():
+        print(f"emux: no log for '{args.name}' yet — logging arms on register/drive "
+              "and streams forward from that moment.", file=sys.stderr)
+        return 1
+    print(out)
     return 0
 
 
@@ -670,6 +685,11 @@ def main(argv: list[str] | None = None) -> int:
     p_unreg = sub.add_parser("unregister", help="remove a session from the registry")
     p_unreg.add_argument("name")
 
+    p_log = sub.add_parser("log", help="print a session's durable character log (complete history, not a pane snapshot)")
+    p_log.add_argument("name", help="registered name (or log basename)")
+    p_log.add_argument("--lines", type=int, default=None, help="last N lines only")
+    p_log.add_argument("--raw", action="store_true", help="raw stream incl ANSI (for exact replay); default strips ANSI")
+
     p_send = sub.add_parser("send", help="send keys to a registered session")
     p_send.add_argument("target", help="registered name by default, or tmux session with --session")
     p_send.add_argument("keys", nargs="+", help="tmux keys or literal text to send")
@@ -732,6 +752,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_register(args)
     if args.cmd == "unregister":
         return cmd_unregister(args)
+    if args.cmd == "log":
+        return cmd_log(args)
     if args.cmd == "send":
         return cmd_send(args)
     if args.cmd == "interrupt":
