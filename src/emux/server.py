@@ -497,6 +497,167 @@ async def tmux_ask(
     )
 
 
+# ---- navigate: model-driven TUI navigation --------------------------------
+#
+# converse() assumes you're already at the AI's input prompt. Getting THERE
+# through an arbitrary menu (railway.new's Chat→workspace→project walk, a
+# settings screen, an installer) is the hard part. navigate() drives it with a
+# model: capture the screen, ask the model which keys to press to move toward a
+# stated goal, send them, repeat until the model says done (or `until` appears).
+#
+# The model call goes through the `claude -p` CLI (fixed-cost subscription tool)
+# — NEVER the Anthropic API. A fast model is plenty for "which key next".
+
+_NAV_MODEL_DEFAULT = os.environ.get("EMUX_NAV_MODEL", "claude-haiku-4-5-20251001")
+
+# tmux key names the model is allowed to emit (guards against it inventing keys).
+_NAV_ALLOWED_KEYS = {
+    "Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "BTab",
+    "Space", "BSpace", "Home", "End", "PageUp", "PageDown",
+    "C-c", "C-d", "C-u", "C-k", "C-a", "C-e",
+}
+
+
+def _claude_decide(model: str, goal: str, screen: str, history: list[str]) -> dict[str, Any]:
+    """Ask `claude -p` for the next navigation step. Returns the parsed JSON
+    decision, or an {_error} dict. Fixed-cost CLI — not the API."""
+    claude = shutil.which("claude")
+    if claude is None:
+        return {"_error": "claude CLI not on PATH (needed for model-driven navigate)"}
+    hist = "\n".join(f"  - {h}" for h in history[-8:]) or "  (none yet)"
+    prompt = (
+        "You are navigating a terminal UI by choosing keystrokes. "
+        "Given the GOAL and the current SCREEN, decide the next step.\n\n"
+        f"GOAL: {goal}\n\n"
+        f"ACTIONS ALREADY TAKEN:\n{hist}\n\n"
+        f"CURRENT SCREEN:\n<<<\n{screen}\n>>>\n\n"
+        "Reply with ONE line of JSON, nothing else:\n"
+        '{\"thought\": \"<brief>\", \"done\": <bool>, '
+        '\"text\": \"<literal text to type, or empty>\", '
+        '\"keys\": [<tmux key names to send after the text>]}\n'
+        f"Allowed key names: {sorted(_NAV_ALLOWED_KEYS)}. "
+        "Use \"text\" to type into a filter/input box; use \"keys\" for navigation "
+        "(e.g. [\"Down\",\"Enter\"]). Set done=true ONLY when the GOAL is already "
+        "satisfied by the current screen — then keys/text are ignored. "
+        "Prefer the fewest keys. Never guess a key not in the allowed list."
+    )
+    try:
+        proc = subprocess.run(
+            [claude, "-p", prompt, "--model", model],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"_error": f"claude -p failed: {e}"}
+    out = (proc.stdout or "").strip()
+    m = re.search(r"\{.*\}", out, re.DOTALL)  # tolerate stray prose around the JSON
+    if not m:
+        return {"_error": "no JSON in model reply", "raw": out[:400]}
+    try:
+        return json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return {"_error": "unparseable JSON from model", "raw": out[:400]}
+
+
+def navigate(
+    target: str,
+    goal: str,
+    until: str | None = None,
+    max_steps: int = 12,
+    step_pause: float = 1.5,
+    capture_lines: int = 200,
+    model: str | None = None,
+    by_registry_name: bool = False,
+) -> dict[str, Any]:
+    """Drive a tmux session's TUI toward `goal` using a model to pick keystrokes.
+
+    Loops: capture screen → `claude -p` decides the next keys → send them →
+    repeat, until the model reports done, `until` appears on screen, or
+    `max_steps` is hit. emux never spawns — the session must already exist.
+    """
+    if _resolve_tmux() is None:
+        return {"ok": False, "error": "tmux_not_installed"}
+    session = target
+    if by_registry_name:
+        registry = _load_registry()
+        if target not in registry:
+            return {"ok": False, "error": "not_registered", "name": target}
+        session = registry[target]["session"]
+    model = model or _NAV_MODEL_DEFAULT
+
+    history: list[str] = []
+    for step in range(max_steps):
+        try:
+            screen = _strip_ansi(_capture_text(session, capture_lines))
+        except (RuntimeError, FileNotFoundError) as e:
+            return {"ok": False, "error": "capture_failed", "stderr": str(e), "steps": history}
+        # Hard stop: caller-supplied target string already visible.
+        if until and until in screen:
+            return {"ok": True, "reached": "until", "steps": history, "screen": screen}
+
+        decision = _claude_decide(model, goal, screen, history)
+        if "_error" in decision:
+            return {"ok": False, "error": decision["_error"], "raw": decision.get("raw"), "steps": history}
+        if decision.get("done"):
+            return {"ok": True, "reached": "model_done", "steps": history,
+                    "thought": decision.get("thought"), "screen": screen}
+
+        text = (decision.get("text") or "").strip()
+        keys = [k for k in (decision.get("keys") or []) if k in _NAV_ALLOWED_KEYS]
+        if not text and not keys:
+            return {"ok": False, "error": "model_returned_no_action",
+                    "thought": decision.get("thought"), "steps": history, "screen": screen}
+        if text:
+            _run_tmux(["send-keys", "-t", session, "-l", text])
+        for k in keys:
+            _run_tmux(["send-keys", "-t", session, k])
+        history.append(f"step {step + 1}: {decision.get('thought','')!r} text={text!r} keys={keys}")
+        time.sleep(step_pause)
+
+    final = _strip_ansi(_capture_text(session, capture_lines))
+    return {"ok": False, "error": "max_steps_reached", "steps": history, "screen": final}
+
+
+@mcp.tool()
+async def tmux_navigate(
+    target: str,
+    goal: str,
+    until: str | None = None,
+    max_steps: int = 12,
+    step_pause: float = 1.5,
+    by_registry_name: bool = False,
+) -> dict[str, Any]:
+    """Drive a tmux session's TUI toward a goal, letting a model pick keystrokes.
+
+    Use this to get through an arbitrary menu/wizard to where you actually want
+    to be (e.g. the free-text prompt of railway.new's agent, past a project
+    picker, through an installer). Each step captures the screen and asks a model
+    (`claude -p`, fixed-cost — never the API) which keys to press next.
+
+    Pair with `tmux_ask`: navigate() gets you to the input prompt, tmux_ask()
+    holds the conversation. emux never spawns sessions — create it first.
+
+    Args:
+        target: tmux session name, or registry name if `by_registry_name=True`.
+        goal: Plain-English description of where to get to, e.g. "reach the
+            free-text chat input for the Railway agent; at any workspace/project
+            picker choose the first option".
+        until: Optional substring; if it appears on screen, stop and report
+            success immediately (a cheap hard-stop alongside the model's own
+            done signal).
+        max_steps: Max navigation steps before giving up (default 12).
+        step_pause: Seconds to wait after each keystroke batch for the UI to
+            update (default 1.5).
+        by_registry_name: Resolve `target` via the registry.
+
+    Returns:
+        {ok, reached: "model_done"|"until", steps: [...], screen} on success;
+        {ok: false, error, steps, screen} if it stalls or hits max_steps.
+    """
+    return await asyncio.to_thread(
+        navigate, target, goal, until, max_steps, step_pause, 200, None, by_registry_name
+    )
+
+
 def run_mcp_server() -> None:
     """Start the emux MCP server (stdio transport).
 
