@@ -132,8 +132,13 @@ interactive program) running in a session — `railway.new`'s agent, a
 
 **Recovery** (`navigate` / `goal`): escalates the model Haiku→Sonnet on a stall,
 retries a transient blank/stall capture, detects a stuck loop, and aborts
-cleanly if the session dies (`session_gone`) instead of flailing. **Not** gated:
-destructive actions — scope the goal, or point it at a read-only surface.
+cleanly if the session dies (`session_gone`) instead of flailing.
+
+**Destructive-action gate** (`navigate` / `goal`, on by default): the run is
+blocked (`blocked_dangerous`) if a step would type a destructive command
+(`rm -rf`, `DROP TABLE`, force-push…) or confirm a destructive on-screen prompt
+("Delete? [y]"). It's a heuristic denylist, not a sandbox — disable with `--yolo`
+(or `$EMUX_ALLOW_DANGEROUS`) when you know the surface is safe.
 
 **Drift-guard** (`goal --telos` / `tmux_goal(telos=True)`): route an autonomous
 run through [telos-md](https://github.com/eidos-agi/telos.md). emux opens a telos

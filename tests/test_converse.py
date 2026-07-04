@@ -334,6 +334,73 @@ def test_pursue_telos_unavailable_runs_unguarded(monkeypatch):
     assert out["ok"] and "telos" not in out and fired["n"] == 0
 
 
+def test_danger_reason_blocks_destructive_text():
+    from emux import server
+
+    assert server._danger_reason("a shell", "rm -rf /tmp/x", [], False)
+    assert server._danger_reason("db", "DROP TABLE users;", [], False)
+    assert server._danger_reason("repo", "git push origin main --force", [], False)
+
+
+def test_danger_reason_blocks_confirming_a_destructive_prompt():
+    from emux import server
+
+    scr = "Delete branch? This cannot be undone. [y/N]"
+    assert server._danger_reason(scr, "", ["Enter"], False)  # confirm key
+    assert server._danger_reason(scr, "y", [], True)          # typed y + submit
+    # non-confirming navigation on the same screen is allowed
+    assert server._danger_reason(scr, "", ["Down"], False) is None
+
+
+def test_danger_reason_allows_safe_actions():
+    from emux import server
+
+    assert server._danger_reason("Select a project", "", ["Down", "Enter"], False) is None
+    assert server._danger_reason("prompt >", "list my services", [], True) is None
+
+
+def test_pursue_blocks_dangerous_typed_command(monkeypatch):
+    from emux import server
+
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_observe", lambda s, n, retries=1: "shell$ ")
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, "", ""))
+    monkeypatch.setattr(server, "_pursue_decide",
+                        lambda *a, **k: {"action": "type", "text": "rm -rf ~/", "submit": True, "model": server._NAV_MODEL_DEFAULT})
+    out = server.pursue("sess", "clean up", max_steps=3)
+    assert not out["ok"] and out["error"] == "blocked_dangerous"
+
+
+def test_pursue_allow_dangerous_bypasses_gate(monkeypatch):
+    from emux import server
+
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_observe", lambda s, n, retries=1: "shell$ ")
+    monkeypatch.setattr(server, "_wait_stable", lambda *a, **k: "moved")
+    sent: list[list[str]] = []
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: sent.append(args) or (0, "", ""))
+    decisions = iter([
+        {"action": "type", "text": "rm -rf ~/tmp", "submit": True, "model": server._NAV_MODEL_DEFAULT},
+        {"action": "done", "success": True, "summary": "done", "model": server._NAV_MODEL_DEFAULT},
+    ])
+    monkeypatch.setattr(server, "_pursue_decide", lambda *a, **k: next(decisions))
+    out = server.pursue("sess", "clean up", max_steps=3, allow_dangerous=True)
+    assert out["ok"]  # gate disabled → it ran
+    assert ["send-keys", "-t", "sess", "-l", "rm -rf ~/tmp"] in sent
+
+
+def test_navigate_blocks_confirming_a_destructive_prompt(monkeypatch):
+    from emux import server
+
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_observe", lambda s, n, retries=1: "Permanently delete all data? [y/N]")
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, "", ""))
+    monkeypatch.setattr(server, "_decide_step",
+                        lambda *a, **k: {"done": False, "text": "", "keys": ["Enter"], "model": server._NAV_MODEL_DEFAULT})
+    out = server.navigate("sess", "get through the wizard", max_steps=3)
+    assert not out["ok"] and out["error"] == "blocked_dangerous"
+
+
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
 def test_converse_against_cat_echo():
     """`cat` echoes stdin — a deterministic stand-in for a TUI AI. converse
