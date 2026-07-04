@@ -18,8 +18,10 @@ Design principles:
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -325,6 +327,174 @@ async def tmux_run(
         "content": capture_result["content"],
         "lines_captured": capture_result["lines_captured"],
     }
+
+
+# ---- converse: talk to another AI through its TUI --------------------------
+#
+# tmux_run waits a FIXED number of seconds — useless for a streaming AI whose
+# reply takes an unknown amount of time. converse() instead polls the pane and
+# waits until it stops changing (quiesces), so it works for railway.new's agent,
+# a `claude`/`codex`/`aider` REPL, or any other terminal AI. It returns the
+# reply (the new text since the prompt was sent) plus the full settled screen.
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][A-Za-z0-9]")
+
+
+def _strip_ansi(s: str) -> str:
+    return _ANSI_RE.sub("", s)
+
+
+def _capture_text(session: str, lines: int) -> str:
+    code, out, err = _run_tmux(["capture-pane", "-t", session, "-p", "-S", f"-{lines}"])
+    if code != 0:
+        raise RuntimeError(err or "capture-pane failed")
+    return out or ""
+
+
+def _reply_delta(before: str, after: str) -> str:
+    """Best-effort: the non-blank lines present in `after` but not `before`."""
+    sm = difflib.SequenceMatcher(a=before.splitlines(), b=after.splitlines())
+    added: list[str] = []
+    after_lines = after.splitlines()
+    for tag, _i1, _i2, j1, j2 in sm.get_opcodes():
+        if tag in ("insert", "replace"):
+            added.extend(after_lines[j1:j2])
+    return "\n".join(line for line in added if line.strip())
+
+
+def converse(
+    target: str,
+    prompt: str,
+    submit: bool = True,
+    settle_seconds: float = 2.5,
+    poll_interval: float = 1.0,
+    max_seconds: float = 90.0,
+    capture_lines: int = 200,
+    by_registry_name: bool = False,
+    strip_ansi: bool = True,
+    busy_markers: list[str] | None = None,
+) -> dict[str, Any]:
+    """Send `prompt` to a session running a TUI AI, wait for it to stop
+    responding, and return the reply. Synchronous core shared by the MCP tool
+    and `emux ask`. Operates on an EXISTING session (emux never spawns).
+
+    busy_markers: substrings that mean the AI is still working (e.g. "thinking").
+    While any appears on screen, the pane is never considered settled — this
+    prevents a static "thinking…" indicator from being mistaken for the reply."""
+    if _resolve_tmux() is None:
+        return {"ok": False, "error": "tmux_not_installed"}
+    session = target
+    if by_registry_name:
+        registry = _load_registry()
+        if target not in registry:
+            return {"ok": False, "error": "not_registered", "name": target}
+        session = registry[target]["session"]
+
+    try:
+        before = _capture_text(session, capture_lines)
+    except (RuntimeError, FileNotFoundError) as e:
+        return {"ok": False, "error": "capture_failed", "stderr": str(e), "session": session}
+
+    # Type the prompt literally (-l so a sentence is never parsed as key names),
+    # then Enter as a real key.
+    if _run_tmux(["send-keys", "-t", session, "-l", prompt])[0] != 0:
+        return {"ok": False, "error": "send_failed", "session": session}
+    if submit:
+        _run_tmux(["send-keys", "-t", session, "Enter"])
+
+    # Wait until the pane is unchanged for `settle_seconds` (or time out).
+    last: str | None = None
+    stable_for = 0.0
+    elapsed = 0.0
+    while elapsed < max_seconds:
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+        try:
+            cur = _capture_text(session, capture_lines)
+        except (RuntimeError, FileNotFoundError):
+            break
+        busy = bool(busy_markers) and any(m in cur for m in busy_markers)
+        if cur == last and not busy:
+            stable_for += poll_interval
+            if stable_for >= settle_seconds:
+                break
+        else:
+            stable_for = 0.0
+            last = cur
+
+    after = last if last is not None else before
+    reply = _reply_delta(before, after)
+    if strip_ansi:
+        reply = _strip_ansi(reply)
+        after = _strip_ansi(after)
+    return {
+        "ok": True,
+        "target": target,
+        "resolved_session": session,
+        "prompt": prompt,
+        "settled": elapsed < max_seconds,
+        "waited_seconds": round(elapsed, 1),
+        "reply": reply.strip(),
+        "screen": after,
+    }
+
+
+@mcp.tool()
+async def tmux_ask(
+    target: str,
+    prompt: str,
+    submit: bool = True,
+    settle_seconds: float = 2.5,
+    poll_interval: float = 1.0,
+    max_seconds: float = 90.0,
+    capture_lines: int = 200,
+    by_registry_name: bool = False,
+    busy_markers: list[str] | None = None,
+) -> dict[str, Any]:
+    """Talk to another AI running in a tmux session and get its reply.
+
+    The strategy for driving TUI-based AIs (railway.new's agent, a `claude` /
+    `codex` / `aider` REPL, etc.): type a prompt, then wait until the pane STOPS
+    changing before reading — because an AI's reply streams in over an unknown
+    duration, a fixed sleep (like `tmux_run`) either cuts it off or wastes time.
+
+    The session must already be running the AI and be at its input prompt. emux
+    never spawns sessions — create it first (`tmux new-session -d -s x '<ai cmd>'`)
+    and navigate it to the prompt, then call this.
+
+    Args:
+        target: tmux session name, or registry name if `by_registry_name=True`.
+        prompt: The message to send (typed literally, then Enter unless submit=False).
+        submit: Append Enter to send the prompt (default True).
+        settle_seconds: Consider the reply done once the pane is unchanged this
+            long (default 2.5). Raise for choppy streamers.
+        poll_interval: Seconds between screen captures (default 1.0).
+        max_seconds: Hard cap on total wait (default 90).
+        capture_lines: Scrollback lines to read each poll (default 200).
+        by_registry_name: Resolve `target` via the registry.
+        busy_markers: Substrings meaning "still working" (e.g. ["thinking"]).
+            While one is on screen the pane is never treated as settled — stops
+            a static busy indicator from being read back as the reply.
+
+    Returns:
+        {ok, reply, screen, settled, waited_seconds, resolved_session}. `reply`
+        is the best-effort new text since the prompt; `screen` is the full
+        settled pane (ANSI stripped) if you need more context. `settled=False`
+        means it hit `max_seconds` — the AI may still be responding.
+    """
+    return await asyncio.to_thread(
+        converse,
+        target,
+        prompt,
+        submit,
+        settle_seconds,
+        poll_interval,
+        max_seconds,
+        capture_lines,
+        by_registry_name,
+        True,  # strip_ansi
+        busy_markers,
+    )
 
 
 def run_mcp_server() -> None:

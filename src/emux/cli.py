@@ -26,6 +26,7 @@ from .server import (
     _load_registry,
     _resolve_tmux,
     _save_registry,
+    converse,
     run_mcp_server,
 )
 
@@ -141,6 +142,35 @@ def cmd_ls() -> int:
     return 0
 
 
+def cmd_ask(args: argparse.Namespace) -> int:
+    """Send a prompt to an AI running in a tmux session, print its reply.
+
+    The session must already be running the AI (emux never spawns) and sitting
+    at its input prompt. Waits until the pane stops changing before reading.
+    """
+    if _resolve_tmux() is None:
+        print("emux: tmux not found on PATH.", file=sys.stderr)
+        return 2
+    result = converse(
+        target=args.target,
+        prompt=args.prompt,
+        settle_seconds=args.settle,
+        max_seconds=args.max,
+        by_registry_name=args.by_name,
+        busy_markers=args.busy or None,
+    )
+    if not result.get("ok"):
+        print(f"emux ask: {result.get('error', 'failed')}", file=sys.stderr)
+        return 1
+    if args.screen:
+        print(result["screen"])
+    else:
+        print(result["reply"] or "(no new output — the AI may still be responding)")
+    if not result["settled"]:
+        print(f"\n[emux: hit {args.max:g}s cap; reply may be truncated]", file=sys.stderr)
+    return 0
+
+
 def cmd_register(args: argparse.Namespace) -> int:
     """Non-interactive register command for scripting."""
     import time
@@ -179,6 +209,16 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("mcp", help="start the emux MCP server (stdio)")
     sub.add_parser("ls", help="print registered + live sessions (non-interactive)")
 
+    p_ask = sub.add_parser("ask", help="send a prompt to an AI in a tmux session, wait for it to settle, print the reply")
+    p_ask.add_argument("target", help="tmux session name (or registry name with -n)")
+    p_ask.add_argument("prompt", help="the message to send to the AI")
+    p_ask.add_argument("-n", "--by-name", action="store_true", help="resolve target via the registry")
+    p_ask.add_argument("--settle", type=float, default=2.5, help="reply is done once the pane is unchanged this long (default 2.5s)")
+    p_ask.add_argument("--max", type=float, default=90.0, help="hard cap on total wait (default 90s)")
+    p_ask.add_argument("-b", "--busy", action="append", metavar="MARKER",
+                       help="substring meaning the AI is still working (e.g. 'thinking'); never settle while on screen. Repeatable.")
+    p_ask.add_argument("--screen", action="store_true", help="print the full settled pane instead of just the reply delta")
+
     p_web = sub.add_parser("web", help="start the web daemon — monitor sessions in a browser (grid/groups/activity/flow/chat)")
     p_web.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1; no auth — keep it local)")
     p_web.add_argument("--port", type=int, default=8689, help="port (default 8689)")
@@ -214,6 +254,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_web(host=args.host, port=args.port, open_browser=args.open)
     if args.cmd == "ls":
         return cmd_ls()
+    if args.cmd == "ask":
+        return cmd_ask(args)
     if args.cmd == "register":
         return cmd_register(args)
     if args.cmd == "unregister":
