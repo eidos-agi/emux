@@ -206,7 +206,7 @@ def _live_sessions(host: str | None = None) -> list[dict[str, Any]]:
     activity, working directory, and current command, which is what lets you
     FIND the right existing session to hook into (most-recent, in this project,
     running claude), not just enumerate raw names."""
-    code, out, err = _run_tmux([
+    code, out, _err = _run_tmux([
         "list-sessions",
         "-F",
         "#{session_name}\t#{session_windows}\t#{session_created}\t"

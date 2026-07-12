@@ -32,6 +32,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
+    "pyright>=1.1.400",
 ]
 
 [project.urls]
@@ -62,3 +63,15 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
 ignore = ["E501"]
+
+[tool.pyright]
+# Standard, not strict: catches the real bug class (None-access, shape/return
+# mismatches) so an AI editing emux gets useful author-time feedback, without
+# the strict-only `reportUnknown*` tax that a subprocess/JSON codebase can only
+# satisfy by annotating everything `Any`. Plus cheap dead-code catches.
+include = ["src"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+reportUnusedImport = "error"
+reportUnusedVariable = "error"
+reportUnnecessaryTypeIgnoreComment = "error"
