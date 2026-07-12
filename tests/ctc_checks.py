@@ -105,31 +105,43 @@ def visible_manager_worker():         # real-surface GUI — manager + worker ea
     """Prove the nested-manager pattern is VISIBLE, on the real machine. Open the
     manager and the worker each in a real iTerm2 window, then verify against the
     REAL window manager (not a mock) that exactly two new windows appeared, the
-    worker left its green mark, the manager->worker edge is first-class, and both
-    sessions are live. Real life is where the code is proven. macOS + iTerm2 only.
-    Set EMUX_CTC_HOLD=<seconds> to keep the windows up so a human can watch."""
+    worker left its green mark, the manager->worker edge is first-class, both
+    sessions are live, AND the manager's command actually RAN TO COMPLETION.
+
+    That last check is the lesson real life taught: a manager whose command dies
+    (e.g. a shell parse error from a stray apostrophe) still leaves a live idle
+    shell — "live" is not "worked." So the manager must leave its own mark; if
+    its command broke before writing it, the case goes RED. Real life is where
+    the code is proven. macOS + iTerm2 only. EMUX_CTC_HOLD=<seconds> to watch."""
     if sys.platform != "darwin":
         print("visible_manager_worker requires macOS + iTerm2", file=sys.stderr)
         sys.exit(1)
     token = f"GREENMARK-{os.getpid()}-{int(time.time())}"
-    proof = pathlib.Path(tempfile.gettempdir()) / f"emux-visible-{os.getpid()}.txt"
+    mgr_token = f"MGR-OK-{os.getpid()}-{int(time.time())}"
+    tmp = pathlib.Path(tempfile.gettempdir())
+    proof = tmp / f"emux-visible-{os.getpid()}.txt"
+    mgr_proof = tmp / f"emux-visible-mgr-{os.getpid()}.txt"
     proof.unlink(missing_ok=True)
-    qp = shlex.quote(str(proof))
+    mgr_proof.unlink(missing_ok=True)
+    qp, qmp = shlex.quote(str(proof)), shlex.quote(str(mgr_proof))
     before = _iterm_ids()
     # WORKER window: leaves the green mark, then stays up so it stays visible.
     run(s.tmux_spawn(name="ctc-wrk", gui=True, command=(
         f"printf '=== WORKER ===\\nleaving green mark...\\n'; "
         f"echo {token} > {qp}; printf 'done: %s\\n' {token}; sleep 3600")))
-    # MANAGER window: manages the worker (edge first-class), reads its mark, stays up.
+    # MANAGER window: manages the worker (edge first-class), reads its mark, then
+    # leaves ITS OWN mark last — proof the whole command ran, not just that a
+    # shell is alive. If the command dies early, mgr_proof never appears -> RED.
     run(s.tmux_spawn(name="ctc-mgr", gui=True, manages=["ctc-wrk"], command=(
         "printf '=== MANAGER (drives ctc-wrk) ===\\n'; sleep 1; "
-        f"printf 'worker left: '; cat {qp}; sleep 3600")))
-    time.sleep(3)                     # let both windows open + the worker leave its mark
+        f"printf 'worker left: '; cat {qp}; echo {mgr_token} > {qmp}; sleep 3600")))
+    time.sleep(3)                     # let both windows open + both marks land
     opened = _iterm_ids() - before
     got = proof.read_text().strip() if proof.exists() else ""
+    mgr_got = mgr_proof.read_text().strip() if mgr_proof.exists() else ""
     edge = s._load_registry().get("ctc-mgr", {}).get("manages") == ["ctc-wrk"]
     live = _live("ctc-mgr") and _live("ctc-wrk")
-    ok = len(opened) == 2 and got == token and edge and live
+    ok = len(opened) == 2 and got == token and mgr_got == mgr_token and edge and live
     hold = int(os.environ.get("EMUX_CTC_HOLD", "0"))
     if hold:
         print(f"holding {hold}s — two iTerm2 windows are open (MANAGER + WORKER); look now")
@@ -139,6 +151,7 @@ def visible_manager_worker():         # real-surface GUI — manager + worker ea
     for sess in ("ctc-mgr", "ctc-wrk"):
         s._run_tmux(["kill-session", "-t", sess])
     proof.unlink(missing_ok=True)
+    mgr_proof.unlink(missing_ok=True)
     sys.exit(0 if ok else 1)
 
 
