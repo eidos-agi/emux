@@ -172,20 +172,50 @@ def _session_exists(session: str, host: str | None = None) -> bool:
     return code == 0
 
 
+_SHELLS = {"zsh", "bash", "sh", "fish", "tcsh", "csh"}
+
+
+def _classify(command: str) -> str:
+    """What KIND of session this is, so you can find the resumable work: an
+    agent (claude/codex/…), a bare shell, or something else (a build, a python
+    process, an idle TUI)."""
+    c = (command or "").lower()
+    if "claude" in c:
+        return "claude"
+    if any(a in c for a in ("codex", "grok", "aider", "goose")):
+        return "agent"
+    if c in _SHELLS:
+        return "shell"
+    return "other"
+
+
+def _ago(unix: int | None, now: int) -> str | None:
+    if not unix:
+        return None
+    d = max(0, now - unix)
+    if d < 3600:
+        return f"{d // 60}m ago"
+    if d < 86400:
+        return f"{d // 3600}h ago"
+    return f"{d // 86400}d ago"
+
+
 def _live_sessions(host: str | None = None) -> list[dict[str, Any]]:
-    """Return currently-running tmux sessions with metadata — on the local
-    machine, or on `host` over ssh. This is how you DISCOVER existing sessions
-    to hook into, wherever they live."""
+    """Return currently-running tmux sessions with RICH, rankable metadata — on
+    the local machine, or on `host` over ssh. Each session carries its last
+    activity, working directory, and current command, which is what lets you
+    FIND the right existing session to hook into (most-recent, in this project,
+    running claude), not just enumerate raw names."""
     code, out, err = _run_tmux([
         "list-sessions",
         "-F",
-        "#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}",
+        "#{session_name}\t#{session_windows}\t#{session_created}\t"
+        "#{session_attached}\t#{session_activity}\t#{pane_current_path}\t"
+        "#{pane_current_command}",
     ], host=host)
     if code != 0:
-        # tmux returns nonzero with "no server running" when no sessions exist
-        if "no server running" in (err or "").lower() or "no server running" in (out or "").lower():
-            return []
-        return []
+        return []  # nonzero (incl. "no server running") → no sessions
+    now = int(time.time())
     sessions = []
     for line in (out or "").strip().split("\n"):
         if not line.strip():
@@ -193,11 +223,20 @@ def _live_sessions(host: str | None = None) -> list[dict[str, Any]]:
         parts = line.split("\t")
         if len(parts) < 4:
             continue
+        while len(parts) < 7:
+            parts.append("")
+        name, windows, created, attached, activity, cwd, command = parts[:7]
+        act = int(activity) if activity.isdigit() else None
         sessions.append({
-            "name": parts[0],
-            "windows": int(parts[1]) if parts[1].isdigit() else parts[1],
-            "created_unix": int(parts[2]) if parts[2].isdigit() else parts[2],
-            "attached": parts[3] != "0",
+            "name": name,
+            "windows": int(windows) if windows.isdigit() else windows,
+            "created_unix": int(created) if created.isdigit() else created,
+            "activity_unix": act,
+            "last_active_ago": _ago(act, now),
+            "attached": attached != "0",
+            "cwd": cwd or None,
+            "command": command or None,
+            "kind": _classify(command),
         })
     return sessions
 
@@ -221,23 +260,39 @@ def _save_registry(registry: dict[str, dict[str, Any]]) -> None:
 
 
 @mcp.tool()
-async def tmux_sessions(host: str | None = None) -> dict[str, Any]:
-    """Discover currently-running tmux sessions — to HOOK INTO existing ones,
-    not just create new. Local by default; pass `host` (an ssh destination) to
-    see what's running on a remote machine.
+async def tmux_sessions(
+    host: str | None = None,
+    sort_by: str = "activity",
+    limit: int | None = None,
+    match: str | None = None,
+    kind: str | None = None,
+) -> dict[str, Any]:
+    """Discover, RANK, and FILTER running tmux sessions — a queryable inventory
+    of work in flight, local or remote, so you can find the right EXISTING
+    session to hook into instead of enumerating raw names by hand.
 
-    Existing sessions — a Claude someone else started, a long build, an
-    interactive shell — can be adopted with `tmux_register` (carry the same
-    `host`) and then driven with `tmux_send`/`tmux_capture`. You did not have to
-    spawn it; emux hooks into what is already there.
+    Each session carries last-activity, working directory, current command, and
+    a `kind` (claude / agent / shell / other). Combine the filters to answer a
+    real question in one call — e.g. "the 5 most recent claude sessions in the
+    GREENMARK project on rentamac":
+
+        tmux_sessions(host="rentamac", match="GREENMARK", kind="claude", limit=5)
+
+    Then adopt one with `tmux_register` (same host) and drive it with
+    `tmux_send`/`tmux_capture`. You did not have to spawn it; emux hooks into
+    what is already there.
 
     Args:
-        host: ssh destination to list sessions on a remote box; omit for local.
+        host: ssh destination to list a remote machine's sessions; omit for local.
+        sort_by: "activity" (most recent first, default), "created", or "name".
+        limit: keep only the first N after sorting.
+        match: case-insensitive substring matched against name + cwd + command
+            (e.g. a project path or repo name).
+        kind: keep only sessions of this kind — "claude", "agent", "shell", "other".
 
     Returns:
-        {ok, host, live: [...], registry: {...}}. Registry entries are marked
-        `stale: true` only when checked against the machine they actually live
-        on (an entry's own `host`), so staleness is never guessed across hosts.
+        {ok, host, count, live: [...], registry: {...}}. Registry entries are
+        marked `stale: true` only when checked against the machine they live on.
     """
     if host is None and _resolve_tmux() is None:
         return {
@@ -245,18 +300,36 @@ async def tmux_sessions(host: str | None = None) -> dict[str, Any]:
             "error": "tmux_not_installed",
             "hint": "Install tmux: `brew install tmux` (macOS) or `apt install tmux` (Debian).",
         }
-    live = _live_sessions(host=host)
+    all_live = _live_sessions(host=host)   # one discovery call (one ssh hop)
+    live_names = {s["name"] for s in all_live}
+    live = list(all_live)
+
+    if match:
+        m = match.lower()
+        live = [
+            s for s in live
+            if m in f"{s['name']} {s.get('cwd') or ''} {s.get('command') or ''}".lower()
+        ]
+    if kind:
+        live = [s for s in live if s.get("kind") == kind]
+
+    keys = {
+        "activity": (lambda s: s.get("activity_unix") or 0, True),
+        "created": (lambda s: s.get("created_unix") or 0, True),
+        "name": (lambda s: s["name"], False),
+    }
+    keyfn, rev = keys.get(sort_by, keys["activity"])
+    live.sort(key=keyfn, reverse=rev)
+    if limit is not None and limit >= 0:
+        live = live[:limit]
+
     registry = _load_registry()
-    live_names = {s["name"] for s in live}
     annotated = {}
     for name, entry in registry.items():
         entry_host = entry.get("host")
-        if entry_host == host:  # same machine we just listed → real staleness
-            stale: bool | None = entry.get("session") not in live_names
-        else:                    # lives elsewhere → don't guess
-            stale = None
+        stale: bool | None = (entry.get("session") not in live_names) if entry_host == host else None
         annotated[name] = {**entry, "stale": stale}
-    return {"ok": True, "host": host, "live": live, "registry": annotated}
+    return {"ok": True, "host": host, "count": len(live), "live": live, "registry": annotated}
 
 
 @mcp.tool()
