@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "min_cases": 4,
+  "require_dimensions": [
+    "negative",
+    "adversary",
+    "refusal"
+  ],
+  "retire_after_green_runs": 50
+}

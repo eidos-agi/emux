@@ -1,0 +1,5 @@
+{"dim": "happy", "name": "search_finds_running", "run": "python3 tests/ctc_checks.py happy", "schema": 1, "target": "emux", "why": "a running session must be findable by search"}
+{"dim": "integration", "name": "search_finds_ended", "run": "python3 tests/ctc_checks.py ended", "schema": 1, "target": "emux", "why": "the flagship claim: findable AFTER it ends, or track-and-control is a lie"}
+{"dim": "negative", "name": "adopt_ghost_not_live", "run": "python3 tests/ctc_checks.py ghost", "schema": 1, "target": "emux", "why": "adopting a non-existent remote session must report NOT live"}
+{"dim": "refusal", "name": "drive_dead_refuses", "run": "python3 tests/ctc_checks.py refusal", "schema": 1, "target": "emux", "why": "driving a session that does not exist must fail, never silently succeed"}
+{"dim": "adversary", "name": "honest_liveness_adversary", "run": "python3 tests/ctc_checks.py ghost", "schema": 1, "target": "emux", "why": "the false-green class: a claim of live must be earned, not assumed"}
