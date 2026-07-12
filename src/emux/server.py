@@ -117,7 +117,17 @@ def _run_tmux(
     Raises FileNotFoundError if tmux is not installed (local only).
     """
     if host:
-        remote = "tmux " + " ".join(shlex.quote(a) for a in args)
+        # A non-interactive ssh shell does NOT source the login profile, so
+        # Homebrew's bin (where tmux lives on most Macs) is off PATH and a bare
+        # `ssh host tmux ...` fails even though tmux is installed — verified
+        # against a real box. Prepend the standard install locations so the
+        # remote just works without the user configuring anything.
+        # ponytail: covers homebrew (arm+intel) and /usr/local; if a host puts
+        # tmux somewhere exotic, set it on that host's ssh-config or PATH.
+        remote = (
+            "PATH=/opt/homebrew/bin:/usr/local/bin:$PATH "
+            "tmux " + " ".join(shlex.quote(a) for a in args)
+        )
         cmd = [
             "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
             host, remote,
