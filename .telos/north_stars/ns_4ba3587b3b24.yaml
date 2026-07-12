@@ -1,0 +1,14 @@
+id: "ns_4ba3587b3b24"
+project_id: "40d7aac0-0687-452e-a182-3ebd79c26e5d"
+goal: "Drive existing tmux sessions — observe/converse/navigate/pursue — and nest managers so context cost stays flat as the fleet grows; the autonomous loop never spawns, only explicit tmux_spawn does."
+metric: "autonomous_loop_lifecycle_calls"
+metric_kind: "count"
+charter_hash: "b707ce1bf7a2545d"
+serves_parent: "root"
+stop_max_iters: null
+stop_zero_delta_n: 3
+signature: "founder-amend-2026-07-12-bless-explicit-spawn"
+created_at: "2026-07-12T22:01:42.906162+00:00"
+closed_at: null
+outcome: null
+repo_path: "/Users/dshanklinbv/repos-eidos-agi/emux"

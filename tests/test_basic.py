@@ -58,6 +58,20 @@ def test_registry_round_trip(tmp_path, monkeypatch):
     assert loaded == registry
 
 
+def test_spawn_passes_manages_edge_to_registry(tmp_path, monkeypatch):
+    """tmux_spawn records the manager→sub edge so the nested-manager tree is
+    declarable at spawn time (regression: spawn used to drop `manages`)."""
+    from emux import server
+    monkeypatch.setattr(server, "REGISTRY_PATH", tmp_path / "registry.json")
+    # No live tmux in this suite — fake the tmux calls and liveness.
+    monkeypatch.setattr(server, "_run_tmux", lambda *a, **k: (0, "", ""))
+    monkeypatch.setattr(server, "_session_exists", lambda *a, **k: False)
+
+    asyncio.run(server.tmux_spawn(name="mgr", manages=["sub"]))
+    entry = server._load_registry()["mgr"]
+    assert entry["manages"] == ["sub"], entry
+
+
 def test_load_registry_returns_empty_when_missing(tmp_path, monkeypatch):
     from emux import server
     monkeypatch.setattr(server, "REGISTRY_PATH", tmp_path / "does-not-exist.json")

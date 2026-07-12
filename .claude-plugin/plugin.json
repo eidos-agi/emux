@@ -1,6 +1,6 @@
 {
   "name": "emux",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "description": "Eidos mux: TUI picker and MCP server for named tmux sessions.",
   "author": {
     "name": "Eidos AGI",
@@ -37,7 +37,10 @@
       "tagline": "Pick up where you left off in tmux.",
       "shape": "Session registry + MCP",
       "status": "ready",
-      "hosts": ["codex", "claude-code"],
+      "hosts": [
+        "codex",
+        "claude-code"
+      ],
       "codex": "codex-package",
       "claude": "claude-marketplace",
       "install": {
@@ -45,7 +48,10 @@
         "claude": "claude plugins install emux@eidos-marketplace"
       },
       "start": "Register a tmux session, then drive it with send/run/capture.",
-      "requires": ["tmux", "Python 3.11+"]
+      "requires": [
+        "tmux",
+        "Python 3.11+"
+      ]
     }
   }
 }

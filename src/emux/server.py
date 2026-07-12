@@ -472,6 +472,7 @@ async def tmux_spawn(
     cwd: str | None = None,
     description: str | None = None,
     tags: list[str] | None = None,
+    manages: list[str] | None = None,
 ) -> dict[str, Any]:
     """Spawn a fresh, driveable tmux session and register it — in one call.
 
@@ -487,6 +488,13 @@ async def tmux_spawn(
     session there, and drive its Claude Code / shell exactly the same way. Nest
     freely — a session's command can itself `ssh` onward and spawn again.
 
+    NESTED MANAGER (context offloading): spawn a session whose `command` is a
+    `claude` that will ITSELF spawn and drive a sub-session, and pass
+    `manages=["<sub-name>"]` to declare the edge up front. The manager runs the
+    tight capture/send loop against its sub, so that drive-churn lives in the
+    MANAGER's context — the parent that spawned it only exchanges high-level
+    goals/status with the manager. See the `nested-manager` skill for the recipe.
+
     Args:
         name: friendly registry name (also the tmux session id).
         command: optional command to launch in the session (e.g. `claude "..."`).
@@ -496,6 +504,9 @@ async def tmux_spawn(
              `ssh -t`). Best-effort — a failure here does not fail the spawn.
         cwd: working directory to start the session in.
         description, tags: registry metadata.
+        manages: registry names this session drives (declared, not observed) —
+            rendered as directed edges in `emux web` flow view. Use it to record
+            a manager→sub tree at spawn time; the sub need not exist yet.
 
     Returns:
         {ok, name, host, session, gui_opened, launched, drive_hint}.
@@ -519,7 +530,7 @@ async def tmux_spawn(
 
     # 3) register so it is addressable by name (carries host → remote-aware ops)
     await tmux_register(name=name, session=session, description=description,
-                        tags=tags, host=host)
+                        tags=tags, host=host, manages=manages)
 
     # 4) optional GUI window so a human can watch (best-effort, macOS/iTerm2)
     gui_opened = False
