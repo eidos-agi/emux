@@ -618,10 +618,20 @@ _NAV_ALLOWED_KEYS = {
 # ponytail: heuristic denylist, not a sandbox — the upgrade path is an
 # interactive confirm callback. It errs toward blocking; opt out with --yolo.
 
+# ponytail: a denylist for arbitrary typed text is best-effort, never complete —
+# the real backstop is that autonomous mode is opt-in (allow_dangerous) and
+# reviewable. But it was missing whole destructive-verb FAMILIES: it caught
+# `rm -rf` and missed `kubectl delete namespace production`, `terraform destroy`,
+# `DELETE FROM users`, `git branch -D main` — all of which it then typed and
+# submitted into a live pane. Those families are enumerated here now; treat any
+# addition to this list as closing a hole someone already found the hard way.
 _DANGER_TEXT = re.compile(
     r"(?i)(\brm\s+-[rf]{1,2}\b|\bdrop\s+(table|database)\b|\btruncate\s+table\b|"
     r"git\s+push\b.*--force|git\s+reset\s+--hard|\bmkfs\b|\bdd\s+if=|>\s*/dev/sd|"
-    r"\bshutdown\b|\breboot\b|\bformat\s+[a-z]:)"
+    r"\bshutdown\b|\breboot\b|\bformat\s+[a-z]:|"
+    r"kubectl\s+delete|terraform\s+(destroy|apply)|\bDELETE\s+FROM\b|"
+    r"git\s+branch\s+-D\b|git\s+clean\s+-[a-z]*f|helm\s+(delete|uninstall)|"
+    r"docker\s+(rm\b|system\s+prune))"
 )
 _DANGER_SCREEN = re.compile(
     r"(?i)(permanently\s+delete|cannot\s+be\s+undone|are\s+you\s+sure|"
