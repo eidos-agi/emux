@@ -259,6 +259,61 @@ def _save_registry(registry: dict[str, dict[str, Any]]) -> None:
     tmp.replace(REGISTRY_PATH)
 
 
+# ── durable session index: TRACK everything emux touches, so it stays findable
+# after it ends. Control follows tracking — you can only search/resume a session
+# emux once saw. This is what turns emux from a driver of LIVE sessions into a
+# tracker of ALL of them (running or ended). Scope is deliberate: emux tracks
+# TERMINAL sessions; searching Claude CONVERSATIONS by content is resume-resume's
+# job — compose them, don't duplicate.
+_INDEX_PATH = _STATE_DIR / "index.json"
+
+
+def _load_index() -> dict[str, dict[str, Any]]:
+    if not _INDEX_PATH.exists():
+        return {}
+    try:
+        return json.loads(_INDEX_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_index(index: dict[str, dict[str, Any]]) -> None:
+    try:
+        _INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _INDEX_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(index, sort_keys=True) + "\n")
+        tmp.replace(_INDEX_PATH)
+    except OSError:
+        pass  # tracking is best-effort; never break a discovery on a write failure
+
+
+def _index_key(name: str, host: str | None) -> str:
+    return f"{host or 'local'}::{name}"
+
+
+def _track(sessions: list[dict[str, Any]], host: str | None) -> None:
+    """Upsert every session emux just saw into the durable index (last_seen=now).
+    Called on discovery, so any session emux ever looked at survives its own end
+    and stays searchable."""
+    if not sessions:
+        return
+    idx = _load_index()
+    now = int(time.time())
+    for s in sessions:
+        key = _index_key(s["name"], host)
+        prev = idx.get(key, {})
+        idx[key] = {
+            "name": s["name"],
+            "host": host,
+            "cwd": s.get("cwd") or prev.get("cwd"),
+            "kind": s.get("kind") or prev.get("kind"),
+            "created_unix": s.get("created_unix") or prev.get("created_unix"),
+            "first_seen_unix": prev.get("first_seen_unix", now),
+            "last_seen_unix": now,
+        }
+    _save_index(idx)
+
+
 @mcp.tool()
 async def tmux_sessions(
     host: str | None = None,
@@ -301,6 +356,7 @@ async def tmux_sessions(
             "hint": "Install tmux: `brew install tmux` (macOS) or `apt install tmux` (Debian).",
         }
     all_live = _live_sessions(host=host)   # one discovery call (one ssh hop)
+    _track(all_live, host)                 # remember them — findable after they end
     live_names = {s["name"] for s in all_live}
     live = list(all_live)
 
@@ -330,6 +386,81 @@ async def tmux_sessions(
         stale: bool | None = (entry.get("session") not in live_names) if entry_host == host else None
         annotated[name] = {**entry, "stale": stale}
     return {"ok": True, "host": host, "count": len(live), "live": live, "registry": annotated}
+
+
+@mcp.tool()
+async def tmux_search(
+    query: str | None = None,
+    host: str | None = None,
+    kind: str | None = None,
+    status: str | None = None,
+    limit: int = 20,
+    refresh_host: bool = True,
+) -> dict[str, Any]:
+    """Search ANY session emux has ever tracked — running OR ended.
+
+    `tmux_sessions` shows only what's live right now. This searches the durable
+    index of everything emux has ever seen (spawned, hooked, or discovered), and
+    marks each RUNNING or ENDED by checking the live set. So you can find work in
+    flight and work that has already finished, and decide what to resume.
+
+    Control follows tracking: emux can only find a session it once saw. A session
+    on a machine emux never looked at is not here — run `tmux_sessions(host=...)`
+    on that machine once and it becomes tracked forever after.
+
+        tmux_search(query="greenmark", kind="claude")          # all, running+ended
+        tmux_search(query="greenmark", status="ended")          # only finished ones
+        tmux_search(host="rentamac", status="running", limit=5) # live on one box
+
+    Resuming: a RUNNING match → adopt with tmux_register + drive. An ENDED match →
+    its durable log (emux memory) is available to inspect; if it was a `claude`
+    session, resume the conversation with resume-resume and spawn a fresh terminal
+    for it via tmux_spawn. emux tracks the terminal; resume-resume tracks the chat.
+
+    Args:
+        query: case-insensitive substring over name + cwd (e.g. a project/repo).
+        host: restrict to one machine (an ssh destination, or omit for all tracked).
+        kind: "claude" | "agent" | "shell" | "other".
+        status: "running" | "ended".
+        limit: max results (most-recently-seen first).
+        refresh_host: if a host is given, re-discover it first so its index +
+            running/ended status are current (one ssh hop). Default True.
+
+    Returns:
+        {ok, count, results: [{name, host, status, kind, cwd, created_unix,
+        last_seen_unix, last_seen_ago}]}, most-recently-seen first.
+    """
+    if refresh_host and host is not None:
+        _track(_live_sessions(host=host), host)  # make this host's index current
+
+    idx = _load_index()
+    now = int(time.time())
+    live_by_host: dict[str | None, set[str]] = {}
+
+    def _running(name: str, h: str | None) -> bool:
+        if h not in live_by_host:
+            live_by_host[h] = {s["name"] for s in _live_sessions(host=h)}
+        return name in live_by_host[h]
+
+    results = []
+    for e in idx.values():
+        h = e.get("host")
+        if host is not None and h != host:
+            continue
+        st = "running" if _running(e["name"], h) else "ended"
+        if status and st != status:
+            continue
+        if kind and e.get("kind") != kind:
+            continue
+        if query and query.lower() not in f"{e['name']} {e.get('cwd') or ''}".lower():
+            continue
+        results.append({
+            **e, "status": st,
+            "last_seen_ago": _ago(e.get("last_seen_unix"), now),
+        })
+
+    results.sort(key=lambda r: r.get("last_seen_unix") or 0, reverse=True)
+    return {"ok": True, "count": len(results), "results": results[: max(0, limit)]}
 
 
 @mcp.tool()
