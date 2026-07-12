@@ -160,13 +160,27 @@ def _resolve_target(target: str, by_registry_name: bool) -> tuple[str | None, st
     return entry["session"], entry.get("host"), None
 
 
-def _live_sessions() -> list[dict[str, Any]]:
-    """Return a list of currently-running tmux sessions with metadata."""
+def _session_exists(session: str, host: str | None = None) -> bool:
+    """True iff a tmux session by this id is actually running — on the local
+    machine or, with `host`, on the remote one. This is a REAL check (`tmux
+    has-session`), not an assumption: hooking into an existing session must
+    confirm it exists, or 'session_live' is a false green."""
+    try:
+        code, _out, _err = _run_tmux(["has-session", "-t", session], host=host)
+    except FileNotFoundError:
+        return False
+    return code == 0
+
+
+def _live_sessions(host: str | None = None) -> list[dict[str, Any]]:
+    """Return currently-running tmux sessions with metadata — on the local
+    machine, or on `host` over ssh. This is how you DISCOVER existing sessions
+    to hook into, wherever they live."""
     code, out, err = _run_tmux([
         "list-sessions",
         "-F",
         "#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}",
-    ])
+    ], host=host)
     if code != 0:
         # tmux returns nonzero with "no server running" when no sessions exist
         if "no server running" in (err or "").lower() or "no server running" in (out or "").lower():
@@ -207,32 +221,42 @@ def _save_registry(registry: dict[str, dict[str, Any]]) -> None:
 
 
 @mcp.tool()
-async def tmux_sessions() -> dict[str, Any]:
-    """List all currently-running tmux sessions on the host.
+async def tmux_sessions(host: str | None = None) -> dict[str, Any]:
+    """Discover currently-running tmux sessions — to HOOK INTO existing ones,
+    not just create new. Local by default; pass `host` (an ssh destination) to
+    see what's running on a remote machine.
 
-    Use this to discover what tmux sessions exist before attaching. Returns
-    sessions whether or not they're in the named-session registry; cross-
-    reference with `tmux_registered()` to see which have metadata.
+    Existing sessions — a Claude someone else started, a long build, an
+    interactive shell — can be adopted with `tmux_register` (carry the same
+    `host`) and then driven with `tmux_send`/`tmux_capture`. You did not have to
+    spawn it; emux hooks into what is already there.
+
+    Args:
+        host: ssh destination to list sessions on a remote box; omit for local.
 
     Returns:
-        A dict with `live` (list of session dicts: name, windows, created_unix,
-        attached) and `registry` (the named-session registry from disk).
-        Each registered session is also marked `stale: true` if its tmux
-        session no longer exists.
+        {ok, host, live: [...], registry: {...}}. Registry entries are marked
+        `stale: true` only when checked against the machine they actually live
+        on (an entry's own `host`), so staleness is never guessed across hosts.
     """
-    if _resolve_tmux() is None:
+    if host is None and _resolve_tmux() is None:
         return {
             "ok": False,
             "error": "tmux_not_installed",
             "hint": "Install tmux: `brew install tmux` (macOS) or `apt install tmux` (Debian).",
         }
-    live = _live_sessions()
+    live = _live_sessions(host=host)
     registry = _load_registry()
     live_names = {s["name"] for s in live}
     annotated = {}
     for name, entry in registry.items():
-        annotated[name] = {**entry, "stale": entry.get("session") not in live_names}
-    return {"ok": True, "live": live, "registry": annotated}
+        entry_host = entry.get("host")
+        if entry_host == host:  # same machine we just listed → real staleness
+            stale: bool | None = entry.get("session") not in live_names
+        else:                    # lives elsewhere → don't guess
+            stale = None
+        annotated[name] = {**entry, "stale": stale}
+    return {"ok": True, "host": host, "live": live, "registry": annotated}
 
 
 @mcp.tool()
@@ -363,14 +387,17 @@ async def tmux_register(
         entry["host"] = host  # remote session: all ops for this name run over ssh
     registry[name] = entry
     _save_registry(registry)
-    if not host:
+    # REAL liveness — hooking into an existing session must confirm it exists,
+    # local or remote. Assuming a remote session is live because a host was named
+    # is a false green (you could "adopt" a session that isn't there).
+    session_live = _session_exists(session, host)
+    if session_live and not host:
         _start_stream_log(session, name)  # local durable logging; remote streams over ssh on demand
-    live_names = {s["name"] for s in _live_sessions()}
     return {
         "ok": True,
         "name": name,
         "entry": entry,
-        "session_live": (host is not None) or (session in live_names),
+        "session_live": session_live,
     }
 
 
