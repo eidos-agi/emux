@@ -6,6 +6,7 @@ import asyncio
 import os
 import pathlib
 import shlex
+import subprocess
 import sys
 import tempfile
 import time
@@ -19,6 +20,26 @@ def run(c):
 
 
 RT = "rentamac"
+
+
+def _iterm_ids():
+    """The REAL window manager's truth: the set of iTerm2 window ids right now."""
+    r = subprocess.run(
+        ["osascript", "-e", 'tell application "iTerm2" to get id of windows'],
+        capture_output=True, text=True,
+    )
+    return {int(x) for x in r.stdout.replace(",", " ").split() if x.strip().isdigit()}
+
+
+def _iterm_close(wid):
+    subprocess.run(
+        ["osascript", "-e", f'tell application "iTerm2" to close (first window whose id is {wid})'],
+        capture_output=True, text=True,
+    )
+
+
+def _live(name):
+    return s._run_tmux(["has-session", "-t", name])[0] == 0
 
 
 def happy_search_running():           # happy
@@ -80,7 +101,49 @@ def manager_worker_greenmark():       # delegation — the nested-manager patter
     sys.exit(0 if (got == token and edge) else 1)
 
 
+def visible_manager_worker():         # real-surface GUI — manager + worker each in a real iTerm2 window on THIS mac
+    """Prove the nested-manager pattern is VISIBLE, on the real machine. Open the
+    manager and the worker each in a real iTerm2 window, then verify against the
+    REAL window manager (not a mock) that exactly two new windows appeared, the
+    worker left its green mark, the manager->worker edge is first-class, and both
+    sessions are live. Real life is where the code is proven. macOS + iTerm2 only.
+    Set EMUX_CTC_HOLD=<seconds> to keep the windows up so a human can watch."""
+    if sys.platform != "darwin":
+        print("visible_manager_worker requires macOS + iTerm2", file=sys.stderr)
+        sys.exit(1)
+    token = f"GREENMARK-{os.getpid()}-{int(time.time())}"
+    proof = pathlib.Path(tempfile.gettempdir()) / f"emux-visible-{os.getpid()}.txt"
+    proof.unlink(missing_ok=True)
+    qp = shlex.quote(str(proof))
+    before = _iterm_ids()
+    # WORKER window: leaves the green mark, then stays up so it stays visible.
+    run(s.tmux_spawn(name="ctc-wrk", gui=True, command=(
+        f"printf '=== WORKER ===\\nleaving green mark...\\n'; "
+        f"echo {token} > {qp}; printf 'done: %s\\n' {token}; sleep 3600")))
+    # MANAGER window: manages the worker (edge first-class), reads its mark, stays up.
+    run(s.tmux_spawn(name="ctc-mgr", gui=True, manages=["ctc-wrk"], command=(
+        "printf '=== MANAGER (drives ctc-wrk) ===\\n'; sleep 1; "
+        f"printf 'worker left: '; cat {qp}; sleep 3600")))
+    time.sleep(3)                     # let both windows open + the worker leave its mark
+    opened = _iterm_ids() - before
+    got = proof.read_text().strip() if proof.exists() else ""
+    edge = s._load_registry().get("ctc-mgr", {}).get("manages") == ["ctc-wrk"]
+    live = _live("ctc-mgr") and _live("ctc-wrk")
+    ok = len(opened) == 2 and got == token and edge and live
+    hold = int(os.environ.get("EMUX_CTC_HOLD", "0"))
+    if hold:
+        print(f"holding {hold}s — two iTerm2 windows are open (MANAGER + WORKER); look now")
+        time.sleep(hold)
+    for wid in opened:                # close exactly the windows we opened, by id
+        _iterm_close(wid)
+    for sess in ("ctc-mgr", "ctc-wrk"):
+        s._run_tmux(["kill-session", "-t", sess])
+    proof.unlink(missing_ok=True)
+    sys.exit(0 if ok else 1)
+
+
 if __name__ == "__main__":
     {"happy": happy_search_running, "ended": search_finds_ended,
      "ghost": adopt_ghost_not_live, "refusal": drive_dead_refuses,
-     "greenmark": manager_worker_greenmark}[sys.argv[1]]()
+     "greenmark": manager_worker_greenmark,
+     "visible": visible_manager_worker}[sys.argv[1]]()
