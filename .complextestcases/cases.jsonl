@@ -3,3 +3,4 @@
 {"dim": "negative", "name": "adopt_ghost_not_live", "run": "python3 tests/ctc_checks.py ghost", "schema": 1, "target": "emux", "why": "adopting a non-existent remote session must report NOT live"}
 {"dim": "refusal", "name": "drive_dead_refuses", "run": "python3 tests/ctc_checks.py refusal", "schema": 1, "target": "emux", "why": "driving a session that does not exist must fail, never silently succeed"}
 {"dim": "adversary", "name": "honest_liveness_adversary", "run": "python3 tests/ctc_checks.py ghost", "schema": 1, "target": "emux", "why": "the false-green class: a claim of live must be earned, not assumed"}
+{"dim": "delegation", "name": "manager_worker_greenmark", "run": "python3 tests/ctc_checks.py greenmark", "schema": 1, "target": "emux", "why": "the nested-manager pattern must work end-to-end: a manager session spawns a worker that leaves a harmless green mark, with the manager->worker edge first-class in the registry"}

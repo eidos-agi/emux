@@ -153,7 +153,7 @@ def test_send_by_registry_name_resolves(tmp_path, monkeypatch):
 
     captured_args: list[list[str]] = []
 
-    def fake_run_tmux(args, timeout=10):
+    def fake_run_tmux(args, timeout=10, host=None):
         captured_args.append(args)
         return (0, "", "")
 
@@ -234,7 +234,7 @@ def test_tmux_sessions_marks_registered_stale(tmp_path, monkeypatch):
     }))
     monkeypatch.setattr(server, "REGISTRY_PATH", registry_path)
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
-    monkeypatch.setattr(server, "_live_sessions", lambda: [
+    monkeypatch.setattr(server, "_live_sessions", lambda host=None: [
         {"name": "live-session", "windows": 1, "created_unix": 10, "attached": False}
     ])
 
@@ -257,7 +257,7 @@ def test_tmux_capture_by_registry_name_success(tmp_path, monkeypatch):
 
     captured_args: list[list[str]] = []
 
-    def fake_run_tmux(args, timeout=10):
+    def fake_run_tmux(args, timeout=10, host=None):
         captured_args.append(args)
         return (0, "hello\nworld\n", "")
 
@@ -406,7 +406,7 @@ def test_render_watch_snapshot_shows_captures_and_stale():
 def test_capture_session_ignores_trailing_blank_pane_rows(monkeypatch):
     from emux import cli
 
-    def fake_run_tmux(args, timeout=10):
+    def fake_run_tmux(args, timeout=10, host=None):
         return (0, "old\nuseful one\nuseful two\n\n\n", "")
 
     monkeypatch.setattr(cli, "_run_tmux", fake_run_tmux)
