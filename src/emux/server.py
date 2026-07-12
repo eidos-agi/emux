@@ -6,8 +6,17 @@ of named sessions with metadata so an agent can refer to "claude-prod" or
 "test-shell" without remembering tmux's underlying session ids.
 
 Design principles:
-- Operates on EXISTING tmux sessions only. Never spawns new ones, never kills
-  them. The user owns the session lifecycle; this MCP just observes and drives.
+- Primarily observes and drives EXISTING tmux sessions (send, capture, run). The
+  user owns most session lifecycles; this MCP just watches and steers them.
+- `tmux_spawn` is the one deliberate exception: it creates (and re-creates) a
+  named, driveable session on demand — local or, with a `host`, on a remote
+  machine over ssh — because "start something I can drive and a human can watch"
+  is itself a first-class primitive. It kills a stale same-named session before
+  creating, and nothing else.
+- Remote is a single injection point: any operation carrying a `host` runs its
+  tmux command over ssh, so one local emux can reach through to a remote box's
+  Claude Code / shell and drive it identically. Sessions nest — a spawned
+  session's command can ssh onward and spawn again.
 - The registry is metadata only. Live state always comes from `tmux list-sessions`.
   If a registered session no longer exists, the registry entry is marked stale
   but not deleted — the user decides whether to re-register or unregister.
@@ -93,22 +102,52 @@ def _resolve_tmux() -> str | None:
     return shutil.which("tmux")
 
 
-def _run_tmux(args: list[str], timeout: int = 10) -> tuple[int, str, str]:
+def _run_tmux(
+    args: list[str], timeout: int = 10, host: str | None = None
+) -> tuple[int, str, str]:
     """Run `tmux <args>` and return (returncode, stdout, stderr).
 
-    Raises FileNotFoundError if tmux is not installed.
+    When `host` is given (any ssh destination — `user@ip` or a `~/.ssh/config`
+    alias, so per-host port/user/key live in ssh config, not here), the tmux
+    command runs on that remote machine over ssh. This one injection point is
+    what makes EVERY emux operation remote-capable: send, capture, spawn — all
+    of them go remote for free just by carrying a host. The remote command is
+    shell-quoted so keystrokes with spaces/metacharacters survive the ssh hop.
+
+    Raises FileNotFoundError if tmux is not installed (local only).
     """
-    tmux = _resolve_tmux()
-    if tmux is None:
-        raise FileNotFoundError("tmux not found on PATH")
+    if host:
+        remote = "tmux " + " ".join(shlex.quote(a) for a in args)
+        cmd = [
+            "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+            host, remote,
+        ]
+    else:
+        tmux = _resolve_tmux()
+        if tmux is None:
+            raise FileNotFoundError("tmux not found on PATH")
+        cmd = [tmux] + args
     proc = subprocess.run(
-        [tmux] + args,
+        cmd,
         capture_output=True,
         text=True,
         timeout=timeout,
         check=False,
     )
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def _resolve_target(target: str, by_registry_name: bool) -> tuple[str | None, str | None, str | None]:
+    """Return (session, host, error). Resolves a registry name to its tmux
+    session id AND its host (None = local), so a single call drives a session
+    whether it lives on this machine or a remote one."""
+    if not by_registry_name:
+        return target, None, None
+    registry = _load_registry()
+    if target not in registry:
+        return None, None, "not_registered"
+    entry = registry[target]
+    return entry["session"], entry.get("host"), None
 
 
 def _live_sessions() -> list[dict[str, Any]]:
@@ -187,12 +226,100 @@ async def tmux_sessions() -> dict[str, Any]:
 
 
 @mcp.tool()
+async def tmux_spawn(
+    name: str,
+    command: str | None = None,
+    host: str | None = None,
+    gui: bool = False,
+    cwd: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Spawn a fresh, driveable tmux session and register it — in one call.
+
+    This is the "start something I can drive, and optionally watch" primitive:
+    create → (optionally launch a command) → (optionally open a GUI window so a
+    human can watch) → register under `name`. After this, drive it with
+    `tmux_send`/`tmux_capture`/`tmux_run` using `target=name, by_registry_name=True`.
+
+    REMOTE (the point): pass `host` (any ssh destination — `user@ip` or a
+    `~/.ssh/config` alias). The session is created ON THAT MACHINE over ssh, and
+    every later send/capture/run for this name transparently runs over ssh too.
+    So: spawn a local session, or reach through to a remote box and spawn a
+    session there, and drive its Claude Code / shell exactly the same way. Nest
+    freely — a session's command can itself `ssh` onward and spawn again.
+
+    Args:
+        name: friendly registry name (also the tmux session id).
+        command: optional command to launch in the session (e.g. `claude "..."`).
+        host: ssh destination for a REMOTE session; omit for local.
+        gui: if True, open a local GUI terminal attached to the session so a
+             human can watch live (macOS/iTerm2; remote sessions attach via
+             `ssh -t`). Best-effort — a failure here does not fail the spawn.
+        cwd: working directory to start the session in.
+        description, tags: registry metadata.
+
+    Returns:
+        {ok, name, host, session, gui_opened, launched, drive_hint}.
+    """
+    session = name
+    # 1) create the session (kill any stale one of the same name first)
+    _run_tmux(["kill-session", "-t", session], host=host)  # ignore result
+    new_args = ["new-session", "-d", "-s", session]
+    if cwd:
+        new_args += ["-c", cwd]
+    code, _out, err = _run_tmux(new_args, host=host, timeout=15)
+    if code != 0:
+        return {"ok": False, "error": "spawn_failed", "stderr": err,
+                "host": host, "hint": "check ssh reachability + tmux on the host"}
+
+    # 2) launch the command, if any
+    launched = False
+    if command:
+        c2, _o2, _e2 = _run_tmux(["send-keys", "-t", session, command, "Enter"], host=host)
+        launched = c2 == 0
+
+    # 3) register so it is addressable by name (carries host → remote-aware ops)
+    await tmux_register(name=name, session=session, description=description,
+                        tags=tags, host=host)
+
+    # 4) optional GUI window so a human can watch (best-effort, macOS/iTerm2)
+    gui_opened = False
+    if gui:
+        attach = (
+            f"ssh -t {shlex.quote(host)} tmux attach -t {shlex.quote(session)}"
+            if host else f"tmux attach -t {shlex.quote(session)}"
+        )
+        try:
+            script = (
+                'tell application "iTerm2"\n'
+                ' create window with default profile\n'
+                ' tell current session of current window to write text '
+                f'"{attach}"\n'
+                ' activate\n'
+                'end tell'
+            )
+            g = subprocess.run(["osascript", "-e", script],
+                               capture_output=True, text=True, timeout=15)
+            gui_opened = g.returncode == 0
+        except Exception:
+            gui_opened = False
+
+    return {
+        "ok": True, "name": name, "host": host, "session": session,
+        "gui_opened": gui_opened, "launched": launched,
+        "drive_hint": f"tmux_send/tmux_capture with target='{name}', by_registry_name=True",
+    }
+
+
+@mcp.tool()
 async def tmux_register(
     name: str,
     session: str,
     description: str | None = None,
     tags: list[str] | None = None,
     manages: list[str] | None = None,
+    host: str | None = None,
 ) -> dict[str, Any]:
     """Register a tmux session under a friendly name with metadata.
 
@@ -222,15 +349,18 @@ async def tmux_register(
         "manages": manages or [],
         "registered_at": int(time.time()),
     }
+    if host:
+        entry["host"] = host  # remote session: all ops for this name run over ssh
     registry[name] = entry
     _save_registry(registry)
-    _start_stream_log(session, name)  # arm durable logging the moment we watch it
+    if not host:
+        _start_stream_log(session, name)  # local durable logging; remote streams over ssh on demand
     live_names = {s["name"] for s in _live_sessions()}
     return {
         "ok": True,
         "name": name,
         "entry": entry,
-        "session_live": session in live_names,
+        "session_live": (host is not None) or (session in live_names),
     }
 
 
@@ -270,21 +400,18 @@ async def tmux_send(
     Returns:
         {ok, target, resolved_session, sent} on success.
     """
-    if _resolve_tmux() is None:
+    session, host, err = _resolve_target(target, by_registry_name)
+    if err or session is None:
+        return {"ok": False, "error": err or "not_registered", "name": target}
+    if host is None and _resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
-    session = target
-    if by_registry_name:
-        registry = _load_registry()
-        if target not in registry:
-            return {"ok": False, "error": "not_registered", "name": target}
-        session = registry[target]["session"]
     args = ["send-keys", "-t", session, keys]
     if enter:
         args.append("Enter")
-    result = _run_tmux(args)
+    result = _run_tmux(args, host=host)
     if result[0] != 0:
-        return {"ok": False, "error": "tmux_send_failed", "stderr": result[2], "session": session}
-    return {"ok": True, "target": target, "resolved_session": session, "sent": keys, "enter": enter}
+        return {"ok": False, "error": "tmux_send_failed", "stderr": result[2], "session": session, "host": host}
+    return {"ok": True, "target": target, "resolved_session": session, "host": host, "sent": keys, "enter": enter}
 
 
 @mcp.tool()
@@ -309,26 +436,24 @@ async def tmux_capture(
     Returns:
         {ok, target, resolved_session, content, lines_captured}
     """
-    if _resolve_tmux() is None:
+    session, host, rerr = _resolve_target(target, by_registry_name)
+    if rerr or session is None:
+        return {"ok": False, "error": rerr or "not_registered", "name": target}
+    if host is None and _resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
-    session = target
-    if by_registry_name:
-        registry = _load_registry()
-        if target not in registry:
-            return {"ok": False, "error": "not_registered", "name": target}
-        session = registry[target]["session"]
     code, out, err = _run_tmux([
         "capture-pane",
         "-t", session,
         "-p",
         "-S", f"-{lines}",
-    ])
+    ], host=host)
     if code != 0:
-        return {"ok": False, "error": "tmux_capture_failed", "stderr": err, "session": session}
+        return {"ok": False, "error": "tmux_capture_failed", "stderr": err, "session": session, "host": host}
     return {
         "ok": True,
         "target": target,
         "resolved_session": session,
+        "host": host,
         "content": out,
         "lines_captured": len((out or "").splitlines()),
     }
