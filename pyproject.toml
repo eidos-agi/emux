@@ -1,6 +1,6 @@
 [project]
 name = "emux"
-version = "0.41.0"
+version = "0.42.0"
 description = "Eidos mux — pick up where you left off in tmux, and let an agent drive it. TUI picker for registered sessions, an MCP server for agent-driven send/capture plus a ladder of autonomy (ask/navigate/goal) that observes, converses with, and pursues goals through existing sessions, and a web daemon that monitors any session like a chatbot. The autonomous loop never spawns or kills; explicit tmux_spawn does."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -200,7 +200,22 @@ def capture_payload(session: str, lines: int = 300,
     if code != 0:
         return {"ok": False, "error": "tmux_capture_failed", "stderr": err}
     return {"ok": True, "session": session, "host": host, "content": out,
-            "options": _parse_options(out)}   # clickable menu bubbles, if a menu is up
+            "options": _parse_options(out),      # clickable menu bubbles, if a menu is up
+            "thinking": _thinking(out)}          # is it generating, and for how long
+
+
+_THINK_TIME_RE = re.compile(r"(\d+m\s?\d+s|\d+m|\d+s)")
+
+
+def _thinking(content: str) -> dict[str, Any]:
+    """Is the agent GENERATING right now, and for how long? 'esc to interrupt' is
+    the universal 'I'm working' tell (Claude & Codex), and its line carries the
+    live elapsed timer ('Working (12s …)', 'Herding… (2m 47s …)')."""
+    for ln in content.splitlines():
+        if "esc to interrupt" in ln.lower():
+            m = _THINK_TIME_RE.search(ln)
+            return {"active": True, "for": m.group(1).replace(" ", "") if m else ""}
+    return {"active": False, "for": ""}
 
 
 # (What each agent looks like in a pane now lives in emux/adapters.py — that is
@@ -1698,6 +1713,23 @@ body{
 .s-running{color:#8fd88f}.s-done_idle{color:#8a8a72}.s-error{color:#ff5f56}
 .s-thrashing{color:#ff9f43}.s-stuck{color:#ffb000}.s-waiting_human{color:#38d9ff}
 .s-waiting_external{color:#7a8fd8}.s-planning{color:#d0b24a}.s-editing{color:#d0b24a}.s-dead{color:#666}
+/* thinking indicator — movement + a live timer while the agent is generating */
+#modalthink{display:none;align-items:center;gap:7px;margin-left:14px;font-size:11px;
+  color:var(--live);letter-spacing:.5px}
+#modalthink.on{display:inline-flex}
+#modalthink b{color:var(--text);font-variant-numeric:tabular-nums}
+.tdots{display:inline-flex;gap:3px}
+.tdots i{width:4px;height:4px;border-radius:50%;background:var(--live);display:block;
+  animation:tbounce 1s ease-in-out infinite}
+.tdots i:nth-child(2){animation-delay:.16s}
+.tdots i:nth-child(3){animation-delay:.32s}
+@keyframes tbounce{0%,80%,100%{transform:translateY(0);opacity:.4}40%{transform:translateY(-4px);opacity:1}}
+/* pending send — a message received by emux but not yet reflected in the chat */
+#modalpending{display:none}
+#modalpending.on{display:block;margin:0 16px 8px;padding:7px 11px;font-size:12px;
+  background:var(--bg-card);border:1px dashed var(--amber-faint);border-radius:6px;color:var(--text-dim)}
+#modalpending .plabel{color:var(--amber-dim);font-size:9px;letter-spacing:1.5px;text-transform:uppercase;margin-right:7px}
+#modalpending .ptext{color:var(--text)}
 /* the gist — reader's-digest + suggested replies, so you know what to do */
 #modaldigest{display:none}
 #modaldigest.on{display:block;padding:11px 16px;background:var(--bg-raise);
@@ -1796,6 +1828,7 @@ body{
       <span class="dot live"></span>
       <span class="nm" id="modalname"></span>
       <span class="ag" id="modalagent"></span>
+      <span id="modalthink"><span class="tdots"><i></i><i></i><i></i></span>thinking <b>0s</b></span>
       <span class="st" id="modalstatus">live</span>
       <button id="modaliterm" title="open this session in a new iTerm2 window (attached tmux)">⧉ iTerm2</button>
       <button id="modalclose">✕ close</button>
@@ -1815,6 +1848,7 @@ body{
       <button class="chip" data-keys="Up">↑</button>
       <button class="chip" data-keys="Tab">TAB</button>
     </div>
+    <div id="modalpending"></div>
     <div id="modalrow">
       <input id="modalinput" placeholder="prompt / steer this session… (Enter sends)" autocomplete="off" spellcheck="false">
       <button id="modalsend">SEND</button>
@@ -2485,6 +2519,7 @@ function openModal(s){
   $("#modalstatus").textContent="connecting…";$("#modalstatus").style.color="";
   const sc=$("#modalscreen");sc.textContent="";sc.dataset.last="";
   $("#modaldigest").className="";$("#modaldigest .dgtext").textContent="";$("#modaldigest .dgsugg").innerHTML="";
+  setPending("");$("#modalthink").className="";
   $("#modal").classList.add("open");
   modalRefresh();clearInterval(modalTimer);modalTimer=setInterval(modalRefresh,1200);
   loadDigest();                                  // the gist + suggested replies, up front
@@ -2509,6 +2544,9 @@ async function modalRefresh(){
         if(atBottom)sc.scrollTop=sc.scrollHeight;
       }
       renderOptions(r.options);   // a menu on screen → clickable bubbles
+      updateThinking(r.thinking); // movement + timer while it generates
+      // pending send has landed once the pane echoes it → clear the holding bubble
+      if(pendingText&&r.content&&r.content.indexOf(pendingText.trim().slice(0,40))>=0)setPending("");
     }else{$("#modalstatus").textContent=r.error||"error";$("#modalstatus").style.color="var(--stale)";}
   }catch(e){$("#modalstatus").textContent="unreachable";$("#modalstatus").style.color="var(--stale)";}
   modalJudge();
@@ -2581,13 +2619,23 @@ async function modalKeys(keys,literal,enter){
 function modalSubmit(){
   const i=$("#modalinput");const text=i.value;if(!text)return;
   i.value="";                                   // optimistic clear for snappy UX…
+  setPending(text);                             // …and hold it above the box until it lands
   modalKeys(text,true,true).then(ok=>{
     if(!ok){                                    // …but if it didn't land, give the draft back
-      if(!i.value)i.value=text;
+      if(!i.value)i.value=text;setPending("");
       const st=$("#modalstatus");st.textContent="send failed — draft kept";st.style.color="var(--stale)";
     }
   });
 }
+// a message received by emux but not yet echoed by the (maybe ssh-laggy) session
+let pendingText="";
+function setPending(txt){pendingText=txt;const el=$("#modalpending");
+  if(txt){el.className="on";el.innerHTML='<span class="plabel">received · sending</span><span class="ptext">'+esc(txt)+'</span>';}
+  else{el.className="";el.innerHTML="";}}
+// thinking indicator: movement + how long the agent has been generating
+function updateThinking(t){const el=$("#modalthink");
+  if(t&&t.active){el.className="on";if(t.for)el.querySelector("b").textContent=t.for;}
+  else el.className="";}
 $("#modalsend").onclick=modalSubmit;
 $("#modalinput").addEventListener("keydown",e=>{if(e.key==="Enter")modalSubmit();});
 $("#modaliterm").onclick=async()=>{

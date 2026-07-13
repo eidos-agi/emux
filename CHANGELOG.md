@@ -2,6 +2,12 @@
 
 All notable changes to Emux are documented here.
 
+## v0.42.0 - 2026-07-13
+
+- **Thinking indicator.** While a session is generating (`esc to interrupt` on screen), the modal header shows bouncing dots + a live timer of how long it's been thinking (from the agent's own meter). Movement you can feel, and how long.
+- **Pending-send bubble.** Click Send (or a suggested reply) and the message is held in a dashed "received · sending" bubble above the box until the session's pane echoes it — so you know emux got it even while a remote session lags over ssh. Clears itself when the message lands; restores your draft if the send fails.
+
+
 ## v0.41.0 - 2026-07-13
 
 - **Deep links.** The view (grid/groups/activity/flow), the tag + company filters, the search text, and the open session are all reflected in the URL hash (`#view=flow&company=greenmark&tag=agents&session=ggo-chat2`) and restored from it — bookmark or share any state; it survives reload and back/forward. Falls back to localStorage when the URL is bare.
