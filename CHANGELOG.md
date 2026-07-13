@@ -2,6 +2,14 @@
 
 All notable changes to Emux are documented here.
 
+## v0.35.0 - 2026-07-13
+
+**Say it once; the system routes and starts the work.** Creating a session from an intent used to: pick a directory that ignored the company you named, ignore where that company's work belongs, and boot a BLANK agent that hadn't been told the task. Three fixes so you don't re-explain every time.
+
+- **Kickstart.** A new session created from "say what you want to do" now hands that intent to the agent as its OPENING PROMPT (`claude <intent>` / `codex <intent>`), so it comes up already working instead of idling at a blank composer. Plain-shell sessions are untouched.
+- **Company-aware directory routing.** If the wording names a company (`_intent_company_hint`), that company's directories float to the top of the choice and the model is told not to stray — so "an Eidos org digest" stops landing in `repos-aic/taskr`.
+- **Standing machine preferences.** A durable routing rule maps a company to its home machine — **Eidos work runs on the mac-mini** — applied in the machine step. Defaults in code; override/extend at `~/.config/emux/routing.json` (`{"company_host": {...}}`). State the rule once; it sticks.
+
 ## v0.34.0 - 2026-07-13
 
 **Connection-aware filtering: a group of terminals stays together.** Filtering by a company (or tag) used to match each terminal independently — and the flow view ignored the filter entirely, drawing every session. Now there's a real concept of a **group of terminals**: the connected components of the `manages` graph.

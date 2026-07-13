@@ -222,6 +222,26 @@ _COMPANY_TABLE = [
 ]
 
 
+# Standing routing preferences — state a rule ONCE, it sticks. You should never
+# have to re-explain "Eidos runs on the mac-mini" per session. Defaults live here;
+# override/extend at ~/.config/emux/routing.json:
+#   {"company_host": {"eidos": "daniels-mac-mini", "greenmark": "some-host"}}
+_COMPANY_HOST_DEFAULT = {"eidos": "daniels-mac-mini"}
+
+
+def _routing_prefs() -> dict[str, Any]:
+    prefs: dict[str, Any] = {"company_host": dict(_COMPANY_HOST_DEFAULT)}
+    p = Path(os.environ.get("EMUX_ROUTING")
+             or Path.home() / ".config" / "emux" / "routing.json")
+    if p.is_file():
+        try:
+            user = json.loads(p.read_text())
+            prefs["company_host"].update(user.get("company_host") or {})
+        except (OSError, json.JSONDecodeError):
+            pass
+    return prefs
+
+
 def _company_by_key(key: str | None) -> dict[str, str] | None:
     """An explicit company override on a registry entry (e.g. a remote worker
     whose cwd we can't see locally, or a manager). Maps the key to its pill."""
@@ -476,6 +496,17 @@ def _bm25_rank(intent: str, sessions: list[dict[str, Any]]) -> list[dict[str, An
     return [dict(scored[i][1], _relevance=round(scored[i][0], 2)) for i in order]
 
 
+def _intent_company_hint(intent: str) -> tuple[str, str] | None:
+    """If the wording names a company (by name or a company keyword), return it.
+    Used to bias the directory choice — "an Eidos digest of the org" must not
+    land in an AIC repo just because the model liked a repo name there."""
+    low = f" {(intent or '').lower()} "
+    for key, label, _color, _roots, kw in _COMPANY_TABLE:
+        if f" {key} " in low or any(k in low for k in kw if len(k) > 3):
+            return key, label
+    return None
+
+
 def _new_vs_resume_lean(intent: str) -> str:
     """A deterministic keyword lean, fed to the model as a HINT (not an override).
 
@@ -507,19 +538,28 @@ def _suggest_session(intent: str, host: str | None = None) -> dict[str, Any]:
     """
     hosts = _known_hosts()
 
+    # a company named in the wording routes BOTH the machine and the directory.
+    hint = _intent_company_hint(intent)
     # --- step 1: which machine? (skipped when the user already picked one) ---
     if host:
         chosen_host, host_why = host, ""
     else:
+        # per-company home machine (a standing preference, not a per-session ask).
+        pref = _routing_prefs()["company_host"].get(hint[0]) if hint else None
+        pref = pref if pref in hosts else None
+        mhint = (f"\nMACHINE PREFERENCE: {hint[1]} work runs on '{pref}' — pick it "
+                 f"unless the intent explicitly names another machine.\n"
+                 if (pref and hint) else "")
         r1 = _claude_json(
             "Pick the MACHINE to start a terminal session on.\n\n"
-            f"WHAT THE USER WANTS TO DO: {intent}\n\n"
+            f"WHAT THE USER WANTS TO DO: {intent}\n"
+            f"{mhint}\n"
             "MACHINES (choose exactly one of these names):\n"
             + "\n".join(f"  {h}" for h in hosts) + "\n\n"
             'Reply with ONE line of JSON: {"host": "<one of the names above>", '
             '"why": "<short reason>"}\n'
-            'Choose "local" unless the intent clearly names a remote machine or '
-            "needs one (heavy compute, a server-side service, a box by name)."
+            'Choose "local" unless a machine preference above applies, or the '
+            "intent clearly names a remote machine or needs one."
         )
         if "_error" in r1:
             return r1
@@ -554,13 +594,24 @@ def _suggest_session(intent: str, host: str | None = None) -> dict[str, Any]:
         f"{' (attached)' if s['attached'] else ''}"
         f"{'  [most relevant]' if i == 0 and s.get('_relevance', 0) > 0 else ''}"
         for i, s in enumerate(running)) or "  (none running)"
+    # If the wording names a company, float ITS directories to the top and tell
+    # the model — so "an Eidos org digest" doesn't land in an AIC repo.
+    hint = _intent_company_hint(intent)
+    co_hint = ""
+    if hint:
+        hk, hl = hint
+        dirs = sorted(dirs, key=lambda d: 0 if _detect_company(d).get("company") == hk else 1)
+        co_hint = (f"\nCOMPANY: the wording names {hl}. Prefer a {hl} directory "
+                   f"(they are listed FIRST). Do NOT pick another company's repo "
+                   f"unless the intent clearly points there.\n")
     dir_list = "\n".join(f"  [{i}] {d}" for i, d in enumerate(dirs)) or "  (none)"
     r2 = _claude_json(
         f"A developer wants a terminal session on machine '{chosen_host}'.\n\n"
         f"WHAT THEY SAID: {intent}\n\n"
         "They can either RESUME a session already running on that machine, or "
         "start a NEW one in a directory. Choose the one that matches what they said.\n\n"
-        f"PHRASING HINT (from their wording, weigh it — do not obey blindly): {lean}\n\n"
+        f"PHRASING HINT (from their wording, weigh it — do not obey blindly): {lean}\n"
+        f"{co_hint}\n"
         f"ALREADY RUNNING ON {chosen_host} (resume one of these):\n{sess_list}\n\n"
         f"DIRECTORIES ON {chosen_host} (start a new session in one of these):\n{dir_list}\n\n"
         'Reply with ONE line of JSON, nothing else:\n'
@@ -626,8 +677,14 @@ def _ago(sec: int) -> str:
 
 
 def _spawn_session(data: dict[str, Any]) -> dict[str, Any]:
-    """Create a new session (local or remote) via the server's spawn primitive."""
+    """Create a new session (local or remote) — and KICKSTART it.
+
+    A session created from "say what you want to do" should start DOING it, not
+    boot to a blank composer. So when the command is a known agent and there's an
+    intent, we hand that intent to the agent as its opening prompt (`claude
+    <prompt>` / `codex <prompt>`) — the session comes up already working."""
     import asyncio
+    import shlex
     name = (data.get("name") or "").strip()
     if not name:
         return {"ok": False, "error": "missing_name"}
@@ -636,13 +693,25 @@ def _spawn_session(data: dict[str, Any]) -> dict[str, Any]:
         host = None
     cwd = (data.get("cwd") or "").strip() or None
     command = (data.get("command") or "").strip() or None
+    intent = (data.get("prompt") or data.get("description") or "").strip()
+
+    kicked = False
+    if command and intent:
+        from . import adapters
+        a = adapters.detect(command.split()[0])
+        if a is not None:      # it's a real agent → launch it ON the task
+            command = f"{command} {shlex.quote(intent)}"
+            kicked = True
     try:
-        return asyncio.run(_server.tmux_spawn(
+        r = asyncio.run(_server.tmux_spawn(
             name=name, command=command, host=host, cwd=cwd,
             gui=bool(data.get("gui", False)),
             description=(data.get("description") or "").strip() or None,
             tags=data.get("tags") or None,
         ))
+        if isinstance(r, dict):
+            r["kickstarted"] = kicked
+        return r
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": str(e)}
 
@@ -2329,7 +2398,8 @@ async function doCreate(){
           description:$("#newintent").value.trim()||("resumed on "+NS.host),
           tags:["adopted",NS.host]}
        : {name:NS.name,host:NS.host,cwd:NS.cwd,command:NS.cmd,
-          gui:$("#newgui").checked,description:$("#newintent").value.trim()||null})});
+          gui:$("#newgui").checked,description:$("#newintent").value.trim()||null,
+          prompt:$("#newintent").value.trim()||null})});   // kickstart: the agent starts ON this
   b.disabled=false;b.textContent=was;
   if(!r.ok){$("#newerr").textContent=r.error||(resume?"resume failed":"spawn failed");return;}
   closeNew();refresh();

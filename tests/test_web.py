@@ -537,3 +537,30 @@ def test_bm25_ranks_the_session_the_intent_describes_to_the_top():
     s2 = [{"name": "w1", "path": "/x", "description": "hancock auth work", "tags": []},
           {"name": "w2", "path": "/y", "description": "", "tags": ["greenmark"]}]
     assert web._bm25_rank("the hancock auth session", s2)[0]["name"] == "w1"
+
+
+def test_intent_routing_and_kickstart():
+    from emux import web
+    # a company named in the wording is detected → routes machine + dir
+    assert web._intent_company_hint("an Eidos digest of the org")[0] == "eidos"
+    assert web._intent_company_hint("fix the greenmark reconcile")[0] == "greenmark"
+    assert web._intent_company_hint("just a scratch shell") is None
+    # standing routing preference (durable, overridable) — Eidos → the mac-mini
+    assert web._routing_prefs()["company_host"]["eidos"] == "daniels-mac-mini"
+
+
+def test_spawn_kickstarts_the_agent_with_the_intent(monkeypatch):
+    from emux import server, web
+    seen = {}
+    async def fake_spawn(**kw):
+        seen.update(kw)
+        return {"ok": True, "name": kw["name"]}
+    monkeypatch.setattr(server, "tmux_spawn", fake_spawn)
+    # an agent command + an intent → the intent becomes the agent's opening prompt
+    r = web._spawn_session({"name": "x", "command": "claude", "prompt": "build the thing"})
+    assert r["kickstarted"] is True
+    assert seen["command"] == "claude 'build the thing'"
+    # a PLAIN SHELL is not an agent → no kickstart, command untouched
+    seen.clear()
+    r = web._spawn_session({"name": "y", "command": "", "prompt": "build the thing"})
+    assert r.get("kickstarted") is False
