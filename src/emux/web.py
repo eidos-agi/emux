@@ -677,6 +677,36 @@ def _ago(sec: int) -> str:
     return f"{sec // 86400}d"
 
 
+def _reply_suggestions(session: str, host: str | None) -> dict[str, Any]:
+    """The reader's-digest + 'what do I say' for a session you're looking at.
+
+    Reads the recent pane and asks `claude -p` (fixed-cost CLI, never the API) for
+    a 1-2 sentence digest of what's going on plus a few ready-to-send replies, so
+    a human staring at a wall of agent output knows the gist AND what to do next
+    — click a reply instead of composing one. On-demand only (when a modal is
+    open), so the cost is one call when you're actually stuck, not per poll."""
+    cap = capture_payload(session, 45, host=host)
+    if not cap.get("ok"):
+        return {"ok": False, "error": cap.get("error", "capture_failed")}
+    pane = cap.get("content", "")
+    r = _claude_json(
+        "A human is looking at an AI agent's terminal session and may not know how "
+        "to respond. Here is its recent output:\n<<<\n" + pane[-3500:] + "\n>>>\n\n"
+        "Reply with ONE line of JSON, nothing else:\n"
+        '{"digest": "<1-2 plain sentences: what the agent is doing, or the '
+        'decision/question it is waiting on>", "suggestions": ["<a short, '
+        'ready-to-send reply>", "..."]}\n'
+        "Give 0-4 suggestions — each a concrete message the human could send RIGHT "
+        "NOW to move it forward (approve, redirect, answer, ask a clarifier). Keep "
+        "each under ~12 words, phrased as the human talking TO the agent. If the "
+        "agent is just working and needs nothing, return an empty suggestions list "
+        "and say so in the digest.", timeout=45)
+    if "_error" in r:
+        return {"ok": False, "error": r["_error"]}
+    sugg = [s for s in (r.get("suggestions") or []) if isinstance(s, str) and s.strip()][:4]
+    return {"ok": True, "digest": (r.get("digest") or "").strip(), "suggestions": sugg}
+
+
 def _spawn_session(data: dict[str, Any]) -> dict[str, Any]:
     """Create a new session (local or remote) — and KICKSTART it.
 
@@ -970,9 +1000,10 @@ def _capture_and_observe(session: str, lines: int, host: str | None = None) -> s
     # (every Claude pane has those in scrollback); that over-fires on everything.
     # The UI marches ants around a genuinely-blocked session so you can't miss it.
     from . import adapters
-    # a real gate/menu lives at the LIVE BOTTOM of the pane — only look there, so
-    # a session that merely PRINTED menu text up in its scrollback isn't flagged.
-    tail = "\n".join(content.splitlines()[-10:])
+    # a real gate/menu lives at the LIVE BOTTOM — the last NON-EMPTY lines (a
+    # Claude dialog leaves blank space below it), so echoed menu text up in
+    # scrollback isn't flagged, but a real modal dialog still is.
+    tail = "\n".join([ln for ln in content.splitlines() if ln.strip()][-10:])
     needs_human = bool(adapters.gated(agent_key, tail))
     state = _quick_state(agent_key, content, needs_human)
     summary = _summarize(agent.get("label", ""), state, content)
@@ -1026,10 +1057,12 @@ def _parse_options(content: str) -> list[dict[str, Any]]:
     it as CLICKABLE BUBBLES. Only fires when a menu is genuinely on screen — a
     navigate/select hint near the bottom, or a ❯-cursored numbered list — not any
     stray numbered list in the agent's prose."""
-    lines = content.splitlines()
+    # NON-EMPTY lines only — a Claude dialog renders with blank space below it,
+    # so the last raw lines are empty and the menu sits higher up.
+    lines = [ln for ln in content.splitlines() if ln.strip()]
     tail = "\n".join(lines[-12:]).lower()
     has_menu_hint = ("to navigate" in tail or "enter to select" in tail
-                     or "esc to cancel" in tail)
+                     or "esc to cancel" in tail or "enter to confirm" in tail)
     opts, cursor = [], False
     for ln in lines[-14:]:
         m = _OPT_RE.match(ln)
@@ -1654,6 +1687,24 @@ body{
 .s-running{color:#8fd88f}.s-done_idle{color:#8a8a72}.s-error{color:#ff5f56}
 .s-thrashing{color:#ff9f43}.s-stuck{color:#ffb000}.s-waiting_human{color:#38d9ff}
 .s-waiting_external{color:#7a8fd8}.s-planning{color:#d0b24a}.s-editing{color:#d0b24a}.s-dead{color:#666}
+/* the gist — reader's-digest + suggested replies, so you know what to do */
+#modaldigest{display:none}
+#modaldigest.on{display:block;padding:11px 16px;background:var(--bg-raise);
+  border-bottom:1px solid var(--amber-faint)}
+#modaldigest .dghead{display:flex;align-items:center;font-size:10px;letter-spacing:2px;
+  text-transform:uppercase;color:var(--amber-dim);margin-bottom:5px}
+#dgrefresh{margin-left:auto;background:transparent;border:none;color:var(--text-dim);
+  font-size:13px;cursor:pointer}
+#dgrefresh:hover{color:var(--amber)}
+#modaldigest .dgtext{font-size:13px;line-height:1.5;color:var(--text)}
+#modaldigest.loading .dgtext{color:var(--text-dim);font-style:italic}
+#modaldigest .dgsugg{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
+#modaldigest .dgsugg:empty{display:none}
+.sgg{background:var(--bg-card);border:1px solid var(--amber-faint);color:var(--text);
+  font-family:inherit;font-size:12.5px;padding:6px 12px;border-radius:15px;cursor:pointer;
+  transition:background .12s,border-color .12s;text-align:left}
+.sgg:hover{background:var(--amber);color:var(--on-accent);border-color:var(--amber)}
+.sgg:disabled{opacity:.5;cursor:default}
 /* clickable answer bubbles — overlay the chat when the agent shows a menu */
 #modalopts{display:none}
 #modalopts.on{display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px 2px;
@@ -1739,6 +1790,11 @@ body{
       <button id="modalclose">✕ close</button>
     </div>
     <div id="modaljudge"></div>
+    <div id="modaldigest">
+      <div class="dghead"><span>◆ the gist</span><button id="dgrefresh" title="re-read">↻</button></div>
+      <div class="dgtext"></div>
+      <div class="dgsugg"></div>
+    </div>
     <div id="modalscreen"></div>
     <div id="modalopts"></div>
     <div id="modalchips">
@@ -2382,8 +2438,10 @@ function openModal(s){
   $("#modalagent").innerHTML=agentHTML(s);
   $("#modalstatus").textContent="connecting…";$("#modalstatus").style.color="";
   const sc=$("#modalscreen");sc.textContent="";sc.dataset.last="";
+  $("#modaldigest").className="";$("#modaldigest .dgtext").textContent="";$("#modaldigest .dgsugg").innerHTML="";
   $("#modal").classList.add("open");
   modalRefresh();clearInterval(modalTimer);modalTimer=setInterval(modalRefresh,1200);
+  loadDigest();                                  // the gist + suggested replies, up front
   setTimeout(()=>$("#modalinput").focus(),40);
 }
 function closeModal(){
@@ -2406,6 +2464,27 @@ async function modalRefresh(){
     }else{$("#modalstatus").textContent=r.error||"error";$("#modalstatus").style.color="var(--stale)";}
   }catch(e){$("#modalstatus").textContent="unreachable";$("#modalstatus").style.color="var(--stale)";}
   modalJudge();
+}
+// the gist: a reader's-digest of the session + clickable suggested replies, so
+// you don't have to read a wall of text and invent a response.
+async function loadDigest(){
+  if(!modalSession)return;
+  const el=$("#modaldigest");el.className="on loading";
+  $("#modaldigest .dgtext").textContent="reading the session…";
+  $("#modaldigest .dgsugg").innerHTML="";
+  const sess=modalSession.session;
+  const r=await api("/api/reply",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session:sess})});
+  if(!modalSession||modalSession.session!==sess)return;   // modal changed while thinking
+  el.className="on";
+  if(!r.ok){$("#modaldigest .dgtext").textContent="(couldn't summarize — "+(r.error||"")+")";return;}
+  $("#modaldigest .dgtext").textContent=r.digest||"(nothing notable)";
+  $("#modaldigest .dgsugg").innerHTML=(r.suggestions||[]).map(s=>'<button class="sgg">'+esc(s)+'</button>').join("");
+  $("#modaldigest .dgsugg").querySelectorAll(".sgg").forEach(b=>b.onclick=()=>{
+    $("#modaldigest .dgsugg").querySelectorAll(".sgg").forEach(x=>x.disabled=true);
+    modalKeys(b.textContent,true,true);          // send the chosen reply as the prompt
+    setTimeout(()=>{modalRefresh();loadDigest();},1600);
+  });
 }
 // turn an on-screen numbered menu into clickable bubbles that answer it for you.
 function renderOptions(opts){
@@ -2687,6 +2766,7 @@ $("#newcmd").addEventListener("input",()=>{NS.cmd=$("#newcmd").value;nsRender();
 $("#newname").addEventListener("input",()=>{NS.name=$("#newname").value.trim();nsRender();});
 $("#newintent").addEventListener("keydown",e=>{if(e.key==="Enter")doSuggest();});
 
+$("#dgrefresh").onclick=loadDigest;
 $("#modalclose").onclick=closeModal;
 $("#modalback").onclick=closeModal;
 document.querySelectorAll("#modalchips .chip").forEach(ch=>ch.onclick=()=>modalKeys(ch.dataset.keys,false,false));
@@ -2880,7 +2960,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         url = urlparse(self.path)
         if url.path not in ("/api/send", "/api/head", "/api/spawn", "/api/suggest",
-                            "/api/adopt"):
+                            "/api/adopt", "/api/reply"):
             self._json({"ok": False, "error": "not_found"}, 404)
             return
         if not self._host_allowed():
@@ -2910,6 +2990,13 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/spawn":
             self._json(_spawn_session(data))
+            return
+        if url.path == "/api/reply":
+            sess = (data.get("session") or "").strip()
+            if not sess:
+                self._json({"ok": False, "error": "missing_session"}, 400)
+                return
+            self._json(_reply_suggestions(sess, _session_host(sess)))
             return
         if url.path == "/api/adopt":
             self._json(_adopt_session(data))

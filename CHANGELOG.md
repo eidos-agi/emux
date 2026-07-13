@@ -2,6 +2,13 @@
 
 All notable changes to Emux are documented here.
 
+## v0.40.0 - 2026-07-13
+
+**The gist + "what do I say" — so a session's wall of text becomes a decision you can make.** Opening a session was dumping raw terminal output with a blank prompt; if you weren't the one who'd been driving it, you had no idea what it wanted.
+
+- **A digest panel at the top of the modal**: one `claude -p` call (fixed-cost CLI, on-demand only when a modal is open — never per poll) reads the recent pane and returns a 1-2 sentence gist plus a few **ready-to-send replies as clickable bubbles**. Click one and it's sent as the prompt. `↻` re-reads. Proven live: a "should I switch to gm_auth_strict?" session digested to that question with yes / no / explain replies.
+- **Menu parser fix**: a Claude dialog (trust prompt, selection menu) renders with blank space BELOW it, so the last raw lines are empty and the menu sits higher — the parser and the gate-tail check now scan the last non-empty lines, so those dialogs are detected (clickable option bubbles + ants) instead of read as idle.
+
 ## v0.39.0 - 2026-07-13
 
 **You can tell when you're personally needed — and answer with a click.**
