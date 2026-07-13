@@ -171,6 +171,33 @@ def _detect_company(cwd: str | None) -> dict[str, str]:
     return {"company": "", "label": "", "color": ""}
 
 
+def _iterm_attach(session: str) -> tuple[bool, str | None]:
+    """Open a NEW iTerm2 window attached to `session`, driven by AppleScript —
+    no `.command` file, so macOS Gatekeeper doesn't throw a quarantine prompt."""
+    import platform
+    import shlex
+    import subprocess
+    if platform.system() != "Darwin":
+        return False, "macOS/iTerm2 only"
+    attach = f"tmux attach -t {shlex.quote(session)}"
+    script = (
+        'tell application "iTerm2"\n'
+        " create window with default profile\n"
+        " tell current session of current window to write text "
+        f'"{attach}"\n'
+        " activate\n"
+        "end tell"
+    )
+    try:
+        g = subprocess.run(["osascript", "-e", script],
+                           capture_output=True, text=True, timeout=15)
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+    if g.returncode != 0:
+        return False, (g.stderr or g.stdout or "osascript failed").strip()
+    return True, None
+
+
 _SHELLS = {"zsh", "-zsh", "bash", "-bash", "fish", "sh", "-sh"}
 _EDITORS = {"vim", "nvim", "vi", "nano", "emacs"}
 
@@ -587,6 +614,9 @@ body::after{
 #modalhead .st{margin-left:auto;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim)}
 #modalclose{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:14px;cursor:pointer;padding:2px 11px;margin-left:10px}
 #modalclose:hover{color:var(--amber);border-color:var(--amber-dim)}
+#modaliterm{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 11px;margin-left:10px}
+#modaliterm:hover{color:var(--amber);border-color:var(--amber-dim)}
+#modaliterm:disabled{opacity:.6;cursor:default}
 #modalscreen{
   flex:1;overflow-y:auto;font:12.5px/1.45 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
   white-space:pre-wrap;word-break:break-word;padding:14px 16px;background:#080705;
@@ -663,6 +693,7 @@ body::after{
       <span class="nm" id="modalname"></span>
       <span class="ag" id="modalagent"></span>
       <span class="st" id="modalstatus">live</span>
+      <button id="modaliterm" title="open this session in a new iTerm2 window (attached tmux)">⧉ iTerm2</button>
       <button id="modalclose">✕ close</button>
     </div>
     <div id="modaljudge"></div>
@@ -1204,6 +1235,14 @@ function modalSubmit(){
 }
 $("#modalsend").onclick=modalSubmit;
 $("#modalinput").addEventListener("keydown",e=>{if(e.key==="Enter")modalSubmit();});
+$("#modaliterm").onclick=async()=>{
+  if(!modalSession)return;
+  const b=$("#modaliterm");const was=b.textContent;b.disabled=true;b.textContent="opening…";
+  const r=await api("/api/head",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session:modalSession.session})});
+  b.textContent=r.ok?"⧉ opened":("✕ "+(r.error||"failed"));
+  setTimeout(()=>{b.textContent=was;b.disabled=false;},r.ok?1400:3000);
+};
 $("#modalclose").onclick=closeModal;
 $("#modalback").onclick=closeModal;
 document.querySelectorAll("#modalchips .chip").forEach(ch=>ch.onclick=()=>modalKeys(ch.dataset.keys,false,false));
@@ -1325,7 +1364,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         url = urlparse(self.path)
-        if url.path != "/api/send":
+        if url.path not in ("/api/send", "/api/head"):
             self._json({"ok": False, "error": "not_found"}, 404)
             return
         if not self._host_allowed():
@@ -1341,9 +1380,16 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": "bad_json"}, 400)
             return
         session = data.get("session")
+        if not isinstance(session, str) or not session:
+            self._json({"ok": False, "error": "missing_session"}, 400)
+            return
+        if url.path == "/api/head":
+            ok, err = _iterm_attach(session)
+            self._json({"ok": ok, "error": err} if not ok else {"ok": True, "session": session})
+            return
         keys = data.get("keys")
-        if not isinstance(session, str) or not session or not isinstance(keys, str):
-            self._json({"ok": False, "error": "missing_session_or_keys"}, 400)
+        if not isinstance(keys, str):
+            self._json({"ok": False, "error": "missing_keys"}, 400)
             return
         self._json(send_payload(
             session,
