@@ -970,21 +970,57 @@ def _capture_and_observe(session: str, lines: int, host: str | None = None) -> s
     # The UI marches ants around a genuinely-blocked session so you can't miss it.
     from . import adapters
     needs_human = bool(adapters.gated(agent_key, content))
+    state = _quick_state(agent_key, content, needs_human)
     with _LOCK:
         _CACHE[session] = {"content": content, "ts": time.time(), "lines": lines,
-                           "agent": agent, "needs_human": needs_human}
+                           "agent": agent, "needs_human": needs_human, "state": state}
     return content
 
 
+def _quick_state(agent_key: str, content: str, needs_human: bool) -> str:
+    """A cheap, per-poll status for at-a-glance fleet tracking — running /
+    waiting_human / error / idle. This is the coarse badge shown on every tile
+    and flow box so a manager (or human) sees each agent's status AND its subs'
+    without opening any of them. The full judge (`/api/classify`) is the precise
+    on-demand read; this is the always-on glance."""
+    from . import adapters
+    if needs_human:
+        return "waiting_human"
+    low = content.lower()
+    if "traceback (most recent call last)" in low or "\nerror:" in low or " error:" in low:
+        return "error"
+    if any(s in low for s in adapters.busy_sigs_for(agent_key)):
+        return "running"
+    return "idle"
+
+
+def _capture_many(items: list[tuple[str, str | None]], lines: int) -> None:
+    """Capture (session, host) pairs CONCURRENTLY. A remote capture is an ssh
+    round-trip (~1-2s); serial was O(n) latency — 7 remotes = 14s. In parallel
+    it collapses to roughly one hop. I/O-bound, so threads are the right tool."""
+    from concurrent.futures import ThreadPoolExecutor
+    if not items:
+        return
+    with ThreadPoolExecutor(max_workers=min(10, len(items))) as ex:
+        list(ex.map(lambda it: _capture_and_observe(it[0], lines, host=it[1]), items))
+
+
 def poll_once(lines: int = 14) -> None:
-    """One capture sweep over all live sessions; evicts state for dead ones.
-    Called on a timer by the background loop, and directly by tests."""
+    """One capture sweep over all live sessions (local AND remote), in parallel;
+    evicts state for dead ones. Called on a timer by the background loop."""
     if _server._resolve_tmux() is None:
         return
     live = _server._live_sessions()
     live_names = {s["name"] for s in live}
-    for s in live:
-        _capture_and_observe(s["name"], lines)
+    items: list[tuple[str, str | None]] = [(s["name"], None) for s in live]
+    # registered REMOTE sessions never appear in the local list — poll them too,
+    # so a rentamac worker is cached and the grid serves it fast (not re-ssh'd).
+    rhosts = {h for e in _server._load_registry().values() if (h := e.get("host"))}
+    for host in rhosts:
+        for name in _remote_live_names(host):
+            items.append((name, host))
+            live_names.add(name)
+    _capture_many(items, lines)
     with _LOCK:
         for dead in [k for k in _ACTIVITY if k not in live_names]:
             _ACTIVITY.pop(dead, None)
@@ -999,23 +1035,30 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
     if not base["ok"]:
         return base
     now = time.time()
+    # capture every stale/missing live pane IN PARALLEL (remotes are ssh hops).
+    misses = []
+    for item in base["sessions"]:
+        if not item["live"]:
+            continue
+        with _LOCK:
+            ce = _CACHE.get(item["session"])
+        if ce is None or (now - ce["ts"]) >= _CACHE_TTL:
+            misses.append((item["session"], item.get("host")))
+    _capture_many(misses, lines)
     for item in base["sessions"]:
         if item["live"]:
             with _LOCK:
                 ce = _CACHE.get(item["session"])
-                content = ce["content"] if (ce is not None and (now - ce["ts"]) < _CACHE_TTL) else None
-            if content is None:
-                content = _capture_and_observe(item["session"], lines,
-                                               host=item.get("host"))
-            with _LOCK:
-                ce = _CACHE.get(item["session"])
+            content = (ce or {}).get("content", "")
             item["content"] = content
             item["agent"] = (ce or {}).get("agent") or {"agent": "unknown", "label": "—", "glyph": "·"}
             item["needs_human"] = bool((ce or {}).get("needs_human"))
+            item["state"] = (ce or {}).get("state") or "idle"
             item.update(_meta(item["session"]))
         else:
             item["content"] = ""
             item["needs_human"] = False
+            item["state"] = "dead"
             item["changed"] = False
             item["last_change_age"] = None
             item["activity"] = []
@@ -1123,6 +1166,7 @@ body{
 .card .nm{color:var(--amber);font-weight:600}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:1px}
 .dot.live{background:var(--live);box-shadow:0 0 6px var(--live)}
+.dot.warn{background:var(--amber);box-shadow:0 0 6px var(--amber)}
 .dot.stale{background:var(--stale);box-shadow:0 0 6px var(--stale)}
 .card .sub{color:var(--text-dim);font-size:11px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .card .badges{margin-top:4px;font-size:10px}
@@ -1176,15 +1220,20 @@ body{
 .tile.dead{opacity:.45}
 /* WAITING ON YOU: marching ants around the edge + a slow breathing orb glow, so a
    session that needs your decision is impossible to miss on a wall of tiles. */
-.needy{position:relative;border-color:transparent!important;
-  animation:orb 1.8s ease-in-out infinite}
-.needy::before{content:"";position:absolute;inset:-1px;pointer-events:none;z-index:2;
-  padding:1px;border-radius:inherit;
-  background:repeating-linear-gradient(45deg,var(--amber) 0,var(--amber) 6px,transparent 6px,transparent 12px);
-  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
-  -webkit-mask-composite:xor;mask-composite:exclude;
-  background-position:0px 0px;animation:ants 1.4s linear infinite}
-@keyframes ants{from{background-position:0px 0px}to{background-position:34px 0px}}
+.needy{position:relative;animation:orb 1.6s ease-in-out infinite}
+/* canonical marching ants: four dashed edges, each scrolling one dash-period.
+   Reliable (moves visibly) where the masked-border trick was not. */
+.needy::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:3;
+  background-image:
+    linear-gradient(90deg, var(--amber) 50%, transparent 50%),
+    linear-gradient(90deg, var(--amber) 50%, transparent 50%),
+    linear-gradient(0deg,  var(--amber) 50%, transparent 50%),
+    linear-gradient(0deg,  var(--amber) 50%, transparent 50%);
+  background-size:14px 2px, 14px 2px, 2px 14px, 2px 14px;
+  background-position:0 0, 0 100%, 0 0, 100% 0;
+  background-repeat:repeat-x, repeat-x, repeat-y, repeat-y;
+  animation:ants .55s infinite linear}
+@keyframes ants{to{background-position:14px 0, -14px 100%, 0 -14px, 100% 14px}}
 @keyframes orb{0%,100%{box-shadow:0 0 6px rgba(255,176,0,.35)}50%{box-shadow:0 0 22px 3px rgba(255,176,0,.6)}}
 .card.needy{border-left-color:var(--amber)}
 .tile header{
@@ -1231,6 +1280,21 @@ body{
 .fbox .ftitle{display:flex;align-items:center;gap:6px;padding:5px 9px;background:var(--bg-card);border-bottom:1px solid var(--line)}
 .fbox .ftitle .nm{color:var(--amber);font-weight:600;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .fbox .ftitle .ag{margin-left:auto;color:var(--amber-dim);font-size:10px;letter-spacing:.5px;white-space:nowrap}
+/* per-agent status pip — at-a-glance state at EVERY level of the hierarchy, so
+   the manager (and human) tracks all agents + their subs without opening them. */
+.spip{font-size:8.5px;letter-spacing:.5px;text-transform:uppercase;padding:1px 5px;border-radius:7px;
+  white-space:nowrap;font-weight:700;border:1px solid currentColor}
+.spip.st-running{color:var(--live)}
+.spip.st-idle{color:var(--text-dim)}
+.spip.st-error{color:var(--stale)}
+.spip.st-waiting_human{color:var(--amber);animation:orb 1.8s ease-in-out infinite}
+.spip.st-dead{color:var(--text-dim);opacity:.5}
+/* a RUNNING agent shows a hospital-monitor heartbeat instead of a static dot */
+.ekg{width:30px;height:12px;flex:none;vertical-align:middle}
+.ekg polyline{fill:none;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}
+.ekg .base{stroke:var(--live);opacity:.20}
+.ekg .beat{stroke:var(--live);stroke-dasharray:8 48;animation:ekg 1.25s linear infinite}
+@keyframes ekg{from{stroke-dashoffset:56}to{stroke-dashoffset:0}}
 .fbox pre{
   font:8.5px/1.32 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
   white-space:pre-wrap;word-break:break-word;padding:6px 9px;height:96px;overflow:hidden;
@@ -1796,6 +1860,20 @@ function renderSidebar(){
   });
 }
 
+const STLABEL={running:"run",idle:"idle",error:"err",waiting_human:"needs you",dead:"gone"};
+function statePip(s){const st=s.live?(s.state||"idle"):"dead";
+  return '<span class="spip st-'+st+'">'+(STLABEL[st]||st)+'</span>';}
+// the live indicator: a heartbeat EKG when running, else a colored dot by state.
+const EKG='<svg class="ekg" viewBox="0 0 44 16" preserveAspectRatio="none">'
+  +'<polyline class="base" points="0,8 15,8 18,8 20,3 23,13 26,8 44,8"/>'
+  +'<polyline class="beat" points="0,8 15,8 18,8 20,3 23,13 26,8 44,8"/></svg>';
+function liveDot(s){
+  if(!s.live)return '<span class="dot stale"></span>';
+  if(s.state==="running")return EKG;
+  const cls=s.state==="error"?"stale":(s.state==="waiting_human"?"warn":"live");
+  return '<span class="dot '+cls+'"></span>';
+}
+
 function makeTile(s){
   const t=document.createElement("div");
   t.className="tile"+(hot(s)?" hot":"")+(s.needs_human?" needy":"")+(s.live?"":" dead");
@@ -1803,9 +1881,10 @@ function makeTile(s){
   const att=s.attached?'<span class="att">●</span>':"";
   const ag=s.agent||{glyph:"",label:""};
   const agbadge=(s.live&&ag.label&&ag.label!=="—")?'<span class="agentbadge">'+agentHTML(s)+'</span>':"";
-  h.innerHTML='<span class="dot '+(s.live?"live":"stale")+'"></span><span class="nm">'+s.name+att+'</span>'
+  h.innerHTML='<span class="lind">'+liveDot(s)+'</span><span class="nm">'+s.name+att+'</span>'
     +companyHTML(s)+agbadge
-    +'<span class="age '+(s.live?ageClass(s.last_change_age):"t-old")+'">'+(s.live?ageLabel(s.last_change_age):"gone")+'</span>';
+    +'<span class="age '+(s.live?ageClass(s.last_change_age):"t-old")+'">'+(s.live?ageLabel(s.last_change_age):"gone")+'</span>'
+    +statePip(s);
   const p=document.createElement("pre");
   if(s.live&&s.content.trim()){
     p.textContent=s.content.replace(/\s+$/,"").split("\n").slice(-14).join("\n");
@@ -1891,8 +1970,11 @@ function updateFlowPanes(){
   grid.forEach(s=>{
     const d=flowBox[s.name], pre=flowPre[s.name];
     if(!d||!pre)return;
-    d.className="fbox"+(hot(s)?" hot":"")+(s.live?"":" dead");
+    d.className="fbox"+(hot(s)?" hot":"")+(s.needs_human?" needy":"")+(s.live?"":" dead");
     const ag=d.querySelector(".ag");if(ag)ag.innerHTML=agentHTML(s);
+    const sp=d.querySelector(".spip");if(sp){const st=s.live?(s.state||"idle"):"dead";
+      sp.className="spip st-"+st;sp.textContent=STLABEL[st]||st;}
+    const li=d.querySelector(".lind");if(li)li.innerHTML=liveDot(s);   // idle↔run swaps dot↔heartbeat
     const txt=paneText(s);
     if(txt){pre.className="";if(pre.textContent!==txt)pre.textContent=txt;}
     else{pre.className="empty";pre.textContent=s.live?"(blank pane)":"tmux session gone";}
@@ -1992,10 +2074,10 @@ function renderFlow(){
   function box(s){
     const p=pos[s.name];
     const d=document.createElement("div");
-    d.className="fbox"+(hot(s)?" hot":"")+(s.live?"":" dead");
+    d.className="fbox"+(hot(s)?" hot":"")+(s.needs_human?" needy":"")+(s.live?"":" dead");
     d.style.left=p.x+"px";d.style.top=p.y+"px";d.style.width=BW+"px";
-    const title='<div class="ftitle"><span class="dot '+(s.live?"live":"stale")+'"></span>'
-      +'<span class="nm">'+s.name+'</span><span class="ag">'+agentHTML(s)+'</span></div>';
+    const title='<div class="ftitle"><span class="lind">'+liveDot(s)+'</span>'
+      +'<span class="nm">'+s.name+'</span>'+statePip(s)+'<span class="ag">'+agentHTML(s)+'</span></div>';
     const pre=document.createElement("pre");
     const txt=paneText(s);
     if(txt)pre.textContent=txt;else{pre.className="empty";pre.textContent=s.live?"(blank pane)":"tmux session gone";}

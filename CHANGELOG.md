@@ -2,6 +2,15 @@
 
 All notable changes to Emux are documented here.
 
+## v0.36.0 - 2026-07-13
+
+**Fleet visibility + faster loads.**
+
+- **The control room loads fast.** With several remote (rentamac) workers, `/api/grid` took ~14s because it captured each remote pane over ssh SEQUENTIALLY, and the poll loop only ever cached LOCAL sessions. Now remote captures run in PARALLEL (`_capture_many`, thread pool) and the poll loop caches remote sessions too. Measured: 14.4s → ~2s cold, 0.01s warm.
+- **Per-agent status at every level (Vybhav's ask).** Each tile and flow box shows a status pip — run / idle / err / needs-you — from a cheap per-poll `_quick_state`, so a manager (and human) sees each agent's status AND its sub-agents' without opening any of them. Full precision stays in the modal (`/api/classify`).
+- **Marching ants — actually marching.** The old "waiting on you" border used a masked-gradient trick that reported as animating but didn't visibly move. Replaced with the canonical four-edge marching-ants (each edge scrolls one dash-period). The ants now also wrap FLOW boxes, so a blocked sub-agent anywhere in the hierarchy is impossible to miss.
+- **Heartbeat.** A RUNNING agent shows a hospital-monitor EKG (an SVG trace with a sweeping blip) instead of a static dot; idle/error/needs-you keep a colored dot. Swaps live as state changes.
+
 ## v0.35.0 - 2026-07-13
 
 **Say it once; the system routes and starts the work.** Creating a session from an intent used to: pick a directory that ignored the company you named, ignore where that company's work belongs, and boot a BLANK agent that hadn't been told the task. Three fixes so you don't re-explain every time.
