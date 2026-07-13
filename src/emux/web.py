@@ -698,9 +698,14 @@ def _reply_suggestions(session: str, host: str | None) -> dict[str, Any]:
         'ready-to-send reply>", "..."]}\n'
         "Give 0-4 suggestions — each a concrete message the human could send RIGHT "
         "NOW to move it forward (approve, redirect, answer, ask a clarifier). Keep "
-        "each under ~12 words, phrased as the human talking TO the agent. If the "
-        "agent is just working and needs nothing, return an empty suggestions list "
-        "and say so in the digest.", timeout=45)
+        "each under ~14 words, phrased as the human talking TO the agent. "
+        "IMPORTANT: phrase each as a DECISIVE instruction that authorises the agent "
+        "to PROCEED and finish autonomously without coming back to ask again — e.g. "
+        "'yes, switch it and proceed — don't re-confirm' rather than a bare 'yes'. "
+        "The human clicking this wants it handled, not another round of questions. "
+        "(A 'cancel/reverse/hold off' option is the one exception that may stop it.) "
+        "If the agent is just working and needs nothing, return an empty suggestions "
+        "list and say so in the digest.", timeout=45)
     if "_error" in r:
         return {"ok": False, "error": r["_error"]}
     sugg = [s for s in (r.get("suggestions") or []) if isinstance(s, str) and s.strip()][:4]
@@ -1231,6 +1236,12 @@ def send_payload(session: str, keys: str, literal: bool = True, enter: bool = Tr
             if code != 0:
                 return {"ok": False, "error": "tmux_send_failed", "stderr": err}
         if enter:
+            # a paste-detecting TUI (Claude) needs text and Enter as SEPARATE
+            # events with a beat between, or the Enter is swallowed into the paste
+            # and the message never submits. Use the agent's measured settle.
+            settle = _server._pane_settle(session, host)
+            if keys and settle > 0:
+                time.sleep(settle)
             code, _, err = _server._run_tmux(["send-keys", "-t", session, "Enter"], host=host)
             if code != 0:
                 return {"ok": False, "error": "tmux_send_failed", "stderr": err}
@@ -1892,6 +1903,40 @@ let activeCompany=localStorage.getItem("emux_company")||"";   // restore the ski
 let flowSig=null, flowPre={}, flowBox={};   // flow view: rebuild only on topology change, else update panes in place
 const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW"};
 
+// ---- deep links: the view, filters, and open session live in the URL, so any
+// state is bookmarkable/shareable and survives reload/back-forward. ----
+let urlBooting=false;   // suppress syncURL while we APPLY a url (avoid loops)
+function syncURL(){
+  if(urlBooting)return;
+  const p=new URLSearchParams();
+  if(mode&&mode!=="grid")p.set("view",mode);
+  if(activeCompany)p.set("company",activeCompany);
+  if(activeTag)p.set("tag",activeTag);
+  if(filterStr)p.set("q",filterStr);
+  if(modalSession)p.set("session",modalSession.name);
+  const h=p.toString();
+  if((location.hash.slice(1))!==h)
+    history.replaceState(null,"",h?("#"+h):location.pathname+location.search);
+}
+function applyURL(){
+  urlBooting=true;
+  const p=new URLSearchParams(location.hash.slice(1));
+  activeCompany=p.get("company")||"";
+  activeTag=p.get("tag")||"";
+  filterStr=(p.get("q")||"").toLowerCase();
+  const f=$("#filter");if(f)f.value=p.get("q")||"";
+  skinForCompany();
+  setMode(p.get("view")||localStorage.getItem("emux_view")||"grid");
+  renderTagbar();renderSidebar();
+  urlBooting=false;
+  // deep-link to an open session modal — once the grid is loaded
+  const sess=p.get("session");
+  if(sess){const open=()=>{const s=grid.find(x=>x.name===sess);
+    if(s)openModal(s);else if(!grid.length)setTimeout(open,300);};open();}
+  else if(!modalSession){/* leave modal closed */}
+}
+window.addEventListener("hashchange",()=>{if(!urlBooting)applyURL();});
+
 async function api(path,opts){const r=await fetch(path,opts);return r.json();}
 
 function ageLabel(a){
@@ -1972,7 +2017,7 @@ function applyTheme(name){
 function skinForCompany(){applyTheme(CO_THEME[activeCompany]||"eidos-light");}
 
 function applyFilters(){localStorage.setItem("emux_company",activeCompany);
-  skinForCompany();renderTagbar();renderSidebar();if(mode!=="chat")render();}
+  skinForCompany();renderTagbar();renderSidebar();if(mode!=="chat")render();syncURL();}
 
 function renderTagbar(){
   const box=$("#tagbar");if(!box)return;
@@ -2014,6 +2059,7 @@ function setMode(m){
   document.querySelectorAll(".card").forEach(el=>el.classList.toggle("active",!!(current&&el.dataset.name===current.name)));
   clearInterval(chatTimer);chatTimer=null;
   if(m!=="chat"){$("#title").textContent=m;$("#views").innerHTML="";flowSig=null;render();}
+  syncURL();
 }
 document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setMode(t.dataset.mode));
 
@@ -2429,7 +2475,7 @@ $("#refreshbtn").onclick=()=>{poll();if(current)refreshScreen();};
 $("#jump").onclick=scrollBottom;
 $("#chat").addEventListener("scroll",()=>{if(pinned())$("#jump").style.display="none";});
 // sidebar filter (#7)
-$("#filter").addEventListener("input",e=>{filterStr=e.target.value.toLowerCase();renderSidebar();if(mode!=="chat")render();});
+$("#filter").addEventListener("input",e=>{filterStr=e.target.value.toLowerCase();renderSidebar();if(mode!=="chat")render();syncURL();});
 // ---------- zoom-in steer modal ----------
 let modalSession=null, modalTimer=null;
 function openModal(s){
@@ -2442,11 +2488,13 @@ function openModal(s){
   $("#modal").classList.add("open");
   modalRefresh();clearInterval(modalTimer);modalTimer=setInterval(modalRefresh,1200);
   loadDigest();                                  // the gist + suggested replies, up front
+  syncURL();                                      // deep-link the open session
   setTimeout(()=>$("#modalinput").focus(),40);
 }
 function closeModal(){
   $("#modal").classList.remove("open");
   clearInterval(modalTimer);modalTimer=null;modalSession=null;
+  syncURL();                                      // drop the session from the URL
 }
 async function modalRefresh(){
   if(!modalSession)return;
@@ -2818,8 +2866,7 @@ $("#feedclose").onclick=()=>setFeed(false);
 setFeed(localStorage.getItem("emux_feed")!=="0");   // open by default
 setInterval(pollFeed,2000);
 
-skinForCompany();                                     // paint the skin before first frame
-setMode(localStorage.getItem("emux_view")||"grid");   // restore last view (#6)
+applyURL();   // restore view + filters + open session from the URL (falls back to localStorage)
 poll();gridTimer=setInterval(poll,2000);
 </script>
 </body>

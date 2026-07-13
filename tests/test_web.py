@@ -53,12 +53,15 @@ def test_sessions_payload_without_tmux(monkeypatch):
 def test_send_payload_literal_sends_text_then_enter(monkeypatch):
     from emux import server, web
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_pane_settle", lambda s, h=None: 0.0)   # no paste-settle wait
     calls: list[list[str]] = []
     monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (calls.append(args), (0, "", ""))[1])
     result = web.send_payload("main", "C-c looks like text", literal=True, enter=True)
     assert result["ok"]
-    assert calls[0] == ["send-keys", "-t", "main", "-l", "C-c looks like text"]
-    assert calls[1] == ["send-keys", "-t", "main", "Enter"]
+    # text and Enter go as SEPARATE send-keys events (so a paste-detecting TUI submits)
+    sends = [c for c in calls if c[0] == "send-keys"]
+    assert sends == [["send-keys", "-t", "main", "-l", "C-c looks like text"],
+                     ["send-keys", "-t", "main", "Enter"]]
 
 
 def test_send_payload_named_key(monkeypatch):

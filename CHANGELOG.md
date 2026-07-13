@@ -2,6 +2,13 @@
 
 All notable changes to Emux are documented here.
 
+## v0.41.0 - 2026-07-13
+
+- **Deep links.** The view (grid/groups/activity/flow), the tag + company filters, the search text, and the open session are all reflected in the URL hash (`#view=flow&company=greenmark&tag=agents&session=ggo-chat2`) and restored from it — bookmark or share any state; it survives reload and back/forward. Falls back to localStorage when the URL is bare.
+- **Clicks actually submit.** The web send path (modal composer, the suggested-reply bubbles, the menu bubbles) now waits the agent's measured paste-settle between the text and the Enter, so a clicked reply submits instead of the Enter being swallowed by Claude's paste detection.
+- **Decisive replies.** Suggested replies are phrased to authorise the agent to PROCEED and finish autonomously without coming back to re-confirm — one click resolves it, rather than triggering another round of questions. A cancel/reverse option is the one exception.
+
+
 ## v0.40.0 - 2026-07-13
 
 **The gist + "what do I say" — so a session's wall of text becomes a decision you can make.** Opening a session was dumping raw terminal output with a blank prompt; if you weren't the one who'd been driving it, you had no idea what it wanted.
