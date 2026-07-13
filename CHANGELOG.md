@@ -2,6 +2,13 @@
 
 All notable changes to Emux are documented here.
 
+## v0.9.0 - 2026-07-12
+
+The robust up-channel + the real down-channel — both proven live against Claude Code.
+
+- **`emux signal <kind> [payload]` + a per-session inbox (robust up-channel).** A worker's Claude Code **Stop** hook runs `emux signal IDLE` (finished, warm, ready) and its **Notification** hook (`agent_needs_input`) runs `emux signal NEED "<blocked on>"`. These write directly to `~/.local/state/emux/inbox/<session>.jsonl`; `tmux_signals`/`tmux_wait` read them alongside the output sentinel, so a hook-injected signal is indistinguishable from a scraped one. This is boundary-detected completion — deterministic, harness-fired, no scraping and no dependence on the worker LLM remembering to echo. The `@@EMUX@@` output sentinel remains the fallback for non-hook-capable workers. (Fixed: a hook-only worker with no stream log used to be skipped — the reader now always drains the inbox.)
+- **`tmux_send(settle=…)` (real down-channel).** Type the text, wait `settle` seconds, then send Enter as a SEPARATE keystroke. Without this, a fast text+Enter hits Claude Code's paste detection and lands as an unsubmitted multi-line blob. Verified live: `settle=0.4` submits a prompt to a real Claude session and gets the answer back.
+
 ## v0.8.0 - 2026-07-12
 
 - Added `IDLE` / `READY` signal kinds — a warm worker's "finished that task, HOLDING for the next" (keep me + feed me), distinct from `DONE` ("my whole purpose is finished, I may exit"). This is the primary up-signal for the warm-worker model: an LLM worker's accumulated context IS its state, so death is a fault, not a lifecycle — you keep it alive and dispatch more work down the same session.

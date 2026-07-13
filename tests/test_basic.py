@@ -104,6 +104,22 @@ def test_tmux_signals_reads_and_acks(tmp_path, monkeypatch):
     assert asyncio.run(server.tmux_signals(targets=["wrk"]))["count"] == 0  # acked
 
 
+def test_hook_injected_signal_is_read(tmp_path, monkeypatch):
+    """The ROBUST up-channel: a signal written directly to the inbox (as a Claude
+    Code Stop/Notification hook would, via `emux signal`) is read by tmux_signals
+    exactly like a scraped sentinel — no pane echo, no TUI scraping."""
+    from emux import server
+    monkeypatch.setattr(server, "_INBOX_DIR", tmp_path / "inbox")
+    monkeypatch.setattr(server, "_SIGNAL_OFFSETS", tmp_path / "off.json")
+    monkeypatch.setattr(server, "_LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(server, "REGISTRY_PATH", tmp_path / "reg.json")
+    assert server.inject_signal("W1", "DONE", "all done")
+    r = asyncio.run(server.tmux_signals(targets=["W1"]))
+    assert r["count"] == 1 and r["signals"][0]["kind"] == "DONE"
+    assert "all done" in r["signals"][0]["payload"]
+    assert asyncio.run(server.tmux_signals(targets=["W1"]))["count"] == 0  # acked
+
+
 def test_idle_is_a_signal_kind(tmp_path, monkeypatch):
     """IDLE/READY are first-class kinds — a warm worker's 'done that, feed me the
     next task' signal, distinct from DONE-and-exit."""

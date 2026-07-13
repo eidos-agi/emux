@@ -145,6 +145,64 @@ _SIGNAL_RE = re.compile(
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
 _SIGNAL_OFFSETS = _STATE_DIR / "signal_offsets.json"
 _SIGNAL_LEDGER = _STATE_DIR / "signals.jsonl"
+# The ROBUST up-channel: a hook (Claude Code Stop/Notification) or the `emux
+# signal` CLI writes a signal DIRECTLY here, per session — no echoing into the
+# pane, no scraping a redraw-heavy TUI. Read alongside the output sentinel so a
+# hook-injected signal and a scraped one are indistinguishable to a manager.
+_INBOX_DIR = _STATE_DIR / "inbox"
+
+
+def _inbox_path(name: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name) or "session"
+    return _INBOX_DIR / f"{safe}.jsonl"
+
+
+def inject_signal(session: str, kind: str, payload: str = "") -> bool:
+    """Append a signal to a session's inbox (used by the `emux signal` CLI, which
+    a worker's Stop/Notification hook calls). Best-effort, never raises."""
+    try:
+        p = _inbox_path(session)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a") as f:
+            f.write(json.dumps({"t": int(time.time()), "session": session,
+                                "kind": kind.upper(), "payload": payload}) + "\n")
+        return True
+    except Exception:
+        return False
+
+
+def _new_inbox_signals(name: str, ack: bool) -> list[dict[str, Any]]:
+    """Hook/CLI-injected signals for a session since the last read (byte offset,
+    keyed `inbox::<name>` in the shared offsets file)."""
+    p = _inbox_path(name)
+    if not p.is_file():
+        return []
+    key = f"inbox::{name}"
+    offs = _load_offsets()
+    start = offs.get(key, 0)
+    size = p.stat().st_size
+    if start > size:
+        start = 0
+    with p.open("rb") as f:
+        f.seek(start)
+        raw = f.read()
+    last_nl = raw.rfind(b"\n")
+    consumed = raw[: last_nl + 1] if last_nl != -1 else b""
+    out = []
+    for line in consumed.decode("utf-8", "ignore").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+            out.append({"t": d.get("t"), "session": name,
+                        "kind": d.get("kind"), "payload": d.get("payload", "")})
+        except Exception:
+            pass
+    if ack and consumed:
+        offs[key] = start + len(consumed)
+        _save_offsets(offs)
+    return out
 
 
 def _load_offsets() -> dict[str, int]:
@@ -169,7 +227,8 @@ def _new_signals(name: str, ack: bool) -> list[dict[str, Any]]:
     signals to the durable ledger."""
     path = _log_path(name)
     if not path.is_file():
-        return []
+        # No stream log (e.g. a hook-only worker) — still drain the inbox.
+        return _new_inbox_signals(name, ack)
     offs = _load_offsets()
     start = offs.get(name, 0)
     size = path.stat().st_size
@@ -196,7 +255,9 @@ def _new_signals(name: str, ack: bool) -> list[dict[str, Any]]:
                     f.write(json.dumps(sig) + "\n")
             except Exception:
                 pass
-    return out
+    # Union the scraped sentinels (above) with the robust hook/CLI inbox. A
+    # manager can't tell — and shouldn't have to — which channel a signal came in.
+    return out + _new_inbox_signals(name, ack)
 
 
 def _resolve_watch_targets(targets: list[str] | None, under: str | None) -> list[str]:
@@ -764,6 +825,7 @@ async def tmux_send(
     keys: str,
     enter: bool = True,
     by_registry_name: bool = False,
+    settle: float = 0.0,
 ) -> dict[str, Any]:
     """Send keystrokes to a tmux session.
 
@@ -779,6 +841,11 @@ async def tmux_send(
             named keys like "C-c", "Escape", "Enter".
         enter: If True (default), append "Enter" to submit the command.
         by_registry_name: If True, resolve `target` via the registry.
+        settle: Seconds to wait AFTER typing the text and BEFORE pressing Enter,
+            sending Enter as a separate keystroke. Use this to drive a TUI with
+            paste-detection (Claude Code, some REPLs): a fast text+Enter is read
+            as a multi-line PASTE and never submitted. `settle=0.3` types, waits,
+            then submits. Default 0 = the classic single send-keys.
 
     Returns:
         {ok, target, resolved_session, sent} on success.
@@ -788,10 +855,20 @@ async def tmux_send(
         return {"ok": False, "error": err or "not_registered", "name": target}
     if host is None and _resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
-    args = ["send-keys", "-t", session, keys]
-    if enter:
-        args.append("Enter")
-    result = _run_tmux(args, host=host)
+    if enter and settle and settle > 0:
+        # Type the text, let the TUI leave paste-mode, THEN submit with a
+        # separate Enter — otherwise a paste-detecting TUI swallows the newline.
+        c1 = _run_tmux(["send-keys", "-t", session, keys], host=host)
+        if c1[0] != 0:
+            return {"ok": False, "error": "tmux_send_failed", "stderr": c1[2],
+                    "session": session, "host": host}
+        time.sleep(settle)
+        result = _run_tmux(["send-keys", "-t", session, "Enter"], host=host)
+    else:
+        args = ["send-keys", "-t", session, keys]
+        if enter:
+            args.append("Enter")
+        result = _run_tmux(args, host=host)
     if result[0] != 0:
         return {"ok": False, "error": "tmux_send_failed", "stderr": result[2], "session": session, "host": host}
     return {"ok": True, "target": target, "resolved_session": session, "host": host, "sent": keys, "enter": enter}

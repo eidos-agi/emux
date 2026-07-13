@@ -604,6 +604,31 @@ def _open_terminal_head(
     return False, None, f"iTerm failed: {iterm_err}; Terminal failed: {terminal_err}"
 
 
+def _current_tmux_session() -> str | None:
+    """The tmux session this process is running inside (a hook runs in the
+    worker's pane), or None if not in tmux."""
+    import subprocess
+    try:
+        r = subprocess.run(["tmux", "display-message", "-p", "#S"],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def cmd_signal(args: argparse.Namespace) -> int:
+    from .server import inject_signal
+    session = args.session or _current_tmux_session()
+    if not session:
+        print("emux signal: no --session given and not inside a tmux session",
+              file=sys.stderr)
+        return 2
+    ok = inject_signal(session, args.kind, args.payload or "")
+    print(f"emux signal: {args.kind.upper()} -> {session}"
+          if ok else "emux signal: write failed")
+    return 0 if ok else 1
+
+
 def cmd_head(args: argparse.Namespace) -> int:
     """Open a real terminal head for a registered name by default."""
     ok, session, err = _resolve_session_target(args.target, by_registry_name=not args.session)
@@ -716,6 +741,14 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--session", action="store_true", help="target a raw tmux session instead of a registry name")
     p_run.add_argument("--json", action="store_true", help="print structured result JSON")
 
+    p_signal = sub.add_parser(
+        "signal",
+        help="inject an up-channel signal for THIS session — call from a Claude Code Stop/Notification hook",
+    )
+    p_signal.add_argument("kind", help="IDLE | READY | DONE | NEED | PROGRESS | ERROR")
+    p_signal.add_argument("payload", nargs="?", default="", help="optional text (e.g. what a NEED is blocked on)")
+    p_signal.add_argument("--session", help="target session name (default: the current tmux session)")
+
     p_head = sub.add_parser("head", help="open a real terminal head for a registered session")
     p_head.add_argument("target", help="registered name by default, or tmux session with --session")
     p_head.add_argument("--session", action="store_true", help="target a raw tmux session instead of a registry name")
@@ -764,6 +797,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_run(args)
     if args.cmd == "head":
         return cmd_head(args)
+    if args.cmd == "signal":
+        return cmd_signal(args)
 
     parser.print_help()
     return 1
