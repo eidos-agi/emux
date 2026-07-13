@@ -2,6 +2,11 @@
 
 All notable changes to Emux are documented here.
 
+## v0.47.0 - 2026-07-13
+
+- **Model-routing settings page (⚙ SETTINGS).** Route emux's model-backed tasks — The Gist (session digest + suggested replies) and session placement — to a self-hosted NIM instead of the Claude subscription, to cut token cost. Configure a NIM endpoint (base URL, model, optional key), test the connection, and pick the backend per task. **NIM must be self-hosted / fixed-cost** — if it's unset or unreachable, emux falls back to `claude -p` automatically, so nothing breaks. Persisted to `~/.config/emux/models.json`.
+
+
 ## v0.46.0 - 2026-07-13
 
 - **Choice buttons are now solid-filled, not just bordered.** The bordered version still blended in some skins; the suggested-reply and menu-answer bubbles are now filled with the skin accent (on-accent text, drop shadow, hover-lift). Luminance offset against the page background is large in every skin by construction.

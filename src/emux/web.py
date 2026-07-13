@@ -438,6 +438,17 @@ def _adopt_session(data: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "name": name, "session": session, "host": host, **(r or {})}
 
 
+def _extract_json(text: str) -> dict[str, Any]:
+    """Pull the first JSON object out of a model reply."""
+    m = re.search(r"\{.*\}", text or "", re.DOTALL)
+    if not m:
+        return {"_error": "no JSON in model reply", "raw": (text or "")[:300]}
+    try:
+        return json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return {"_error": "unparseable JSON", "raw": m.group(0)[:300]}
+
+
 def _claude_json(prompt: str, timeout: int = 90) -> dict[str, Any]:
     """One fixed-cost `claude -p` call that must answer with a JSON object.
     Never the API — the CLI only."""
@@ -454,13 +465,103 @@ def _claude_json(prompt: str, timeout: int = 90) -> dict[str, Any]:
         )
     except (subprocess.TimeoutExpired, OSError) as e:
         return {"_error": f"claude -p failed: {e}"}
-    m = re.search(r"\{.*\}", proc.stdout or "", re.DOTALL)
-    if not m:
-        return {"_error": "no JSON in model reply", "raw": (proc.stdout or "")[:300]}
+    return _extract_json(proc.stdout or "")
+
+
+# --- model routing: send cheap high-volume tasks (The Gist, menu/reply) to a
+# self-hosted NIM to spare the Claude subscription. NIM MUST be fixed-cost
+# (local/self-hosted) — never a metered cloud endpoint. Falls back to claude -p
+# whenever NIM is unset or unreachable, so nothing breaks. ---
+_MODELS_PATH = Path.home() / ".config" / "emux" / "models.json"
+_TASKS = ("gist", "placement")   # model-backed tasks that can be routed
+
+
+def _model_config() -> dict[str, Any]:
+    cfg = {"nim": {"base_url": "", "model": "", "api_key": ""},
+           "routes": dict.fromkeys(_TASKS, "claude")}
     try:
-        return json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return {"_error": "unparseable JSON", "raw": m.group(0)[:300]}
+        disk = json.loads(_MODELS_PATH.read_text())
+        if isinstance(disk.get("nim"), dict):
+            cfg["nim"].update({k: disk["nim"].get(k, "") for k in cfg["nim"]})
+        if isinstance(disk.get("routes"), dict):
+            for t in _TASKS:
+                if disk["routes"].get(t) in ("claude", "nim"):
+                    cfg["routes"][t] = disk["routes"][t]
+    except (OSError, json.JSONDecodeError):
+        pass
+    return cfg
+
+
+def _save_model_config(data: dict[str, Any]) -> dict[str, Any]:
+    cfg = _model_config()
+    nim = data.get("nim") or {}
+    for k in ("base_url", "model", "api_key"):
+        if isinstance(nim.get(k), str):
+            cfg["nim"][k] = nim[k].strip()
+    routes = data.get("routes") or {}
+    for t in _TASKS:
+        if routes.get(t) in ("claude", "nim"):
+            cfg["routes"][t] = routes[t]
+    _MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _MODELS_PATH.write_text(json.dumps(cfg, indent=2))
+    return cfg
+
+
+def _nim_json(prompt: str, timeout: int = 60) -> dict[str, Any]:
+    """OpenAI-compatible chat call to a self-hosted NIM. Stdlib only."""
+    import urllib.error
+    import urllib.request
+    nim = _model_config()["nim"]
+    base, model = nim.get("base_url", ""), nim.get("model", "")
+    if not base or not model:
+        return {"_error": "nim_not_configured"}
+    url = base.rstrip("/") + "/chat/completions"
+    body = json.dumps({"model": model, "temperature": 0.2,
+                       "messages": [{"role": "user", "content": prompt}]}).encode()
+    headers = {"Content-Type": "application/json"}
+    if nim.get("api_key"):
+        headers["Authorization"] = "Bearer " + nim["api_key"]
+    try:
+        req = urllib.request.Request(url, data=body, headers=headers)  # noqa: S310 (user-configured local endpoint)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            payload = json.loads(resp.read())
+        content = payload["choices"][0]["message"]["content"]
+    except (urllib.error.URLError, KeyError, IndexError, ValueError, TimeoutError) as e:
+        return {"_error": f"nim_failed: {e}"}
+    return _extract_json(content)
+
+
+def _llm_json(prompt: str, task: str = "", timeout: int = 90) -> dict[str, Any]:
+    """Dispatch a JSON model call by the task's configured route. NIM for routed
+    tasks (fixed-cost), else claude -p; NIM failures fall back to claude -p."""
+    if task and _model_config()["routes"].get(task) == "nim":
+        r = _nim_json(prompt, timeout=min(timeout, 60))
+        if "_error" not in r:
+            return r
+        # NIM down/misconfigured → don't fail the feature, use the subscription CLI
+    return _claude_json(prompt, timeout=timeout)
+
+
+def _nim_ping() -> dict[str, Any]:
+    """Check a configured NIM is reachable (GET /models). For the settings 'Test'."""
+    import urllib.error
+    import urllib.request
+    nim = _model_config()["nim"]
+    base = nim.get("base_url", "")
+    if not base:
+        return {"ok": False, "error": "no base_url set"}
+    url = base.rstrip("/") + "/models"
+    headers = {}
+    if nim.get("api_key"):
+        headers["Authorization"] = "Bearer " + nim["api_key"]
+    try:
+        req = urllib.request.Request(url, headers=headers)  # noqa: S310
+        with urllib.request.urlopen(req, timeout=6) as resp:  # noqa: S310
+            data = json.loads(resp.read())
+        ids = [m.get("id") for m in data.get("data", []) if isinstance(m, dict)]
+        return {"ok": True, "models": [i for i in ids if i][:20]}
+    except (urllib.error.URLError, ValueError, TimeoutError) as e:
+        return {"ok": False, "error": str(e)}
 
 
 _NEW_VERBS = ("create", "new ", "start a new", "start new", "spin up", "spin-up",
@@ -566,7 +667,7 @@ def _suggest_session(intent: str, host: str | None = None) -> dict[str, Any]:
         mhint = (f"\nMACHINE PREFERENCE: {hint[1]} work runs on '{pref}' — pick it "
                  f"unless the intent explicitly names another machine.\n"
                  if (pref and hint) else "")
-        r1 = _claude_json(
+        r1 = _llm_json(
             "Pick the MACHINE to start a terminal session on.\n\n"
             f"WHAT THE USER WANTS TO DO: {intent}\n"
             f"{mhint}\n"
@@ -621,7 +722,7 @@ def _suggest_session(intent: str, host: str | None = None) -> dict[str, Any]:
                    f"(they are listed FIRST). Do NOT pick another company's repo "
                    f"unless the intent clearly points there.\n")
     dir_list = "\n".join(f"  [{i}] {d}" for i, d in enumerate(dirs)) or "  (none)"
-    r2 = _claude_json(
+    r2 = _llm_json(
         f"A developer wants a terminal session on machine '{chosen_host}'.\n\n"
         f"WHAT THEY SAID: {intent}\n\n"
         "They can either RESUME a session already running on that machine, or "
@@ -704,7 +805,7 @@ def _reply_suggestions(session: str, host: str | None) -> dict[str, Any]:
     if not cap.get("ok"):
         return {"ok": False, "error": cap.get("error", "capture_failed")}
     pane = cap.get("content", "")
-    r = _claude_json(
+    r = _llm_json(
         "A human is looking at an AI agent's terminal session and may not know how "
         "to respond. Here is its recent output:\n<<<\n" + pane[-3500:] + "\n>>>\n\n"
         "Reply with ONE line of JSON, nothing else:\n"
@@ -720,7 +821,7 @@ def _reply_suggestions(session: str, host: str | None) -> dict[str, Any]:
         "The human clicking this wants it handled, not another round of questions. "
         "(A 'cancel/reverse/hold off' option is the one exception that may stop it.) "
         "If the agent is just working and needs nothing, return an empty suggestions "
-        "list and say so in the digest.", timeout=45)
+        "list and say so in the digest.", task="gist", timeout=45)
     if "_error" in r:
         return {"ok": False, "error": r["_error"]}
     sugg = [s for s in (r.get("suggestions") or []) if isinstance(s, str) and s.strip()][:4]
@@ -1884,6 +1985,37 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
 .happrove{background:var(--amber);color:var(--on-accent);border-color:var(--amber)}
 .hdeny{background:var(--bg-raise);color:var(--text);border-color:var(--text-dim);font-weight:600}
 .hdeny:hover{background:#c0392b;color:#fff;border-color:#c0392b}
+/* --- settings modal --- */
+#setmodal{display:none;position:fixed;inset:0;z-index:140;background:rgba(0,0,0,.45);
+  align-items:center;justify-content:center}
+#setmodal.open{display:flex}
+#setcard{background:var(--bg-raise);border:1px solid var(--line);border-radius:12px;width:560px;max-width:94vw;
+  max-height:88vh;overflow:auto;padding:0 0 16px;box-shadow:0 12px 40px rgba(0,0,0,.4)}
+#sethead{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;
+  border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg-raise)}
+#sethead b{color:var(--amber);letter-spacing:.5px}
+.setx{cursor:pointer;color:var(--text-dim);font-size:16px}
+.setnote{font-size:12px;color:var(--text-dim);padding:12px 18px 4px;line-height:1.5}
+.setnote code{background:var(--bg-card);padding:1px 5px;border-radius:4px}
+.setsec{padding:10px 18px}
+.setsec h4{margin:6px 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--text)}
+.setpill{font-size:10px;background:var(--amber-faint);color:var(--amber-dim);padding:2px 7px;border-radius:8px;
+  text-transform:none;letter-spacing:0;margin-left:6px;font-weight:600}
+.setroute{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:7px 0;
+  border-bottom:1px solid var(--line);font-size:13px;color:var(--text)}
+.setroute span{flex:1}
+.setroute select,#setcard input{background:var(--bg-card);color:var(--text);border:1px solid var(--line);
+  border-radius:6px;padding:6px 9px;font-family:inherit;font-size:12.5px}
+#setcard label{display:block;font-size:12px;color:var(--text-dim);margin:8px 0}
+#setcard label input{display:block;width:100%;margin-top:4px;box-sizing:border-box}
+.setdim{opacity:.7}
+.setrow{display:flex;align-items:center;gap:10px;margin-top:10px}
+.setfoot{display:flex;align-items:center;gap:12px;padding:12px 18px 0}
+#setsave,#nimtest{background:var(--amber);color:var(--on-accent);border:none;font-weight:650;
+  padding:8px 18px;border-radius:7px;cursor:pointer;font-size:13px}
+#nimtest{background:var(--bg-card);color:var(--text);border:1px solid var(--amber)}
+#nimtestout.ok,#setsaveout.ok{color:#2ea043;font-size:12px}
+#nimtestout.err,#setsaveout.err{color:#e05545;font-size:12px}
 .happrove:disabled,.hdeny:disabled{opacity:.4;cursor:default}
 </style>
 </head>
@@ -1893,6 +2025,20 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
   <div id="htrayhead"><b>HANCOCK</b> · pending approvals <span id="htrayclose" onclick="closeHancock()">✕</span></div>
   <div id="htoast"></div>
   <div id="htraylist"></div>
+</div>
+<div id="setmodal" onclick="if(event.target===this)closeSettings()">
+  <div id="setcard">
+    <div id="sethead"><b>⚙ MODEL ROUTING</b><span onclick="closeSettings()" class="setx">✕</span></div>
+    <p class="setnote">Route cheap, high-volume tasks to a <b>self-hosted, fixed-cost</b> NIM to spare the Claude subscription. If NIM is unset or unreachable, emux falls back to <code>claude -p</code> automatically — nothing breaks. <b>Do not point this at a metered cloud API.</b></p>
+    <div class="setsec"><h4>Per-task backend</h4><div id="setroutes"></div></div>
+    <div class="setsec"><h4>NIM endpoint <span class="setpill">self-hosted / local only</span></h4>
+      <label>Base URL <input id="nimurl" placeholder="http://localhost:8000/v1" autocomplete="off" spellcheck="false"></label>
+      <label>Model <input id="nimmodel" placeholder="meta/llama-3.1-8b-instruct" autocomplete="off" spellcheck="false"></label>
+      <label>API key <span class="setdim">(only if your local NIM needs one)</span> <input id="nimkey" type="password" placeholder="(usually blank for local)" autocomplete="off"></label>
+      <div class="setrow"><button id="nimtest" class="act" onclick="testNim()">Test connection</button><span id="nimtestout"></span></div>
+    </div>
+    <div class="setfoot"><button id="setsave" onclick="saveSettings()">Save</button><span id="setsaveout"></span></div>
+  </div>
 </div>
 <aside id="side">
   <div id="brand"><h1>EMUX</h1><small>control room</small></div>
@@ -1910,6 +2056,7 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
     <button id="feedbtn" class="act" title="live fleet activity">◫ FEED</button>
     <button id="hbtn" class="act" title="Hancock approvals" onclick="openHancock()">⧉ HANCOCK<span id="hbadge" style="display:none">0</span></button>
     <button id="refreshbtn" class="act">↻ refresh</button>
+    <button id="setbtn" class="act" title="model routing settings" onclick="openSettings()">⚙ SETTINGS</button>
     <div id="tabs">
       <button class="tab" data-mode="grid">GRID</button>
       <button class="tab" data-mode="groups">GROUPS</button>
@@ -3094,6 +3241,41 @@ function openHancock(){ $("#htray").classList.add("open");document.body.classLis
 function closeHancock(){ $("#htray").classList.remove("open");hancock.forEach(h=>hDismissed.add(h.id)); }  // stay closed for THESE; a new id re-opens
 pollHancock();setInterval(pollHancock,3000);
 
+// --- model routing settings ---
+const TASK_LABELS={gist:"The Gist (session digest + suggested replies)",placement:"Session placement (new-session machine + name)"};
+async function openSettings(){
+  const r=await api("/api/models");
+  if(!r.ok)return;
+  const c=r.config;
+  $("#nimurl").value=c.nim.base_url||"";$("#nimmodel").value=c.nim.model||"";$("#nimkey").value=c.nim.api_key||"";
+  $("#setroutes").innerHTML=(r.tasks||[]).map(t=>{
+    const cur=c.routes[t]||"claude";
+    return '<label class="setroute"><span>'+esc(TASK_LABELS[t]||t)+'</span>'
+      +'<select data-task="'+t+'">'
+      +'<option value="claude"'+(cur==="claude"?" selected":"")+'>claude -p (subscription)</option>'
+      +'<option value="nim"'+(cur==="nim"?" selected":"")+'>NIM (local)</option>'
+      +'</select></label>';
+  }).join("");
+  $("#nimtestout").textContent="";$("#setsaveout").textContent="";
+  $("#setmodal").classList.add("open");
+}
+function closeSettings(){$("#setmodal").classList.remove("open");}
+async function testNim(){
+  const out=$("#nimtestout");out.textContent="testing…";out.className="";
+  await saveSettings(true);   // persist first so the server tests what you typed
+  const r=await api("/api/models/test",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+  if(r.ok){out.textContent="✓ reachable"+(r.models&&r.models.length?" · "+r.models.slice(0,3).join(", "):"");out.className="ok";}
+  else{out.textContent="✗ "+(r.error||"unreachable");out.className="err";}
+}
+async function saveSettings(quiet){
+  const routes={};document.querySelectorAll("#setroutes select").forEach(s=>routes[s.dataset.task]=s.value);
+  const body={nim:{base_url:$("#nimurl").value.trim(),model:$("#nimmodel").value.trim(),api_key:$("#nimkey").value},routes};
+  const r=await api("/api/models",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  if(!quiet){const o=$("#setsaveout");o.textContent=r.ok?"saved ✓":"save failed";o.className=r.ok?"ok":"err";
+    setTimeout(()=>{o.textContent="";},1800);}
+  return r.ok;
+}
+
 applyURL();   // restore view + filters + open session from the URL (falls back to localStorage)
 poll();gridTimer=setInterval(poll,2000);
 </script>
@@ -3211,6 +3393,9 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             pend = _hancock_pending()
             self._json({"ok": True, "pending": pend, "count": len(pend)})
             return
+        if url.path == "/api/models":
+            self._json({"ok": True, "config": _model_config(), "tasks": list(_TASKS)})
+            return
         if url.path == "/api/agents":
             from . import agents as _agents
             q = (parse_qs(url.query).get("scenario") or [""])[0]
@@ -3240,7 +3425,8 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path not in ("/api/send", "/api/head", "/api/spawn", "/api/suggest",
                             "/api/adopt", "/api/reply",
-                            "/api/hancock/approve", "/api/hancock/deny"):
+                            "/api/hancock/approve", "/api/hancock/deny",
+                            "/api/models", "/api/models/test"):
             self._json({"ok": False, "error": "not_found"}, 404)
             return
         if not self._host_allowed():
@@ -3280,6 +3466,12 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/adopt":
             self._json(_adopt_session(data))
+            return
+        if url.path == "/api/models":
+            self._json({"ok": True, "config": _save_model_config(data)})
+            return
+        if url.path == "/api/models/test":
+            self._json(_nim_ping())
             return
         if url.path in ("/api/hancock/approve", "/api/hancock/deny"):
             rid = (data.get("id") or "").strip()
