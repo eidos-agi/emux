@@ -104,6 +104,16 @@ def test_tmux_signals_reads_and_acks(tmp_path, monkeypatch):
     assert asyncio.run(server.tmux_signals(targets=["wrk"]))["count"] == 0  # acked
 
 
+def test_idle_is_a_signal_kind(tmp_path, monkeypatch):
+    """IDLE/READY are first-class kinds — a warm worker's 'done that, feed me the
+    next task' signal, distinct from DONE-and-exit."""
+    from emux import server
+    _signal_env(server, tmp_path, monkeypatch)
+    server._log_path("wrk").write_text("ACC=:ALPHA\n@@EMUX@@ IDLE\n")
+    r = asyncio.run(server.tmux_signals(targets=["wrk"]))
+    assert r["count"] == 1 and r["signals"][0]["kind"] == "IDLE"
+
+
 def test_tmux_wait_returns_on_signal(tmp_path, monkeypatch):
     """tmux_wait wakes as soon as a target has a signal, and says which + why."""
     from emux import server

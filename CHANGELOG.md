@@ -2,6 +2,11 @@
 
 All notable changes to Emux are documented here.
 
+## v0.8.0 - 2026-07-12
+
+- Added `IDLE` / `READY` signal kinds — a warm worker's "finished that task, HOLDING for the next" (keep me + feed me), distinct from `DONE` ("my whole purpose is finished, I may exit"). This is the primary up-signal for the warm-worker model: an LLM worker's accumulated context IS its state, so death is a fault, not a lifecycle — you keep it alive and dispatch more work down the same session.
+- Added a real-surface ctc case `warm_worker_loop` (dim `lifecycle`): one persistent worker is fed two tasks down the same session and must keep context across both (task 2 sees task 1) and never be respawned. Falsifiable — RED when the worker is respawned per task (context lost), which is exactly the anti-pattern to avoid. Proves the loop mechanics only; the Claude-TUI-specific risks (signal extraction from a redrawing TUI, send-keys timing, real context bloat) remain a live experiment, not a deterministic case.
+
 ## v0.7.0 - 2026-07-12
 
 The poll→event pair — what lets one intelligence manage many terminals.

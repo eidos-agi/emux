@@ -136,8 +136,12 @@ def _read_log(name: str, lines: int | None = None, strip: bool = True) -> str:
 # A worker cannot call emux — emux only ever sees a pane's OUTPUT. So a worker
 # talks UP to its manager by echoing a sentinel line, which lands in the stream
 # log like any other output; emux extracts it. `@@EMUX@@ <KIND> <payload>`,
-# KIND ∈ DONE | NEED | PROGRESS | ERROR.  e.g.  echo "@@EMUX@@ NEED approve? (y/n)"
-_SIGNAL_RE = re.compile(r"@@EMUX@@[ \t]+(DONE|NEED|PROGRESS|ERROR)\b[ \t]*(.*)")
+# KIND ∈ IDLE | READY | DONE | NEED | PROGRESS | ERROR.  IDLE/READY = "finished
+# that task, HOLDING for the next" (a warm worker to keep + feed, not exit); DONE
+# = "my whole purpose is finished, I may exit". e.g. echo "@@EMUX@@ IDLE".
+_SIGNAL_RE = re.compile(
+    r"@@EMUX@@[ \t]+(IDLE|READY|DONE|NEED|PROGRESS|ERROR)\b[ \t]*(.*)"
+)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
 _SIGNAL_OFFSETS = _STATE_DIR / "signal_offsets.json"
 _SIGNAL_LEDGER = _STATE_DIR / "signals.jsonl"

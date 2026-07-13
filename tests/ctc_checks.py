@@ -172,9 +172,47 @@ def signal_up_channel():              # event — a worker's up-channel signal r
     sys.exit(0 if kind == "NEED" else 1)
 
 
+def _warm_dispatch(name, task):
+    """Feed a task to a warm worker down the same session and wait for its IDLE."""
+    run(s.tmux_send(target=name, keys=task, by_registry_name=True))
+    r = run(s.tmux_wait(targets=[name], until="signal", timeout=8))
+    return any(x.get("signal", {}).get("kind") == "IDLE" for x in r.get("ready", []))
+
+
+def warm_worker_loop():               # lifecycle — a warm worker is fed two tasks and KEEPS context, never respawned
+    """The warm-worker claim on real tmux: spawn ONE persistent worker, feed it
+    two tasks down the SAME session, and prove it stayed alive and kept context
+    across both (task 2 sees task 1) — signalling IDLE between tasks, never
+    respawned. The worker is a bash read-loop that ACCUMULATES its input; if it
+    were respawned per task the accumulator would reset and task 1 would be gone.
+
+    Scope: this proves the LOOP MECHANICS (warm reuse + down-channel dispatch +
+    context retention + IDLE up-signal). It deliberately does NOT test the
+    Claude-TUI-specific risk (extracting signals from a redrawing TUI, send-keys
+    timing, real LLM context bloat) — that is a live experiment, not a
+    deterministic case. Harmless: one throwaway session accumulating two strings."""
+    name = "ctc-warm"
+    worker = ("acc=; while IFS= read -r line; do acc=\"$acc:$line\"; "
+              "printf 'ACC=%s\\n@@EMUX@@ IDLE\\n' \"$acc\"; done")
+    run(s.tmux_spawn(name=name, command=f"bash -c {shlex.quote(worker)}"))
+    time.sleep(0.5)                   # let the read-loop come up
+    ok1 = _warm_dispatch(name, "ALPHA")
+    ok2 = _warm_dispatch(name, "BETA")           # SAME session — must still be warm
+    log = s._read_log(name, lines=8)
+    # The COMBINED accumulator only appears if ONE warm process saw both tasks. A
+    # respawn-per-task worker would print ACC=:ALPHA then ACC=:BETA separately and
+    # never ACC=:ALPHA:BETA — and the append-only log keeps both strings, so
+    # checking for each alone would false-pass. Check the fused value.
+    retained = ":ALPHA:BETA" in log              # task 2 saw task 1 → context kept
+    still_warm = s._name_live(name)              # never died/respawned across tasks
+    s._run_tmux(["kill-session", "-t", name])
+    sys.exit(0 if (ok1 and ok2 and retained and still_warm) else 1)
+
+
 if __name__ == "__main__":
     {"happy": happy_search_running, "ended": search_finds_ended,
      "ghost": adopt_ghost_not_live, "refusal": drive_dead_refuses,
      "greenmark": manager_worker_greenmark,
      "visible": visible_manager_worker,
-     "signal": signal_up_channel}[sys.argv[1]]()
+     "signal": signal_up_channel,
+     "warm": warm_worker_loop}[sys.argv[1]]()
