@@ -235,5 +235,46 @@ Resulting layered design (works with or without a hook):
    hook (mutates tmux server state — a user decision) OR keep the cheap
    `has-session` poll (fine at small scale). Not yet decided.
 
+## Remote fan-out — foundation PROVEN on real hardware (eidos-bm, 2026-07-12)
+
+Verified against the HOSTKEY box (`eidos-bm`, tmux 3.4, ssh ControlMaster
+multiplexing configured):
+- **Drive layer over ssh WORKS with zero changes.** emux `_run_tmux(host=…)`
+  spawned a remote tmux session, captured its output back, and confirmed liveness
+  — a parent already controls a remote child (spawn/send/capture/run all thread
+  `host`).
+- **Receive path over ssh WORKS at the file level.** A remote "child" appended a
+  signal to *its own* `~/.local/state/emux/inbox/<s>.jsonl`; the parent read it
+  straight back over ssh. The pull/tail channel is proven.
+
+What's LOCAL-only today and must be made host-aware: the observe/signal helpers
+(`_read_log`, `_new_signals`, `_new_inbox_signals`, `_log_size`, `inject_signal`)
+have no `host` param, and stream logs aren't armed for remote sessions
+(`if … not host`). So a parent can DRIVE a remote child but not yet HEAR it.
+
+Design (Daniel, refined + proven): **BOTH push and tail, over a durable local
+write.**
+- The child's hook ALWAYS writes its signal to its own local inbox first (the
+  durable source of truth; survives the child's death — covers "a hook when the
+  child ends, when it is no longer running").
+- **Push** (child → parent inbox, best-effort) for immediacy.
+- **Tail** (parent ← `ssh box tail -f inbox`, one multiplexed connection per box)
+  for reliability + catch-up + no reverse-connectivity needed.
+- Each covers the other's failure; a dying child may not finish a push, the tail
+  still delivers the durable line; a dropped tail is caught by the pushed line.
+- REQUIRED by two channels: a **dedup id per signal** (uuid/monotonic) so push
+  and tail collapse to one — the at-least-once → idempotent discipline.
+
+Topology cap (Daniel): parent → child → grandchild in emux/tmux (≤3 levels);
+deeper fan-out uses Claude Code's native subagents (in-process `SubagentStop`, no
+tmux/ssh boundary), which is more robust than another tmux level. emux carries
+the cross-machine tree; Claude Code carries intra-session parallelism.
+
+Remaining work (bounded, de-risked): (1) host-aware inbox read + `tail -f`;
+(2) dedup id per signal; (3) spawn-hooked-from-birth, remote-aware (self-heal is
+future-tense repair, not primary — Claude caches hooks at startup); (4) emux
+install only on child-tier boxes, leaf children need only a hook that appends a
+line.
+
 Full four-agent research transcripts live in this session's task outputs
 (2026-07-12).
