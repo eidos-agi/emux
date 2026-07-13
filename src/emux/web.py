@@ -971,10 +971,58 @@ def _capture_and_observe(session: str, lines: int, host: str | None = None) -> s
     from . import adapters
     needs_human = bool(adapters.gated(agent_key, content))
     state = _quick_state(agent_key, content, needs_human)
+    summary = _summarize(agent.get("label", ""), state, content)
     with _LOCK:
         _CACHE[session] = {"content": content, "ts": time.time(), "lines": lines,
-                           "agent": agent, "needs_human": needs_human, "state": state}
+                           "agent": agent, "needs_human": needs_human,
+                           "state": state, "summary": summary}
     return content
+
+
+_SUM_VERB = {"running": "working", "asking": "asks you", "error": "hit an error",
+             "idle": "idle", "waiting_human": "needs you", "dead": "gone"}
+
+
+# UI notices / status meters / tips that are NOT what the agent is doing
+_NOISE_RE = re.compile(
+    r"update available|brew upgrade|new task\?|/clear to save|/mcp\b|^tip:|"
+    r"enter to select|to navigate|esc to (?:cancel|close)|for shortcuts|"
+    r"bypass permissions|auto mode on|mcp server|need(?:s)? auth|paste images|"
+    r"·\s*[↓↑].*token|\(\d+[ms].*token|\bfor \d+[ms]\b|ctrl\+b|shift\+tab|"   # spinner meters / tmux help
+    r"^\s*\d+\.\s|^\s*[▘▝▗▖▀▄█░▚▞◜◝◞◟]|…\s*\+\d+ (?:completed|tool)|"          # menu items / box spinners
+    r"^\S+…\s*(?:\(.*\))?$|@[\w.-]+\s.*[%$#]\s*$", re.I)                       # single-word spinner / shell prompt
+_ACTION_RE = re.compile(r"^\s*⏺\s*(\S.*)")   # Claude marks its own actions with ⏺
+
+
+def _headline(content: str) -> str:
+    """The cheapest possible 'what is it doing' — read the bottom of the screen,
+    no model, no GPU. Prefer the agent's last ACTION line (Claude marks these
+    with ⏺); else the last line that isn't chrome/notice/spinner."""
+    lines = content.splitlines()
+    for ln in reversed(lines):        # 1st choice: the agent's last ⏺ action
+        m = _ACTION_RE.match(ln)
+        if m and not _NOISE_RE.search(ln):
+            s = re.sub(r"\s+", " ", m.group(1).strip())
+            if len(s) >= 6:
+                return s
+    for ln in reversed(lines):        # else: last real, non-noise line
+        if not ln.strip() or _CHROME_RE.search(ln) or _NOISE_RE.search(ln):
+            continue
+        s = re.sub(r"\s+", " ", ln.strip().lstrip("⏺✻✢◇◆•·⎿│>❯▶▸ ").strip())
+        if len(s) >= 6:
+            return s
+    return ""
+
+
+def _summarize(agent_label: str, state: str, content: str) -> str:
+    """A super-cheap, LOCAL, always-on one-liner of what a session is doing right
+    now — the 'thin rail' text. Deterministic (state verb + the last real output
+    line); this is what a model WOULD say, without a model."""
+    head = _headline(content)
+    verb = _SUM_VERB.get(state, state)
+    if head:
+        return f"{verb} — {head}"[:200]
+    return verb
 
 
 _QUESTION_PHRASES = re.compile(
@@ -1079,11 +1127,13 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
             item["agent"] = (ce or {}).get("agent") or {"agent": "unknown", "label": "—", "glyph": "·"}
             item["needs_human"] = bool((ce or {}).get("needs_human"))
             item["state"] = (ce or {}).get("state") or "idle"
+            item["summary"] = (ce or {}).get("summary") or ""
             item.update(_meta(item["session"]))
         else:
             item["content"] = ""
             item["needs_human"] = False
             item["state"] = "dead"
+            item["summary"] = ""
             item["changed"] = False
             item["last_change_age"] = None
             item["activity"] = []
@@ -1321,6 +1371,20 @@ body{
   background:var(--amber);color:var(--on-accent);font-weight:800;font-size:10px;
   vertical-align:middle;animation:qpulse 1.1s ease-in-out infinite}
 @keyframes qpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,176,0,.5)}50%{box-shadow:0 0 0 4px rgba(255,176,0,0)}}
+/* the summary rail — a thin always-on "what's happening", hover for the full text */
+.rail{position:relative;font-size:9.5px;line-height:1.5;padding:2px 10px;
+  background:var(--bg-raise);border-bottom:1px solid var(--line);color:var(--text-dim);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:default;flex:none}
+.rail .rv{font-weight:700;color:var(--amber-dim);text-transform:uppercase;letter-spacing:.5px;font-size:8.5px}
+.rail.st-running .rv{color:var(--live)}
+.rail.st-error .rv{color:var(--stale)}
+.rail.st-asking .rv,.rail.st-waiting_human .rv{color:var(--amber)}
+.rfull{display:none;position:absolute;left:0;right:0;top:100%;z-index:30;
+  background:var(--bg-card);border:1px solid var(--amber-faint);border-radius:0 0 3px 3px;
+  padding:7px 11px;white-space:normal;font-size:11px;line-height:1.4;color:var(--text);
+  box-shadow:0 6px 16px rgba(0,0,0,.45)}
+.rail:hover{overflow:visible}
+.rail:hover .rfull{display:block}
 /* a RUNNING agent shows a hospital-monitor heartbeat instead of a static dot */
 .ekg{width:30px;height:12px;flex:none;vertical-align:middle}
 .ekg polyline{fill:none;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}
@@ -1909,6 +1973,16 @@ function liveDot(s){
   const cls=s.state==="error"?"stale":(s.state==="waiting_human"?"warn":"live");
   return '<span class="dot '+cls+'"></span>';
 }
+// the thin summary rail — a super-cheap always-on "what's happening now", with a
+// hover overlay that shows it in full.
+function railHTML(s){
+  const sum=s.summary||(s.live?"…":"gone");
+  const i=sum.indexOf(" — ");
+  const verb=i>0?sum.slice(0,i):sum, rest=i>0?sum.slice(i+3):"";
+  return '<div class="rail st-'+(s.state||"idle")+'"><span class="rv">'+esc(verb)+'</span>'
+    +(rest?' <span class="rt">'+esc(rest)+'</span>':'')
+    +'<div class="rfull"><b>'+esc(verb)+'</b>'+(rest?' — '+esc(rest):'')+'</div></div>';
+}
 
 function makeTile(s){
   const t=document.createElement("div");
@@ -1927,7 +2001,8 @@ function makeTile(s){
   }else{
     p.className="empty";p.textContent=s.live?"(blank pane)":"tmux session gone";
   }
-  t.appendChild(h);t.appendChild(p);
+  const rail=document.createElement("div");rail.className="railwrap";rail.innerHTML=railHTML(s);
+  t.appendChild(h);t.appendChild(rail.firstChild);t.appendChild(p);
   t.onclick=()=>openModal(s);
   return t;
 }
@@ -2011,6 +2086,7 @@ function updateFlowPanes(){
     const sp=d.querySelector(".spip");if(sp){const st=s.live?(s.state||"idle"):"dead";
       sp.className="spip st-"+st;sp.textContent=STLABEL[st]||st;}
     const li=d.querySelector(".lind");if(li)li.innerHTML=liveDot(s);   // idle↔run swaps dot↔heartbeat
+    const rl=d.querySelector(".rail");if(rl)rl.outerHTML=railHTML(s);   // refresh the summary rail
     const txt=paneText(s);
     if(txt){pre.className="";if(pre.textContent!==txt)pre.textContent=txt;}
     else{pre.className="empty";pre.textContent=s.live?"(blank pane)":"tmux session gone";}
@@ -2117,7 +2193,7 @@ function renderFlow(){
     const pre=document.createElement("pre");
     const txt=paneText(s);
     if(txt)pre.textContent=txt;else{pre.className="empty";pre.textContent=s.live?"(blank pane)":"tmux session gone";}
-    d.innerHTML=title;d.appendChild(pre);
+    d.innerHTML=title+railHTML(s);d.appendChild(pre);
     d.onclick=()=>openModal(s);                 // click a box → zoom-in modal to steer it
     flowBox[s.name]=d;flowPre[s.name]=pre;
     wrap.appendChild(d);

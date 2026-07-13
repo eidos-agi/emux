@@ -564,3 +564,27 @@ def test_spawn_kickstarts_the_agent_with_the_intent(monkeypatch):
     seen.clear()
     r = web._spawn_session({"name": "y", "command": "", "prompt": "build the thing"})
     assert r.get("kickstarted") is False
+
+
+def test_cheap_summarizer_reads_the_agent_not_the_chrome():
+    from emux import web
+    # prefers the agent's ⏺ action line over UI notices/spinners below it
+    pane = ("⏺ Refactored the auth module and added the missing test\n"
+            "✻ Cooked for 13m 59s\n"
+            "  Update available! Run: brew upgrade claude-code@latest\n"
+            "─────\n❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+    assert web._headline(pane) == "Refactored the auth module and added the missing test"
+    s = web._summarize("Claude Code", "idle", pane)
+    assert s.startswith("idle — Refactored the auth")
+    # spinner meters, tips, menu items, shell prompts are all noise
+    for noise in ["Brewed for 18s", "Tip: paste images with control+v",
+                  "  3. Skip until next version", "user@box repo %",
+                  "  Update available! Run: brew upgrade"]:
+        assert web._headline(noise) == "", noise
+
+
+def test_asking_state_summary_and_question_detection():
+    from emux import web
+    pane = "⏺ Say the word on the routing proposal and I'll implement it.\n───\n❯ \n"
+    assert web._looks_like_question(pane) is True
+    assert web._quick_state("claude", pane, False) == "asking"

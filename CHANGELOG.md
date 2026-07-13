@@ -2,6 +2,14 @@
 
 All notable changes to Emux are documented here.
 
+## v0.38.0 - 2026-07-13
+
+**A super-cheap always-on "what's happening" rail — no model, no GPU.** A thin rail sits above each session's terminal box with a one-line, plain-English read of what the agent is doing right now; hover it for the full text.
+
+- Deterministic, LOCAL, ~free: `_summarize` = a state verb (working / asks you / idle / error) plus the agent's last real line of output. `_headline` prefers Claude's own `⏺` action lines and strips the noise that clutters a terminal's bottom — spinner meters ("Cooked for 13m"), update notices, tips, menu items, box-spinners, shell prompts. It reads the bottom of the screen; that's the whole cost.
+- On every grid tile AND flow box (with a hover overlay showing it in full), so the rail is present at every level of the hierarchy. Refreshes live in the flow without a rebuild.
+- This is what a model WOULD say about a session, produced without a model — matching the "really really cheap, barely any CPU, local" constraint.
+
 ## v0.37.0 - 2026-07-13
 
 **"It's asking you" is now a first-class state.** A session that finished a turn and is asking you a question ("say the word on the proposal", "should I…?") is not a formal gate, so nothing used to flag it. Now `_quick_state` detects a question — a trailing `?` or a question phrase in the agent's last real output lines (chrome/composer stripped) — and marks the session `asking`. The live indicator swaps the heartbeat for a **pulsing `?`**, the status pip reads "asks you", and the box marches ants (it needs you), same as a formal gate.
