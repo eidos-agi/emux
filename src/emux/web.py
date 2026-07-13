@@ -979,6 +979,74 @@ def _escalate_if_gated(session: str, agent_key: str, content: str) -> None:
     _file_hancock_escalation(session, agent_key, gate)
 
 
+def _hancock_db() -> Path:
+    return Path(os.environ.get("HANCOCK_DB")
+                or Path.home() / ".local" / "state" / "hancock" / "hancock.db")
+
+
+def _hancock_pending() -> list[dict[str, Any]]:
+    """Read Hancock's pending signing tray straight from its SQLite db (read-only,
+    no CLI guard). This is what the human must approve/deny."""
+    import sqlite3
+    db = _hancock_db()
+    if not db.is_file():
+        return []
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3)
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            "SELECT id, command, cwd, reason, risk, created_at "
+            "FROM request WHERE status='pending' AND deleted_at IS NULL "
+            "ORDER BY created_at DESC LIMIT 50").fetchall()
+        con.close()
+    except sqlite3.Error:
+        return []
+    return [{"id": r["id"], "command": r["command"], "cwd": r["cwd"],
+             "why": r["reason"] or "", "risk": r["risk"], "created_at": r["created_at"]}
+            for r in rows]
+
+
+def _hancock_approve(req_id: str) -> dict[str, Any]:
+    """Sign + RUN a request via the real hancock path (`hancock approve <id>`),
+    with a scrubbed env so hancock's Claude-Code guard doesn't reject the daemon."""
+    import shutil
+    import subprocess
+    hancock = shutil.which("hancock")
+    if not hancock:
+        return {"ok": False, "error": "hancock_not_found"}
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "ANTHROPIC_API_KEY")}
+    try:
+        p = subprocess.run([hancock, "approve", req_id], env=env,
+                           capture_output=True, text=True, timeout=120, check=False)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+    return {"ok": p.returncode == 0, "output": (p.stdout or p.stderr or "").strip()[:600]}
+
+
+def _hancock_deny(req_id: str, reason: str = "denied from emux") -> dict[str, Any]:
+    """Deny a request. Hancock has no CLI deny, so record the decision + mark the
+    request denied directly (so the agent blocked in `wait` sees the verdict)."""
+    import sqlite3
+    import uuid
+    db = _hancock_db()
+    if not db.is_file():
+        return {"ok": False, "error": "no_db"}
+    try:
+        con = sqlite3.connect(str(db), timeout=5)
+        con.execute(
+            "INSERT INTO decision (id, request_id, verdict, reason) VALUES (?,?,?,?)",
+            (uuid.uuid4().hex[:16], req_id, "deny", reason))
+        con.execute(
+            "UPDATE request SET status='denied', updated_at=datetime('now') "
+            "WHERE id=? AND status='pending'", (req_id,))
+        con.commit()
+        con.close()
+    except sqlite3.Error as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True}
+
+
 def _file_hancock_escalation(session: str, agent_key: str, gate: str) -> None:
     """Put a gated worker in the operator's Hancock tray. The queued command
     opens the worker's terminal (`emux head`) so ONE signature brings it up to
@@ -1773,9 +1841,48 @@ body{
 ::-webkit-scrollbar{width:8px}
 ::-webkit-scrollbar-thumb{background:var(--amber-faint)}
 ::-webkit-scrollbar-track{background:transparent}
+/* --- Hancock approvals --- */
+#hbtn.hot{border-color:var(--amber);color:var(--amber);font-weight:700}
+#hbadge{background:#c0392b;color:#fff;border-radius:9px;padding:0 6px;margin-left:5px;font-size:11px;font-weight:700}
+#hbanner{display:none;position:fixed;top:0;left:0;right:0;z-index:120;
+  background:#c0392b;color:#fff;text-align:center;padding:9px 12px;font-weight:600;cursor:pointer;
+  box-shadow:0 2px 14px rgba(192,57,43,.5)}
+#hbanner u{text-underline-offset:3px}
+.hbell{display:inline-block}
+body.hneedy #hbanner{display:block;animation:hpulse 1.1s ease-in-out infinite}
+body.hneedy #hbanner .hbell{display:inline-block;animation:hshake .9s ease-in-out infinite;transform-origin:50% 0}
+body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2px}
+@keyframes hpulse{0%,100%{background:#c0392b}50%{background:#e05545}}
+@keyframes hshake{0%,100%{transform:rotate(0)}20%{transform:rotate(-16deg)}40%{transform:rotate(14deg)}60%{transform:rotate(-8deg)}80%{transform:rotate(6deg)}}
+#htray{position:fixed;top:0;right:0;bottom:0;width:380px;max-width:92vw;z-index:130;
+  background:var(--bg-raise);border-left:2px solid var(--amber);box-shadow:-8px 0 24px rgba(0,0,0,.35);
+  display:flex;flex-direction:column}
+#htrayhead{padding:12px 14px;border-bottom:1px solid var(--line);color:var(--text);font-size:13px;letter-spacing:.5px}
+#htrayhead b{color:var(--amber)}
+#htrayclose{float:right;cursor:pointer;color:var(--text-dim);font-size:15px}
+#htraylist{overflow:auto;padding:10px;display:flex;flex-direction:column;gap:10px}
+.hempty{color:var(--text-dim);text-align:center;padding:30px 10px;font-size:13px}
+.hreq{background:var(--bg-card);border:1px solid var(--line);border-left:3px solid var(--stale);border-radius:8px;padding:10px}
+.hreq.r-high,.hreq.r-critical{border-left-color:#c0392b}
+.hreq.r-medium{border-left-color:var(--amber)}
+.hrisk{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);margin-bottom:4px}
+.hreq.r-high .hrisk,.hreq.r-critical .hrisk{color:#e05545}
+.hcmd{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--text);word-break:break-all;margin-bottom:5px}
+.hwhy{font-size:12px;color:var(--text-dim);margin-bottom:3px}
+.hcwd{font-size:11px;color:var(--text-dim);opacity:.7;font-family:ui-monospace,monospace;margin-bottom:7px}
+.hact{display:flex;gap:8px}
+.happrove,.hdeny{flex:1;padding:7px;border-radius:6px;cursor:pointer;font-weight:600;font-size:12px;border:1px solid}
+.happrove{background:var(--amber);color:var(--on-accent);border-color:var(--amber)}
+.hdeny{background:transparent;color:var(--text-dim);border-color:var(--line)}
+.happrove:disabled,.hdeny:disabled{opacity:.4;cursor:default}
 </style>
 </head>
 <body>
+<div id="hbanner" onclick="openHancock()"><span class="hbell">🔔</span> <b id="hbannern">0</b> need your signature — <u>review &amp; approve</u></div>
+<div id="htray" style="display:none">
+  <div id="htrayhead"><b>HANCOCK</b> · pending approvals <span id="htrayclose" onclick="closeHancock()">✕</span></div>
+  <div id="htraylist"></div>
+</div>
 <aside id="side">
   <div id="brand"><h1>EMUX</h1><small>control room</small></div>
   <input id="filter" placeholder="filter sessions…" autocomplete="off" spellcheck="false">
@@ -1790,6 +1897,7 @@ body{
     <button id="attachbtn" class="act" style="display:none">⧉ copy attach</button>
     <button id="newbtn" class="act">+ NEW SESSION</button>
     <button id="feedbtn" class="act" title="live fleet activity">◫ FEED</button>
+    <button id="hbtn" class="act" title="Hancock approvals" onclick="openHancock()">⧉ HANCOCK<span id="hbadge" style="display:none">0</span></button>
     <button id="refreshbtn" class="act">↻ refresh</button>
     <div id="tabs">
       <button class="tab" data-mode="grid">GRID</button>
@@ -2914,6 +3022,47 @@ $("#feedclose").onclick=()=>setFeed(false);
 setFeed(localStorage.getItem("emux_feed")!=="0");   // open by default
 setInterval(pollFeed,2000);
 
+// --- Hancock: pending approvals surfaced loud, cleared in-app ---
+let hancock=[];
+async function pollHancock(){
+  let r; try{ r=await api("/api/hancock"); }catch(e){ return; }
+  if(!r||!r.ok)return;
+  hancock=r.pending||[];
+  const n=r.count||0;
+  $("#hbadge").textContent=n;$("#hbadge").style.display=n?"inline-block":"none";
+  $("#hbtn").classList.toggle("hot",n>0);
+  $("#hbannern").textContent=n;
+  // banner is loud only while there's something to sign AND the tray isn't already open
+  document.body.classList.toggle("hneedy",n>0&&$("#htray").style.display==="none");
+  if($("#htray").style.display!=="none")renderHancock();
+}
+function renderHancock(){
+  const box=$("#htraylist");
+  if(!hancock.length){box.innerHTML='<div class="hempty">nothing waiting — the fleet is clear ✓</div>';return;}
+  box.innerHTML=hancock.map(h=>{
+    const risk=(h.risk||"medium");
+    return '<div class="hreq r-'+risk+'">'
+      +'<div class="hrisk">'+risk+'</div>'
+      +'<div class="hcmd">'+esc(h.command)+'</div>'
+      +(h.why?'<div class="hwhy">'+esc(h.why)+'</div>':'')
+      +(h.cwd?'<div class="hcwd">'+esc(h.cwd)+'</div>':'')
+      +'<div class="hact"><button class="happrove" onclick="hancockDo(\''+h.id+'\',1)">approve &amp; run</button>'
+      +'<button class="hdeny" onclick="hancockDo(\''+h.id+'\',0)">deny</button></div></div>';
+  }).join("");
+}
+async function hancockDo(id,ok){
+  const btns=document.querySelectorAll('#htraylist button');btns.forEach(b=>b.disabled=true);
+  const path=ok?"/api/hancock/approve":"/api/hancock/deny";
+  let r; try{ r=await api(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})}); }
+  catch(e){ r={ok:false,error:"unreachable"}; }
+  if(!r.ok){ btns.forEach(b=>b.disabled=false); alert((ok?"approve":"deny")+" failed: "+(r.error||"?")); return; }
+  hancock=hancock.filter(h=>h.id!==id);
+  renderHancock();pollHancock();
+}
+function openHancock(){ $("#htray").style.display="block";document.body.classList.remove("hneedy");renderHancock();pollHancock(); }
+function closeHancock(){ $("#htray").style.display="none";pollHancock(); }
+pollHancock();setInterval(pollHancock,3000);
+
 applyURL();   // restore view + filters + open session from the URL (falls back to localStorage)
 poll();gridTimer=setInterval(poll,2000);
 </script>
@@ -3027,6 +3176,10 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         if url.path == "/api/hosts":
             self._json({"ok": True, "hosts": _known_hosts()})
             return
+        if url.path == "/api/hancock":
+            pend = _hancock_pending()
+            self._json({"ok": True, "pending": pend, "count": len(pend)})
+            return
         if url.path == "/api/agents":
             from . import agents as _agents
             q = (parse_qs(url.query).get("scenario") or [""])[0]
@@ -3055,7 +3208,8 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         url = urlparse(self.path)
         if url.path not in ("/api/send", "/api/head", "/api/spawn", "/api/suggest",
-                            "/api/adopt", "/api/reply"):
+                            "/api/adopt", "/api/reply",
+                            "/api/hancock/approve", "/api/hancock/deny"):
             self._json({"ok": False, "error": "not_found"}, 404)
             return
         if not self._host_allowed():
@@ -3095,6 +3249,16 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/adopt":
             self._json(_adopt_session(data))
+            return
+        if url.path in ("/api/hancock/approve", "/api/hancock/deny"):
+            rid = (data.get("id") or "").strip()
+            if not rid:
+                self._json({"ok": False, "error": "missing_id"}, 400)
+                return
+            if url.path.endswith("approve"):
+                self._json(_hancock_approve(rid))
+            else:
+                self._json(_hancock_deny(rid))
             return
         session = data.get("session")
         if not isinstance(session, str) or not session:

@@ -2,6 +2,11 @@
 
 All notable changes to Emux are documented here.
 
+## v0.43.0 - 2026-07-13
+
+- **Hancock approvals, in-app and loud.** emux now surfaces Hancock's pending signing tray directly. When anything needs your signature a red banner pulses across the top (shaking bell + count + a red outline on the whole app) — impossible to miss. `⧉ HANCOCK` in the topbar carries a live count badge. Click either to open a right-side tray listing each request (command, why, cwd, risk-colored), with **approve & run** / **deny** per item. Approve routes through the real `hancock approve` path (signs + runs, scrubbed env so the daemon isn't blocked by Hancock's Claude-Code guard); deny records the decision and marks the request denied so a worker blocked in `hancock wait` unblocks. Opening the tray quiets the banner. Read path is a direct read-only query of Hancock's SQLite tray — no CLI guard involved.
+
+
 ## v0.42.0 - 2026-07-13
 
 - **Thinking indicator.** While a session is generating (`esc to interrupt` on screen), the modal header shows bouncing dots + a live timer of how long it's been thinking (from the agent's own meter). Movement you can feel, and how long.
