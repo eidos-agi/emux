@@ -2,6 +2,17 @@
 
 All notable changes to Emux are documented here.
 
+## v0.25.0 - 2026-07-13
+
+**Codex is a real fleet member now** — measured against a live Codex in tmux, not guessed. It has the same lifecycle emux already relies on for Claude, and every number below was established by experiment.
+
+- **Codex has a NATIVE Stop hook**, same JSON shape as Claude's. Proven end-to-end: the hook fired `emux signal IDLE` into emux's inbox ~9s after the turn ended, the task's artifact was on disk, and the judge classified the session `done_idle` from the up-channel signal — zero scraping. Codex can be a warm worker.
+- **Codex needs a paste-settle too, and it was MEASURED**: 0.2s does not submit, 0.4s does. Same number as Claude, but arrived at by experiment rather than inherited.
+- **Fixed a real detection bug that guessing would have shipped.** Codex prints `• Working (1s • esc to interrupt)` — the *same* "esc to interrupt" string as Claude. That phrase was a Claude content-signature, so a node-wrapped Codex would have been misdetected AS Claude. Removed; Codex now has distinctive signatures.
+- **SAFETY: `tmux_send` now REFUSES to type into a pane showing a modal gate** (`blocked_on_gate`, override with `force=True`). This is not theoretical. Codex's startup has three gates (directory-trust, hook-review, update-available), each of which eats keystrokes and PERSISTS the answer: sending the text "what is 2+2?" fed the `2` to the hook gate, which selected "Trust all and continue" and wrote hook-trust into the user's `~/.codex/config.toml`. The update gate defaults to "Update now (runs `brew upgrade`)", so a blind Enter upgrades the user's Codex. Typing into a gate is a config write, not a no-op.
+- Codex launches unattended with `--dangerously-bypass-hook-trust` plus a pre-trusted cwd — deliberately NOT `--dangerously-bypass-approvals-and-sandbox`, which also removes the sandbox (a bigger concession than the gate requires).
+- `adapters.table()` reports the honest matrix: claude and codex now full (detect/drive/read/resume/signal); gemini/grok/opencode/aider remain detect-only and declare their unknowns.
+
 ## v0.24.0 - 2026-07-13
 
 **One adapter per agent** (`emux/adapters.py`). emux only really knew how to drive ONE agent, and Claude-specific facts were smeared through general code: the semver pane-title trick in the web daemon, `esc to interrupt` inside the judge's regexes, `settle=0.4` in `tmux_send` (a workaround for *Claude's* paste detection), and a Stop hook as *the* way a worker reports done. Each of those is a per-agent contract wearing a general rule's clothes. They now live with their agent.

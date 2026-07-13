@@ -100,8 +100,10 @@ CLAUDE = Adapter(
     # Claude Code retitles its pane to a bare version string ("2.1.207"), so the
     # binary name is NOT what tmux reports. Verified live.
     pane_regex=r"^\d+\.\d+\.\d+",
-    content_sigs=("claude code", "anthropic", "esc to interrupt",
-                  "? for shortcuts", "bypass permissions"),
+    # NOTE: "esc to interrupt" is deliberately NOT here. Codex prints the same
+    # string ("• Working (1s • esc to interrupt)"), so using it as a Claude
+    # content-signature misdetects a node-wrapped Codex AS Claude. Measured.
+    content_sigs=("claude code", "anthropic", "? for shortcuts", "bypass permissions"),
     # text+Enter too fast trips paste detection; 0.4s lands it. Verified live.
     send_settle=0.4,
     busy_sigs=("esc to interrupt",),
@@ -121,25 +123,41 @@ CLAUDE = Adapter(
 CODEX = Adapter(
     key="codex", label="Codex", glyph="◇", color="#10a37f",
     cmd="codex", access="subscription",
+    # tmux reports the platform binary, e.g. "codex-aarch64-a" — not "codex".
+    # The substring match catches it; measured, don't "fix" it to an exact match.
     pane_cmds=("codex",),
-    content_sigs=("openai codex", "codex cli"),
-    # UNKNOWN: not yet measured against codex's TUI. 0.4 is Claude's number and
-    # borrowing it would be guessing; 0 means "type and submit" until measured.
-    send_settle=0.0,
-    busy_sigs=(),          # unknown — do NOT invent, the judge would mislabel
-    approval_sigs=(),      # unknown
-    launch_flags=(),       # its config already sets approval_policy = "never"
+    content_sigs=("openai codex", "codex cli", "• working (", "/model to change"),
+    # MEASURED, not borrowed: 0.2s does NOT submit, 0.4s does. Like Claude, a
+    # single text+Enter is swallowed as a paste and the prompt sits unsent.
+    send_settle=0.4,
+    busy_sigs=("• working (", "esc to interrupt"),
+    # Codex's startup is GATE-LADEN, and every gate eats keystrokes (see the
+    # module docstring warning). All three block an unattended spawn.
+    approval_sigs=(
+        "do you trust the contents of this directory",   # 1st launch in a dir
+        "hooks need review",                             # hook hashes changed
+        "update available",                              # ← default is BREW UPGRADE
+        "press enter to continue",
+        "press enter to confirm",
+    ),
+    # Clears the hook-trust gate. The directory-trust gate is cleared by
+    # pre-trusting the cwd: -c 'projects."<cwd>".trust_level="trusted"'.
+    # NOT --dangerously-bypass-approvals-and-sandbox: that also removes the
+    # sandbox, which is a bigger concession than the gate requires.
+    launch_flags=("--dangerously-bypass-hook-trust",),
     resume_fmt="codex resume {id}",
     resume_last="codex resume --last",
     oneshot_fmt="codex exec {prompt}",
-    # Codex's answer to Claude's Stop hook: a `notify` program invoked on
-    # turn-ended. Same shape — the harness fires at the boundary.
-    done_hook="notify → turn-ended → `emux signal IDLE`",
+    # Codex has a NATIVE Stop hook, same JSON shape as Claude's — better than the
+    # `notify` path. PROVEN LIVE: hook fired `emux signal IDLE` into the inbox
+    # ~9s after the turn ended, and the judge read the session as done_idle.
+    done_hook="Stop hook (hooks.json) → `emux signal IDLE`",
     done_hook_install={
-        "file": "~/.codex/config.toml",
-        "key": "notify",
-        "value": ["emux", "signal", "IDLE"],
-        "note": "codex appends a JSON payload arg; `emux signal` ignores extras",
+        "file": "~/.codex/hooks.json",           # or <project>/.codex/hooks.json
+        "path": ["hooks", "Stop"],
+        "run": "emux signal IDLE",
+        "note": "identical shape to Claude's Stop hook; project-local file avoids "
+                "touching the user's global config",
     },
 )
 
@@ -181,6 +199,32 @@ def detect(pane_cmd: str, content: str = "") -> Adapter | None:
 
 def get(key: str) -> Adapter | None:
     return BY_KEY.get(key)
+
+
+def gated(agent_key: str | None, content: str) -> str | None:
+    """Is a modal GATE on screen right now? Returns the gate text, else None.
+
+    THIS IS A SAFETY CHECK, not a nicety. An agent's startup gate is a menu that
+    eats keystrokes and PERSISTS the answer. Typing a prompt into a gated Codex
+    pane is not a no-op — it is a config write. Measured, the hard way:
+
+      • Sending "what is 2+2?" while the hook-review gate was up fed the `2` to
+        the menu, which selected "2. Trust all and continue" and wrote
+        trusted_hash entries into ~/.codex/config.toml.
+      • The update gate defaults to "1. Update now (runs `brew upgrade`)", so a
+        blind Enter upgrades the user's Codex.
+
+    So: before sending anything, ask whether a gate is up. If it is, the caller
+    must resolve it deliberately — never type through it.
+    """
+    a = BY_KEY.get(agent_key or "")
+    if not a or not a.approval_sigs:
+        return None
+    low = (content or "").lower()
+    for sig in a.approval_sigs:
+        if sig in low:
+            return sig
+    return None
 
 
 def settle_for(agent_key: str | None) -> float:

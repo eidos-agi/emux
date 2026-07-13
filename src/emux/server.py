@@ -976,6 +976,7 @@ async def tmux_send(
     enter: bool = True,
     by_registry_name: bool = False,
     settle: float | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Send keystrokes to a tmux session.
 
@@ -997,18 +998,43 @@ async def tmux_send(
             it. DEFAULT (None) = ask the ADAPTER for the agent actually running in
             that pane — Claude gets its measured 0.4s, an agent we haven't measured
             gets 0. Pass a number to override; pass 0 for the classic single send.
+        force: Send even when the pane shows a modal GATE. OFF by default: typing
+            into a gate feeds the MENU, not the prompt. Measured the hard way — a
+            "2" inside the text "what is 2+2?" selected "Trust all and continue"
+            on Codex's hook gate and PERSISTED hook-trust to the user's config;
+            Codex's update gate defaults to "Update now (runs `brew upgrade`)".
+            Use force=True only to answer a gate with the exact key you intend.
 
     Returns:
         {ok, target, resolved_session, sent} on success.
+        {ok: False, error: "blocked_on_gate", gate, hint} when a gate is up.
     """
     session, host, err = _resolve_target(target, by_registry_name)
     if err or session is None:
         return {"ok": False, "error": err or "not_registered", "name": target}
     if host is None and _resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
+    agent = _pane_agent(session, host)
     if settle is None:
         # The paste-detection quirk belongs to the AGENT, not to the caller.
-        settle = _pane_settle(session, host)
+        from . import adapters
+        settle = adapters.settle_for(agent)
+    # A GATE on screen eats keystrokes and persists the answer — typing a prompt
+    # into a gated pane is a config write, not a no-op. Refuse unless forced.
+    if not force:
+        from . import adapters
+        code, screen, _ = _run_tmux(
+            ["capture-pane", "-t", session, "-p", "-S", "-12"], host=host)
+        gate = adapters.gated(agent, screen if code == 0 else "")
+        if gate:
+            return {
+                "ok": False, "error": "blocked_on_gate", "gate": gate,
+                "agent": agent, "session": session,
+                "hint": "This pane is showing a modal gate. Typing into it feeds "
+                        "the MENU, not the prompt — a digit can select an option "
+                        "and persist it. Resolve the gate deliberately (tmux_send "
+                        "with force=True and the exact key), then send your text.",
+            }
     if enter and settle and settle > 0:
         # Type the text, let the TUI leave paste-mode, THEN submit with a
         # separate Enter — otherwise a paste-detecting TUI swallows the newline.
