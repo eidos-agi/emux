@@ -2,6 +2,10 @@
 
 All notable changes to Emux are documented here.
 
+## v0.37.0 - 2026-07-13
+
+**"It's asking you" is now a first-class state.** A session that finished a turn and is asking you a question ("say the word on the proposal", "should I…?") is not a formal gate, so nothing used to flag it. Now `_quick_state` detects a question — a trailing `?` or a question phrase in the agent's last real output lines (chrome/composer stripped) — and marks the session `asking`. The live indicator swaps the heartbeat for a **pulsing `?`**, the status pip reads "asks you", and the box marches ants (it needs you), same as a formal gate.
+
 ## v0.36.0 - 2026-07-13
 
 **Fleet visibility + faster loads.**

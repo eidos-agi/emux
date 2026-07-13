@@ -977,12 +977,34 @@ def _capture_and_observe(session: str, lines: int, host: str | None = None) -> s
     return content
 
 
+_QUESTION_PHRASES = re.compile(
+    r"\b(do you want|would you like|should i|shall i|which (?:one|option|of)|"
+    r"let me know|your call|say the word|approve|amend|confirm|"
+    r"waiting (?:on|for) (?:you|your)|awaiting your|need (?:you|your)|"
+    r"want me to|proceed\?|go ahead\?)\b", re.I)
+# tmux chrome / composer lines to ignore when looking for the agent's own words
+_CHROME_RE = re.compile(r"^\s*(❯|>|⏵|›|»|─+|\[PONYTAIL\]|▶▶|▸▸)|esc to interrupt|shift\+tab",
+                        re.I)
+
+
+def _looks_like_question(content: str) -> bool:
+    """Is an IDLE agent asking the human something? Look at its last few real
+    output lines (dropping the composer/chrome) for a trailing '?' or a question
+    phrase — this catches "say the word on the proposal", "should I…?", etc.,
+    which are NOT formal gates but still need you."""
+    body = [ln.rstrip() for ln in content.splitlines()
+            if ln.strip() and not _CHROME_RE.search(ln)]
+    if not body:
+        return False
+    tail = " ".join(body[-6:]).strip()
+    return tail.endswith("?") or bool(_QUESTION_PHRASES.search(tail))
+
+
 def _quick_state(agent_key: str, content: str, needs_human: bool) -> str:
     """A cheap, per-poll status for at-a-glance fleet tracking — running /
-    waiting_human / error / idle. This is the coarse badge shown on every tile
-    and flow box so a manager (or human) sees each agent's status AND its subs'
-    without opening any of them. The full judge (`/api/classify`) is the precise
-    on-demand read; this is the always-on glance."""
+    waiting_human / asking / error / idle. Shown on every tile and flow box so a
+    manager (or human) sees each agent's status AND its subs' without opening any.
+    The full judge (`/api/classify`) is the precise on-demand read."""
     from . import adapters
     if needs_human:
         return "waiting_human"
@@ -991,6 +1013,9 @@ def _quick_state(agent_key: str, content: str, needs_human: bool) -> str:
         return "error"
     if any(s in low for s in adapters.busy_sigs_for(agent_key)):
         return "running"
+    # idle — but is it asking YOU something? then it needs you, not resting.
+    if _looks_like_question(content):
+        return "asking"
     return "idle"
 
 
@@ -1289,6 +1314,13 @@ body{
 .spip.st-error{color:var(--stale)}
 .spip.st-waiting_human{color:var(--amber);animation:orb 1.8s ease-in-out infinite}
 .spip.st-dead{color:var(--text-dim);opacity:.5}
+.spip.st-asking{color:var(--amber);animation:orb 1.6s ease-in-out infinite}
+/* it's asking YOU — a pulsing question mark in place of the heartbeat */
+.qmark{display:inline-flex;align-items:center;justify-content:center;
+  width:14px;height:14px;margin-right:6px;border-radius:50%;
+  background:var(--amber);color:var(--on-accent);font-weight:800;font-size:10px;
+  vertical-align:middle;animation:qpulse 1.1s ease-in-out infinite}
+@keyframes qpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,176,0,.5)}50%{box-shadow:0 0 0 4px rgba(255,176,0,0)}}
 /* a RUNNING agent shows a hospital-monitor heartbeat instead of a static dot */
 .ekg{width:30px;height:12px;flex:none;vertical-align:middle}
 .ekg polyline{fill:none;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}
@@ -1837,7 +1869,7 @@ function renderSidebar(){
   const box=$("#sessions");box.innerHTML="";
   shown().forEach(s=>{
     const d=document.createElement("div");
-    d.className="card"+(current&&current.name===s.name?" active":"")+(s.needs_human?" needy":"")+(s.live?"":" gone");
+    d.className="card"+(current&&current.name===s.name?" active":"")+(needsYou(s)?" needy":"")+(s.live?"":" gone");
     d.dataset.name=s.name;
     const att=s.attached?'<span class="att">●attached</span>':"";
     const up=s.live?uptime(s.created_unix):"";
@@ -1860,23 +1892,27 @@ function renderSidebar(){
   });
 }
 
-const STLABEL={running:"run",idle:"idle",error:"err",waiting_human:"needs you",dead:"gone"};
+const STLABEL={running:"run",idle:"idle",error:"err",asking:"asks you",waiting_human:"needs you",dead:"gone"};
 function statePip(s){const st=s.live?(s.state||"idle"):"dead";
   return '<span class="spip st-'+st+'">'+(STLABEL[st]||st)+'</span>';}
-// the live indicator: a heartbeat EKG when running, else a colored dot by state.
+// a session waiting on YOU — a formal gate, or it asked you a question.
+function needsYou(s){return s.needs_human||s.state==="asking"||s.state==="waiting_human";}
+// the live indicator: heartbeat EKG when running, a QUESTION MARK when it's
+// asking you something, else a colored dot by state.
 const EKG='<svg class="ekg" viewBox="0 0 44 16" preserveAspectRatio="none">'
   +'<polyline class="base" points="0,8 15,8 18,8 20,3 23,13 26,8 44,8"/>'
   +'<polyline class="beat" points="0,8 15,8 18,8 20,3 23,13 26,8 44,8"/></svg>';
 function liveDot(s){
   if(!s.live)return '<span class="dot stale"></span>';
   if(s.state==="running")return EKG;
+  if(s.state==="asking")return '<span class="qmark">?</span>';   // it's asking YOU
   const cls=s.state==="error"?"stale":(s.state==="waiting_human"?"warn":"live");
   return '<span class="dot '+cls+'"></span>';
 }
 
 function makeTile(s){
   const t=document.createElement("div");
-  t.className="tile"+(hot(s)?" hot":"")+(s.needs_human?" needy":"")+(s.live?"":" dead");
+  t.className="tile"+(hot(s)?" hot":"")+(needsYou(s)?" needy":"")+(s.live?"":" dead");
   const h=document.createElement("header");
   const att=s.attached?'<span class="att">●</span>':"";
   const ag=s.agent||{glyph:"",label:""};
@@ -1970,7 +2006,7 @@ function updateFlowPanes(){
   grid.forEach(s=>{
     const d=flowBox[s.name], pre=flowPre[s.name];
     if(!d||!pre)return;
-    d.className="fbox"+(hot(s)?" hot":"")+(s.needs_human?" needy":"")+(s.live?"":" dead");
+    d.className="fbox"+(hot(s)?" hot":"")+(needsYou(s)?" needy":"")+(s.live?"":" dead");
     const ag=d.querySelector(".ag");if(ag)ag.innerHTML=agentHTML(s);
     const sp=d.querySelector(".spip");if(sp){const st=s.live?(s.state||"idle"):"dead";
       sp.className="spip st-"+st;sp.textContent=STLABEL[st]||st;}
@@ -2074,7 +2110,7 @@ function renderFlow(){
   function box(s){
     const p=pos[s.name];
     const d=document.createElement("div");
-    d.className="fbox"+(hot(s)?" hot":"")+(s.needs_human?" needy":"")+(s.live?"":" dead");
+    d.className="fbox"+(hot(s)?" hot":"")+(needsYou(s)?" needy":"")+(s.live?"":" dead");
     d.style.left=p.x+"px";d.style.top=p.y+"px";d.style.width=BW+"px";
     const title='<div class="ftitle"><span class="lind">'+liveDot(s)+'</span>'
       +'<span class="nm">'+s.name+'</span>'+statePip(s)+'<span class="ag">'+agentHTML(s)+'</span></div>';
