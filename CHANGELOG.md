@@ -2,6 +2,18 @@
 
 All notable changes to Emux are documented here.
 
+## v0.12.0 - 2026-07-12
+
+- **Remote pull upgraded from `cat`-per-poll to a persistent `tail -F` follower.**
+  A remote session is now watched by ONE `ssh host tail -F -n +1` that streams the
+  remote inbox's lines into a LOCAL mirror file, so reads stay local (correct peek
+  + id-dedup) and a remote signal arrives the instant it's written, not on the
+  next poll tick. `-n +1` streams the whole file then follows (no startup gap);
+  `stdbuf -oL` line-buffers so a single signal flushes across ssh immediately;
+  the mirror is capped and the follower auto-restarts on drop (re-replay absorbed
+  by dedup). Falls back cleanly if no follower can start. Proven live against a
+  real box (eidos-bm): sub-second delivery (~0.23s) over one connection.
+
 ## v0.11.0 - 2026-07-12
 
 Remote fan-out: a parent hears a child on another machine, over BOTH channels.

@@ -94,6 +94,20 @@ def _signal_env(server, tmp_path, monkeypatch):
     monkeypatch.setattr(server, "REGISTRY_PATH", tmp_path / "reg.json")
 
 
+def test_remote_session_reads_from_local_mirror(tmp_path, monkeypatch):
+    """A remote session's inbox is read from the LOCAL mirror the tail follower
+    keeps — no ssh per read. (The live `ssh tail -F` follower is proven against
+    real hardware; here the follower is stubbed and the mirror pre-seeded.)"""
+    from emux import server
+    monkeypatch.setattr(server, "_INBOX_DIR", tmp_path / "inbox")
+    monkeypatch.setattr(server, "_ensure_mirror_tail", lambda host, name: None)
+    mirror = server._remote_mirror_path("rw")
+    mirror.parent.mkdir(parents=True, exist_ok=True)
+    mirror.write_text('{"id":"m1","t":1,"session":"rw","kind":"IDLE","payload":"x"}\n')
+    got = server._read_inbox("rw", host="somebox")
+    assert [x["id"] for x in got] == ["m1"] and got[0]["kind"] == "IDLE"
+
+
 def test_both_channels_deduped_by_id(tmp_path, monkeypatch):
     """A remote session's signals arrive via BOTH channels — the local inbox
     (where a child PUSHES) and the remote inbox (which the parent PULLS over ssh).

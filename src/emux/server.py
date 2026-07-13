@@ -27,6 +27,7 @@ Design principles:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import difflib
 import functools
 import hashlib
@@ -36,6 +37,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -205,16 +207,77 @@ def _parse_inbox_text(name: str, text: str) -> list[dict[str, Any]]:
     return out
 
 
-def _read_inbox(name: str, host: str | None) -> list[dict[str, Any]]:
-    """Every signal in a session's inbox — the LOCAL file, or a REMOTE box's file
-    over ssh (`ssh host cat …`; cheap when ssh ControlMaster multiplexing is on)."""
-    if host:
+# ── remote pull via a persistent tail follower (the efficiency/immediacy upgrade)
+# For a remote session we don't `ssh cat` on every poll. Instead ONE persistent
+# `ssh host tail -F` streams the remote inbox's new lines into a LOCAL mirror
+# file, so reads stay local (correct peek + id-dedup) and a remote signal arrives
+# the instant it is written, not on the next poll tick. Falls back to a one-shot
+# `ssh cat` if a follower can't be started.
+_tail_lock = threading.Lock()
+_tail_procs: dict[str, subprocess.Popen] = {}
+
+
+def _remote_mirror_path(name: str) -> Path:
+    return _INBOX_DIR / f"{_safe_name(name)}.remote.jsonl"
+
+
+def _ensure_mirror_tail(host: str, name: str) -> None:
+    """Guarantee a live `ssh tail -F` follower mirroring this remote session's
+    inbox into the local mirror file. Idempotent; restarts a dead follower and
+    re-seeds the backlog (id-dedup absorbs the overlap)."""
+    key = f"{host}::{name}"
+    with _tail_lock:
+        proc = _tail_procs.get(key)
+        if proc and proc.poll() is None:
+            return                                  # follower already live
+        mirror = _remote_mirror_path(name)
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        # cap the mirror so reconnect-replays don't grow it without bound (dedup
+        # keeps it correct regardless; this just bounds disk).
         try:
-            r = subprocess.run(["ssh", host, "cat", remote_inbox_relpath(name)],
-                               capture_output=True, text=True, timeout=15)
-            return _parse_inbox_text(name, r.stdout) if r.returncode == 0 else []
+            if mirror.is_file() and mirror.stat().st_size > 262_144:
+                tail_lines = mirror.read_text(errors="ignore").splitlines()[-1000:]
+                mirror.write_text("\n".join(tail_lines) + "\n")
         except Exception:
-            return []
+            pass
+        rel = shlex.quote(remote_inbox_relpath(name))
+        # `tail -F -n +1` streams the WHOLE file then follows — no startup gap for
+        # a line written while the follower attaches (id-dedup absorbs the replay).
+        # `stdbuf -oL` line-buffers so a single new signal flushes across ssh at
+        # once instead of waiting for a full block buffer.
+        remote = (f"touch {rel} 2>/dev/null; "
+                  f"if command -v stdbuf >/dev/null 2>&1; then exec stdbuf -oL tail -F -n +1 {rel}; "
+                  f"else exec tail -F -n +1 {rel}; fi")
+        try:
+            fh = open(mirror, "a")                   # noqa: SIM115 — owned by the child proc
+            proc = subprocess.Popen(["ssh", host, remote],
+                                    stdout=fh, stderr=subprocess.DEVNULL, text=True)
+            _tail_procs[key] = proc
+        except Exception:
+            pass
+
+
+def _stop_tails() -> None:
+    with _tail_lock:
+        for proc in _tail_procs.values():
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        _tail_procs.clear()
+
+
+atexit.register(_stop_tails)
+
+
+def _read_inbox(name: str, host: str | None) -> list[dict[str, Any]]:
+    """Every signal in a session's inbox — the LOCAL file, or, for a remote
+    session, the LOCAL MIRROR kept fresh by a persistent `ssh tail -F` follower
+    (so reads stay local; no ssh per poll)."""
+    if host:
+        _ensure_mirror_tail(host, name)
+        m = _remote_mirror_path(name)
+        return _parse_inbox_text(name, m.read_text()) if m.is_file() else []
     p = _inbox_path(name)
     return _parse_inbox_text(name, p.read_text()) if p.is_file() else []
 
