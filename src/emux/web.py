@@ -288,6 +288,60 @@ def _routing_prefs() -> dict[str, Any]:
     return prefs
 
 
+# ---------------------------------------------------------------------------
+# Plan failover facade — when a session (esp. the manager) runs its Claude
+# account out of tokens, switch it to ANOTHER account in code: exit the agent,
+# relaunch under that account's CLAUDE_CONFIG_DIR, and resume the conversation.
+# Deterministic (tmux only, no LLM). Accounts are configured, never logged-in by
+# emux — the human owns credentials.
+#   ~/.config/emux/plans.json:
+#   {"plans": [{"name":"acct-1","config_dir":"~/.claude"},
+#              {"name":"acct-2","config_dir":"~/.claude-acct2"}]}
+# ---------------------------------------------------------------------------
+_PLANS_PATH = Path.home() / ".config" / "emux" / "plans.json"
+_SESSION_PLAN: dict[str, str] = {}      # session -> plan name it's currently on
+_PLAN_EXHAUSTED: dict[str, float] = {}  # plan name -> unix time it may be retried
+_PLAN_COOLDOWN = 5 * 3600.0             # assume a Claude usage window is ~5h if unknown
+
+
+def _plans() -> list[dict[str, str]]:
+    """Configured Claude accounts to fail over between. Falls back to a single
+    default plan (the current ~/.claude) so nothing breaks unconfigured."""
+    default = [{"name": "default", "config_dir": str(Path.home() / ".claude")}]
+    try:
+        data = json.loads(_PLANS_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return default
+    out = []
+    for p in data.get("plans") or []:
+        name, cfg = str(p.get("name", "")).strip(), str(p.get("config_dir", "")).strip()
+        if name and cfg:
+            out.append({"name": name, "config_dir": os.path.expanduser(cfg)})
+    return out or default
+
+
+def _plan_available(name: str, now: float) -> bool:
+    reset = _PLAN_EXHAUSTED.get(name)
+    return reset is None or now >= reset
+
+
+def _next_plan(current: str | None, now: float) -> dict[str, str] | None:
+    """The next configured plan that isn't the current one and isn't still
+    cooling down from its own exhaustion. Round-robin from the current."""
+    plans = _plans()
+    if not plans:
+        return None
+    order = plans
+    if current:
+        idx = next((i for i, p in enumerate(plans) if p["name"] == current), -1)
+        if idx >= 0:
+            order = plans[idx + 1:] + plans[:idx + 1]   # start after current, wrap
+    for p in order:
+        if p["name"] != current and _plan_available(p["name"], now):
+            return p
+    return None
+
+
 def _company_by_key(key: str | None) -> dict[str, str] | None:
     """An explicit company override on a registry entry (e.g. a remote worker
     whose cwd we can't see locally, or a manager). Maps the key to its pill."""
@@ -1551,6 +1605,45 @@ def send_payload(session: str, keys: str, literal: bool = True, enter: bool = Tr
     return {"ok": True, "session": session, "sent": keys, "literal": literal, "enter": enter}
 
 
+def _switch_plan(session: str, host: str | None = None, to: str | None = None,
+                 dry_run: bool = False) -> dict[str, Any]:
+    """Fail a session over to another Claude account, in code: exit the agent,
+    relaunch under the target account's CLAUDE_CONFIG_DIR, and resume (`claude -c`).
+    Deterministic — tmux only, no LLM. `dry_run` returns the exact plan/commands
+    without touching the pane."""
+    now = time.time()
+    plans = _plans()
+    if len(plans) < 2 and to is None:
+        return {"ok": False, "error": "need ≥2 accounts in ~/.config/emux/plans.json"}
+    cur = _SESSION_PLAN.get(session) or (plans[0]["name"] if plans else None)
+    if to is not None:
+        target = next((p for p in plans if p["name"] == to), None)
+        if target is None:
+            return {"ok": False, "error": f"unknown plan {to!r}"}
+    else:
+        target = _next_plan(cur, now)
+    if target is None:
+        return {"ok": False, "error": "no available account (all cooling down)"}
+    cfg = target["config_dir"]
+    relaunch = f"CLAUDE_CONFIG_DIR={shlex.quote(cfg)} claude -c"
+    info = {"from": cur, "to": target["name"], "config_dir": cfg, "relaunch": relaunch}
+    if dry_run:
+        return {"ok": True, "dry_run": True, **info}
+    # 1. clear any partial input, then exit the agent cleanly to a shell
+    send_payload(session, "Escape", literal=False, enter=False, host=host)
+    send_payload(session, "/exit", literal=True, enter=True, host=host)
+    time.sleep(2.0)   # let the agent tear down to the shell prompt
+    # 2. relaunch under the target account, continuing the conversation
+    r = send_payload(session, relaunch, literal=True, enter=True, host=host)
+    if not r.get("ok"):
+        return {"ok": False, "error": "relaunch_failed", **info}
+    # 3. record the switch and cool down the account we just left
+    _SESSION_PLAN[session] = target["name"]
+    if cur:
+        _PLAN_EXHAUSTED[cur] = now + _PLAN_COOLDOWN
+    return {"ok": True, **info}
+
+
 PAGE = r"""<!doctype html>
 <html lang="en">
 <head>
@@ -1712,6 +1805,8 @@ body{
   background:#a06800;color:#fff;text-align:center;padding:9px 12px;font-weight:600;
   box-shadow:0 2px 14px rgba(160,104,0,.5)}
 #costbanner u{text-underline-offset:3px}
+#modalswitch.hot{border-color:#d99a00;color:#d99a00;font-weight:700}
+#modalswitch.armed{background:#a06800;color:#fff;border-color:#a06800;font-weight:700}
 body.costalert #costbanner{display:block;animation:costbannerpulse 1.4s ease-in-out infinite}
 body.costalert.hneedy #costbanner{top:38px}   /* stack under the hancock banner if both */
 @keyframes costbannerpulse{0%,100%{background:#a06800}50%{background:#c48400}}
@@ -2277,6 +2372,7 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
       <span class="ag" id="modalagent"></span>
       <span id="modalthink"><span class="tdots"><i></i><i></i><i></i></span>thinking <b>0s</b></span>
       <span class="st" id="modalstatus">live</span>
+      <button id="modalswitch" title="fail this session over to another Claude account (exits + relaunches + resumes)" onclick="switchPlan()">⇄ switch account</button>
       <button id="modaliterm" title="open this session in a new iTerm2 window (attached tmux)">⧉ iTerm2</button>
       <button id="modalclose">✕ close</button>
     </div>
@@ -2638,6 +2734,26 @@ function updateCostBanner(){
 }
 // jump to a cost-limited session so you can act on it (the grid badges mark the rest)
 function focusCost(){const hit=(grid||[]).filter(costHit);if(hit.length)openModal(hit[0]);}
+// fail this session over to another Claude account — dry-run first (shows where it
+// goes), a second click within 4s confirms and does the code switch.
+let switchArmed=null;
+async function switchPlan(){
+  if(!modalSession)return;const sess=modalSession.session;const b=$("#modalswitch");
+  const post=body=>api("/api/plan/switch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  if(switchArmed!==sess){
+    const r=await post({session:sess,dry_run:true});
+    if(!r.ok){b.textContent="⇄ "+(r.error||"no plan");setTimeout(()=>b.textContent="⇄ switch account",3500);return;}
+    switchArmed=sess;b.textContent="⇄ confirm → "+r.to+"?";b.classList.add("armed");
+    setTimeout(()=>{if(switchArmed===sess){switchArmed=null;b.textContent="⇄ switch account";b.classList.remove("armed");}},4000);
+    return;
+  }
+  switchArmed=null;b.classList.remove("armed");b.textContent="⇄ switching…";
+  const r=await post({session:sess});
+  b.textContent="⇄ switch account";
+  const st=$("#modalstatus");
+  if(r.ok){st.textContent="switched → "+r.to;st.style.color="var(--live)";tchatLog("bot","↻ failed over to account "+r.to+" — resuming.");}
+  else{st.textContent="switch failed: "+(r.error||"?");st.style.color="var(--stale)";}
+}
 // the live indicator: heartbeat EKG when running, a QUESTION MARK when it's
 // asking you something, else a colored dot by state.
 const EKG='<svg class="ekg" viewBox="0 0 44 16" preserveAspectRatio="none">'
@@ -3015,6 +3131,8 @@ function openModal(s){
   $("#modaldigest").className="";$("#modaldigest .dgtext").textContent="";$("#modaldigest .dgsugg").innerHTML="";
   setPending("");$("#modalthink").className="";
   tOpts=[];tSugg=[];tchatCollapsed=false;tLoggedDigest="";$("#tchatlog").innerHTML="";
+  switchArmed=null;$("#modalswitch").textContent="⇄ switch account";$("#modalswitch").className="";
+  $("#modalswitch").classList.toggle("hot",!!s.cost);   // highlight when this session is throttled
   $("#tchatsess").textContent=s.name;$("#tchat").className="collapsed";renderTChat();
   $("#modal").classList.add("open");
   modalRefresh();clearInterval(modalTimer);modalTimer=setInterval(modalRefresh,1200);
@@ -3656,6 +3774,14 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         if url.path == "/api/models":
             self._json({"ok": True, "config": _model_config(), "tasks": list(_TASKS)})
             return
+        if url.path == "/api/plans":
+            now = time.time()
+            plans = [{**p, "available": _plan_available(p["name"], now),
+                      "resets_in": max(0, int((_PLAN_EXHAUSTED.get(p["name"], now)) - now))}
+                     for p in _plans()]
+            self._json({"ok": True, "plans": plans, "session_plan": dict(_SESSION_PLAN),
+                        "count": len(plans)})
+            return
         if url.path == "/api/agents":
             from . import agents as _agents
             q = (parse_qs(url.query).get("scenario") or [""])[0]
@@ -3686,7 +3812,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         if url.path not in ("/api/send", "/api/head", "/api/spawn", "/api/suggest",
                             "/api/adopt", "/api/reply",
                             "/api/hancock/approve", "/api/hancock/deny",
-                            "/api/models", "/api/models/test"):
+                            "/api/models", "/api/models/test", "/api/plan/switch"):
             self._json({"ok": False, "error": "not_found"}, 404)
             return
         if not self._host_allowed():
@@ -3732,6 +3858,15 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/models/test":
             self._json(_nim_ping())
+            return
+        if url.path == "/api/plan/switch":
+            sess = (data.get("session") or "").strip()
+            if not sess:
+                self._json({"ok": False, "error": "missing_session"}, 400)
+                return
+            self._json(_switch_plan(sess, host=_session_host(sess),
+                                    to=(data.get("to") or None),
+                                    dry_run=bool(data.get("dry_run"))))
             return
         if url.path in ("/api/hancock/approve", "/api/hancock/deny"):
             rid = (data.get("id") or "").strip()

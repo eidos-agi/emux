@@ -676,3 +676,31 @@ def test_cost_overrun_detection():
         assert web._cost_overrun("work\n" + c) is True, c
     for c in miss:
         assert web._cost_overrun("work\n" + c) is False, c
+
+
+def test_plan_failover_facade(monkeypatch):
+    """Round-robin to the next account, skip cooling-down ones, dry-run yields the
+    exact relaunch command, and a single account can't fail over."""
+    import time
+    from emux import web
+
+    PLANS = [{"name": "acct-1", "config_dir": "/x/.claude"},
+             {"name": "acct-2", "config_dir": "/x/.claude-2"},
+             {"name": "acct-3", "config_dir": "/x/.claude-3"}]
+    monkeypatch.setattr(web, "_plans", lambda: PLANS)
+    web._SESSION_PLAN.clear()
+    web._PLAN_EXHAUSTED.clear()
+    now = time.time()
+
+    assert web._next_plan("acct-1", now)["name"] == "acct-2"
+    web._PLAN_EXHAUSTED["acct-2"] = now + 9999          # cooling down → skip it
+    assert web._next_plan("acct-1", now)["name"] == "acct-3"
+
+    r = web._switch_plan("mgr", dry_run=True)
+    assert r["ok"] and r["to"] == "acct-3"
+    assert r["relaunch"] == "CLAUDE_CONFIG_DIR=/x/.claude-3 claude -c"
+    assert web._switch_plan("mgr", to="acct-2", dry_run=True)["to"] == "acct-2"
+
+    # a single configured account can't fail over
+    monkeypatch.setattr(web, "_plans", lambda: [{"name": "d", "config_dir": "/x/.claude"}])
+    assert web._switch_plan("s", dry_run=True)["ok"] is False

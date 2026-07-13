@@ -4,6 +4,14 @@ All notable changes to Emux are documented here.
 
 ## v0.55.0 - 2026-07-13
 
+- **Plan failover facade — switch a session to another Claude account, in code.** When a session (especially the manager) runs its account out of tokens, emux can fail it over to another configured Claude account: it exits the agent, relaunches under that account's `CLAUDE_CONFIG_DIR`, and resumes the conversation (`claude -c`). Deterministic — tmux only, no LLM in the loop. Round-robins to the next available account and cools down an exhausted one (~5h) so it isn't retried too soon.
+  - Configure accounts in `~/.config/emux/plans.json` (`{"plans":[{"name","config_dir"}...]}`); unconfigured falls back to a single default and the switch is guarded (needs >=2). You log each profile in — emux never touches credentials.
+  - UI: a "⇄ switch account" button in the session modal (highlighted when that session is throttled). First click dry-runs and shows the target account; a second click within 4s confirms and does the switch. `GET /api/plans`, `POST /api/plan/switch` ({session, to?, dry_run?}).
+  - Detection (v0.54 regex) feeds this; ML/log-based detection and auto-switch are the next steps.
+
+
+## v0.55.0 - 2026-07-13
+
 - **Manager-operable login gates.** When a managed session logs out (or is on the wrong account), supervision no longer dead-ends until a human finds the pane.
   - **Detect:** the Tier-0 classifier flags a login/auth sequence on screen (logged-out banner, "Select login method", OAuth URL + paste-code prompt) as `waiting_human` with a new **`login_gate`** flag and a "Needs login" summary, so `tmux_classify` surfaces it as actionable.
   - **Navigate:** `emux login <target>` (+ MCP `tmux_login`) drives the sequence with deterministic keystrokes — sends `/login`, steps the TUI, and prints the OAuth URL (the one hop that needs a browser). Finish with `--code <paste>`; success is verified from the screen. `--switch` changes account (`/logout` first). Works by registry name across hosts; the code is never persisted and is redacted from the audit trail.
