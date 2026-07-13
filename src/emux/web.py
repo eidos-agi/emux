@@ -427,6 +427,73 @@ def _claude_json(prompt: str, timeout: int = 90) -> dict[str, Any]:
         return {"_error": "unparseable JSON", "raw": m.group(0)[:300]}
 
 
+_NEW_VERBS = ("create", "new ", "start a new", "start new", "spin up", "spin-up",
+              "build a", "build me", "set up", "set-up", "make a", "make me",
+              "i want a", "i want an", "i need a", "i need an", "launch a",
+              "fresh", "from scratch", "stand up", "spawn")
+_RESUME_VERBS = ("resume", "pick up", "pick back up", "continue", "reattach",
+                 "re-attach", "reconnect", "get back to", "back to the",
+                 "the one i was", "that i had", "already running", "existing",
+                 "still running", "left off")
+
+
+def _bm25_rank(intent: str, sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rank running sessions by lexical relevance to the intent (BM25 over
+    name+path+description+tags). Cheap, stdlib, no API — the resume path presents
+    the LLM a RELEVANCE-ORDERED list instead of raw registration order, so
+    "the greenmark reconcile work" floats the reconcile session to the top.
+
+    Deliberately lexical-only for now: at this fleet size the LLM reads the whole
+    (ranked) list, so dense embeddings + RRF would be scale-work for no gain.
+    When the fleet outgrows what fits in one prompt, add a dense ranker and fuse
+    with this via RRF — this function is the bm25 leg of that."""
+    import math
+    from collections import Counter
+
+    def tok(s: str) -> list[str]:
+        return re.findall(r"[a-z0-9]+", (s or "").lower())
+    docs = [tok(" ".join([s.get("name", ""), s.get("path", ""),
+                          s.get("description", ""), " ".join(s.get("tags") or [])]))
+            for s in sessions]
+    if not any(docs):
+        return sessions
+    n = len(docs)
+    avgdl = sum(len(d) for d in docs) / n or 1.0
+    df: Counter = Counter()
+    for d in docs:
+        df.update(set(d))
+    q = tok(intent)
+    k1, b = 1.5, 0.75
+    scored = []
+    for s, d in zip(docs, sessions):  # noqa: B905 (py3.9 compat, equal-length)
+        tf = Counter(s)
+        score = sum(
+            math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5))
+            * (tf[t] * (k1 + 1)) / (tf[t] + k1 * (1 - b + b * len(s) / avgdl))
+            for t in q if t in tf)
+        scored.append((score, d))
+    order = sorted(range(len(scored)), key=lambda i: scored[i][0], reverse=True)
+    return [dict(scored[i][1], _relevance=round(scored[i][0], 2)) for i in order]
+
+
+def _new_vs_resume_lean(intent: str) -> str:
+    """A deterministic keyword lean, fed to the model as a HINT (not an override).
+
+    The AI over-weighted a name match ("...manager" → resume the running
+    ggo-manager) against an explicit "I want to create". This lifts the wording
+    signal so the model weighs it, without hard-coding the decision."""
+    low = f" {(intent or '').lower()} "
+    n = sum(1 for v in _NEW_VERBS if v in low)
+    r = sum(1 for v in _RESUME_VERBS if v in low)
+    if n > r:
+        return ('the wording leans NEW — they used create/new/build/"I want a" '
+                "language, so treat a similarly-named running session as a "
+                "coincidence, not a resume target")
+    if r > n:
+        return "the wording leans RESUME — they pointed at an existing session"
+    return "the wording is neutral — decide from what they actually describe"
+
+
 def _suggest_session(intent: str, host: str | None = None) -> dict[str, Any]:
     """Turn plain English into a session, by CLASSIFYING it down the cascade of
     real choices — never by inventing values.
@@ -472,9 +539,20 @@ def _suggest_session(intent: str, host: str | None = None) -> dict[str, Any]:
                 "why": f"could not list anything on {chosen_host}", "verified": False}
 
     # --- step 3: resume something already there, or start fresh in a directory? ---
+    lean = _new_vs_resume_lean(intent)
+    # enrich with registry description/tags, then rank by BM25 relevance so the
+    # session the intent describes floats to the top of what the LLM picks from.
+    reg = _server._load_registry()
+    reg_by_session = {e.get("session"): e for e in reg.values()}
+    for s in running:
+        e = reg_by_session.get(s["name"]) or {}
+        s.setdefault("description", e.get("description") or "")
+        s.setdefault("tags", e.get("tags") or [])
+    running = _bm25_rank(intent, running)
     sess_list = "\n".join(
         f"  [{i}] {s['name']} — {_ago(s['age_sec'])} old, {s['path']}"
         f"{' (attached)' if s['attached'] else ''}"
+        f"{'  [most relevant]' if i == 0 and s.get('_relevance', 0) > 0 else ''}"
         for i, s in enumerate(running)) or "  (none running)"
     dir_list = "\n".join(f"  [{i}] {d}" for i, d in enumerate(dirs)) or "  (none)"
     r2 = _claude_json(
@@ -482,6 +560,7 @@ def _suggest_session(intent: str, host: str | None = None) -> dict[str, Any]:
         f"WHAT THEY SAID: {intent}\n\n"
         "They can either RESUME a session already running on that machine, or "
         "start a NEW one in a directory. Choose the one that matches what they said.\n\n"
+        f"PHRASING HINT (from their wording, weigh it — do not obey blindly): {lean}\n\n"
         f"ALREADY RUNNING ON {chosen_host} (resume one of these):\n{sess_list}\n\n"
         f"DIRECTORIES ON {chosen_host} (start a new session in one of these):\n{dir_list}\n\n"
         'Reply with ONE line of JSON, nothing else:\n'
@@ -489,9 +568,12 @@ def _suggest_session(intent: str, host: str | None = None) -> dict[str, Any]:
         '"dir_index": <int, only if new>, "name": "<short-kebab-session-name>", '
         '"command": "<command for a NEW session; empty string for a plain shell>", '
         '"why": "<one short sentence>"}\n'
-        'Use action "resume" when they refer to something already running / '
-        'existing / "pick up" / "resume" / "the one I was working on". '
-        'Use "new" when they describe fresh work. Indices MUST come from the '
+        'Resume ONLY when they point at an EXISTING session ("resume", "pick up", '
+        '"continue", "reattach", "the one I was working on"). If they say CREATE / '
+        'NEW / START / BUILD / SET UP / "I want a ___", it is a NEW session EVEN IF '
+        'a running session has a similar name — naming the KIND of thing to make '
+        '(a manager, a worker, a bot) is NOT a request to resume something. '
+        'Indices MUST come from the '
         "lists above. If they ask for the most recent, note the lists are "
         "ordered newest-first."
     )

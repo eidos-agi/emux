@@ -2,6 +2,13 @@
 
 All notable changes to Emux are documented here.
 
+## v0.30.0 - 2026-07-13
+
+**New-vs-resume: the wording now lifts the decision without overpowering it.** "I want to create an Eidos manager. He manages Kai…" was resolving to RESUME the existing `ggo-manager` — a name-match beating an explicit "create". Fixed two ways:
+
+- **A deterministic keyword lean** (`_new_vs_resume_lean`) scores create-verbs vs resume-verbs in the phrasing and passes the model a HINT ("the wording leans NEW — treat a similarly-named running session as a coincidence"), which it weighs rather than obeys. The prompt now says naming the KIND of thing to make (a manager, a worker) is NOT a resume request. Verified: the exact phrase now returns `new`, name `eidos-manager`.
+- **BM25 session ranking on the resume path** (`_bm25_rank`): when the AI does resume, running sessions are ranked by lexical relevance (name + path + description + tags) so the one the intent describes floats to the top of what the model picks from — "the greenmark reconcile work" ranks the `…/reconcile` session first. Lexical-only by design: at this fleet size the model reads the whole ranked list, so dense embeddings + RRF would be scale-work for no gain. This is the bm25 leg to fuse later when the fleet outgrows one prompt.
+
 ## v0.29.0 - 2026-07-13
 
 **The control room sees remote workers.** The web daemon only ever talked to LOCAL tmux, so a registered session on another machine (a rentamac worker) showed as "gone", its modal failed to capture (`TMUX_CAPTURE_FAILED`, blank pane), and its classifier was stale — even while the worker was alive and working. Found the hard way: a laptop slept, the ssh attach died, the remote worker survived (as tmux is meant to), and the control room reported it dead.

@@ -520,3 +520,20 @@ def test_remote_session_reads_live_and_captures_over_ssh(monkeypatch):
     cap = web.capture_payload("wrk", 10, host=web._session_host("wrk"))
     assert cap["ok"] and cap["host"] == "rentamac" and "remote pane" in cap["content"]
     assert ("capture-pane", "rentamac") in calls
+
+
+def test_bm25_ranks_the_session_the_intent_describes_to_the_top():
+    from emux import web
+    sessions = [
+        {"name": "ggo-build", "path": "/Volumes/GREENMARK/eidos-spreadsheet-explorer"},
+        {"name": "cerebro-claude", "path": "/Volumes/GREENMARK/cerebro-registry-workbench/reconcile"},
+        {"name": "api-server", "path": "/Users/x/repos/api"},
+    ]
+    ranked = web._bm25_rank("pick up the greenmark reconcile work", sessions)
+    assert ranked[0]["name"] == "cerebro-claude"          # reconcile in the path
+    assert ranked[0]["_relevance"] > ranked[1]["_relevance"]
+    assert ranked[-1]["name"] == "api-server"             # irrelevant → last
+    # description + tags feed the ranking too
+    s2 = [{"name": "w1", "path": "/x", "description": "hancock auth work", "tags": []},
+          {"name": "w2", "path": "/y", "description": "", "tags": ["greenmark"]}]
+    assert web._bm25_rank("the hancock auth session", s2)[0]["name"] == "w1"
