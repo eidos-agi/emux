@@ -2,6 +2,13 @@
 
 All notable changes to Emux are documented here.
 
+## v0.19.0 - 2026-07-12
+
+**The new-session choices are a cascade, not a flat form.** Which directories exist depends on which machine you picked — so the machine is resolved FIRST and everything below it is derived from that real machine.
+
+- **Per-machine directories.** `GET /api/dirs?host=…` lists the repo trees that actually exist on that box (local: glob; remote: one ssh round-trip, cached 2m). Changing the machine in the UI re-derives the directory options and clears any path from the previous machine. Previously the directory autocomplete was always the LOCAL tree, so choosing a remote host offered `/Users/...` paths that cannot exist there.
+- **AI placement is now classification down the cascade, not generation.** `✦ suggest` asks `claude -p` (fixed-cost CLI, never the API) to (1) choose the MACHINE from the real host list, then (2) choose the DIRECTORY **by index** from the directories that actually exist on THAT machine. The path is picked from real options rather than invented, and the reply carries `verified: true` to say so. Tick "pin this machine" to fix step 1 yourself and let it only choose the directory.
+
 ## v0.18.0 - 2026-07-12
 
 - **`+ NEW SESSION` button — start a session from the control room.** Pick the machine (local, or any `~/.ssh/config` alias / host already in the registry), the directory, and the command; optionally have an iTerm2 window open attached to it. New `POST /api/spawn` (wraps `tmux_spawn`, so remote works) and `GET /api/hosts`.

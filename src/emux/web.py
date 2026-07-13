@@ -211,47 +211,58 @@ def _known_hosts() -> list[str]:
     return out
 
 
-def _candidate_dirs(limit: int = 160) -> list[str]:
-    """Plausible working directories to start a session in: the repo trees."""
-    home = Path.home()
+_DIRS_CACHE: dict[str, tuple[float, list[str]]] = {}
+_DIRS_TTL = 120.0
+
+
+def _candidate_dirs(host: str | None = None, limit: int = 200) -> list[str]:
+    """Working directories that ACTUALLY EXIST on `host` (None/local = this box).
+
+    The choices cascade: which directories you can start a session in depends on
+    which machine you picked, so this is always resolved against a real machine —
+    never a local list handed to a remote spawn."""
+    key = host or "local"
+    hit = _DIRS_CACHE.get(key)
+    if hit and (time.time() - hit[0]) < _DIRS_TTL:
+        return hit[1]
     dirs: list[str] = []
-    for base in sorted(home.glob("repos*")):
-        if not base.is_dir():
-            continue
-        for d in sorted(base.iterdir()):
-            if d.is_dir() and not d.name.startswith("."):
-                dirs.append(str(d))
-    return dirs[:limit]
+    if key == "local":
+        for base in sorted(Path.home().glob("repos*")):
+            if base.is_dir():
+                dirs.extend(str(d) for d in sorted(base.iterdir())
+                            if d.is_dir() and not d.name.startswith("."))
+    else:
+        import subprocess
+        try:
+            # one ssh round-trip; list the repo trees one level deep
+            proc = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", key,
+                 "for b in ~/repos*; do [ -d \"$b\" ] && "
+                 "for d in \"$b\"/*/; do [ -d \"$d\" ] && echo \"${d%/}\"; done; done"],
+                capture_output=True, text=True, timeout=25,
+            )
+            if proc.returncode == 0:
+                dirs = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+        except (subprocess.TimeoutExpired, OSError):
+            dirs = []
+    dirs = dirs[:limit]
+    _DIRS_CACHE[key] = (time.time(), dirs)
+    return dirs
 
 
-def _suggest_session(intent: str) -> dict[str, Any]:
-    """Ask `claude -p` (fixed-cost CLI — never the API) where to start a session
-    for what the user wants to do. Returns {name, cwd, command, host, why}."""
+def _claude_json(prompt: str, timeout: int = 90) -> dict[str, Any]:
+    """One fixed-cost `claude -p` call that must answer with a JSON object.
+    Never the API — the CLI only."""
     import shutil
     import subprocess
     claude = shutil.which("claude")
     if claude is None:
         return {"_error": "claude CLI not on PATH"}
-    dirs = _candidate_dirs()
-    hosts = _known_hosts()
-    prompt = (
-        "You place a new terminal (tmux) session for a developer.\n\n"
-        f"WHAT THEY WANT TO DO: {intent}\n\n"
-        f"MACHINES: {hosts}\n\n"
-        "CANDIDATE WORKING DIRECTORIES (pick the best fit, or a sensible "
-        "subdirectory of one):\n" + "\n".join(f"  {d}" for d in dirs) + "\n\n"
-        "Reply with ONE line of JSON, nothing else:\n"
-        '{"name": "<short-kebab-session-name>", "host": "<machine from MACHINES>", '
-        '"cwd": "<absolute path>", "command": "<command to run, e.g. claude or a '
-        'shell command; empty for a plain shell>", "why": "<one short sentence>"}\n'
-        "Prefer a cockpit directory for planning/strategy work, and the relevant "
-        "repo for code work. Use host \"local\" unless the intent names a machine."
-    )
     try:
         proc = subprocess.run(
             [claude, "-p", prompt, "--model",
              os.environ.get("EMUX_NAV_MODEL", "claude-haiku-4-5-20251001")],
-            capture_output=True, text=True, timeout=90,
+            capture_output=True, text=True, timeout=timeout,
         )
     except (subprocess.TimeoutExpired, OSError) as e:
         return {"_error": f"claude -p failed: {e}"}
@@ -262,6 +273,80 @@ def _suggest_session(intent: str) -> dict[str, Any]:
         return json.loads(m.group(0))
     except json.JSONDecodeError:
         return {"_error": "unparseable JSON", "raw": m.group(0)[:300]}
+
+
+def _suggest_session(intent: str, host: str | None = None) -> dict[str, Any]:
+    """Turn plain English into a session, by CLASSIFYING it down the cascade of
+    real choices — never by inventing values.
+
+    The choices depend on each other: the machine determines which directories
+    exist, so we resolve the machine FIRST, enumerate that machine's real repo
+    dirs, and only then choose among THOSE. The model picks by index from a list
+    of things that actually exist, so it cannot hallucinate a path onto a box.
+
+    `host` pins the machine (the user already chose it) and skips step 1.
+    """
+    hosts = _known_hosts()
+
+    # --- step 1: which machine? (skipped when the user already picked one) ---
+    if host:
+        chosen_host, host_why = host, ""
+    else:
+        r1 = _claude_json(
+            "Pick the MACHINE to start a terminal session on.\n\n"
+            f"WHAT THE USER WANTS TO DO: {intent}\n\n"
+            "MACHINES (choose exactly one of these names):\n"
+            + "\n".join(f"  {h}" for h in hosts) + "\n\n"
+            'Reply with ONE line of JSON: {"host": "<one of the names above>", '
+            '"why": "<short reason>"}\n'
+            'Choose "local" unless the intent clearly names a remote machine or '
+            "needs one (heavy compute, a server-side service, a box by name)."
+        )
+        if "_error" in r1:
+            return r1
+        chosen_host = r1.get("host") or "local"
+        host_why = r1.get("why") or ""
+        if chosen_host not in hosts:          # constrain to a real machine
+            chosen_host = "local"
+
+    # --- step 2: what actually exists ON that machine ---
+    dirs = _candidate_dirs(None if chosen_host == "local" else chosen_host)
+    if not dirs:
+        return {"host": chosen_host, "name": "", "cwd": "", "command": "",
+                "why": (host_why + " — could not list directories on "
+                        f"{chosen_host}; enter one manually.").strip(" —"),
+                "dirs": [], "verified": False}
+
+    # --- step 3: choose among THOSE directories (a constrained choice, by index) ---
+    listing = "\n".join(f"  [{i}] {d}" for i, d in enumerate(dirs))
+    r2 = _claude_json(
+        f"Place a terminal session on machine '{chosen_host}'.\n\n"
+        f"WHAT THE USER WANTS TO DO: {intent}\n\n"
+        "DIRECTORIES THAT EXIST ON THIS MACHINE — choose ONE by its index:\n"
+        f"{listing}\n\n"
+        'Reply with ONE line of JSON: {"dir_index": <int>, '
+        '"name": "<short-kebab-session-name>", '
+        '"command": "<command to run, e.g. claude; empty string for a plain shell>", '
+        '"why": "<one short sentence: why this directory>"}\n'
+        "Prefer a cockpit directory for planning/strategy work and the relevant "
+        "repo for code work. dir_index MUST be one of the indices listed above."
+    )
+    if "_error" in r2:
+        return r2
+    idx = r2.get("dir_index")
+    cwd, verified = "", False
+    if isinstance(idx, int) and 0 <= idx < len(dirs):
+        cwd, verified = dirs[idx], True   # a real dir on that machine, not invented
+    why = " ".join(x for x in (host_why, r2.get("why") or "") if x).strip()
+    return {
+        "host": chosen_host,
+        "name": r2.get("name") or "",
+        "cwd": cwd,
+        "command": r2.get("command") or "",
+        "why": why,
+        "dirs": dirs,          # so the UI's directory choices match the machine
+        "verified": verified,  # the path was CHOSEN from real dirs, not invented
+    }
 
 
 def _spawn_session(data: dict[str, Any]) -> dict[str, Any]:
@@ -751,6 +836,9 @@ body::after{
 #newbody .fgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 #newbody .chk{display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--amber-dim)}
 #newbody .chk input{width:auto}
+#newbody .chk.pin{margin-top:6px;font-size:10px;opacity:.75}
+#newbody input:disabled{opacity:.5}
+#dircount{opacity:.7}
 #newsuggest{background:transparent;border:1px solid var(--amber-faint);color:var(--amber-dim);
   font-family:inherit;font-size:12px;cursor:pointer;padding:0 14px;white-space:nowrap}
 #newsuggest:hover{color:var(--amber);border-color:var(--amber-dim)}
@@ -879,10 +967,14 @@ body::after{
       </div>
       <div id="newwhy"></div>
       <div class="fgrid">
-        <div><label>machine</label><select id="newhost"></select></div>
+        <div>
+          <label>machine<small>changes what directories exist below</small></label>
+          <select id="newhost"></select>
+          <label class="chk pin"><input type="checkbox" id="newpin"> pin this machine when suggesting</label>
+        </div>
         <div><label>name</label><input id="newname" placeholder="session name" autocomplete="off"></div>
       </div>
-      <label>directory</label>
+      <label>directory<small id="dircount"></small></label>
       <input id="newcwd" list="dirlist" placeholder="/Users/…" autocomplete="off">
       <datalist id="dirlist"></datalist>
       <label>command<small>empty = plain shell</small></label>
@@ -1425,20 +1517,39 @@ $("#modaliterm").onclick=async()=>{
   b.textContent=r.ok?"⧉ opened":("✕ "+(r.error||"failed"));
   setTimeout(()=>{b.textContent=was;b.disabled=false;},r.ok?1400:3000);
 };
-// ---- new session ----
+// ---- new session (a CASCADE: machine → its real dirs → command) ----
 let hostsLoaded=false;
+function setDirs(dirs){
+  $("#dirlist").innerHTML=(dirs||[]).map(d=>'<option value="'+d+'">').join("");
+  $("#dircount").textContent=(dirs&&dirs.length)?(dirs.length+" dirs on this machine"):"no dirs found";
+}
 async function loadHosts(){
   if(hostsLoaded)return;
   const r=await api("/api/hosts");
   if(!r.ok)return;
   $("#newhost").innerHTML=(r.hosts||[]).map(h=>'<option value="'+h+'">'+h+'</option>').join("");
-  $("#dirlist").innerHTML=(r.dirs||[]).map(d=>'<option value="'+d+'">').join("");
   hostsLoaded=true;
+}
+// the machine determines which directories exist — re-derive them on every change
+async function loadDirsFor(host){
+  $("#dircount").textContent="listing "+host+"…";
+  setDirsBusy(true);
+  const r=await api("/api/dirs?host="+encodeURIComponent(host));
+  setDirsBusy(false);
+  if(!r.ok){$("#dircount").textContent="could not list "+host;setDirs([]);return;}
+  setDirs(r.dirs);
+}
+function setDirsBusy(b){$("#newcwd").disabled=b;}
+async function onHostChange(){
+  const h=$("#newhost").value;
+  $("#newcwd").value="";          // a path from the old machine is meaningless here
+  $("#newwhy").textContent="";
+  await loadDirsFor(h);
 }
 function openNew(){
   $("#newmodal").classList.add("open");
   $("#newerr").textContent="";$("#newwhy").textContent="";$("#newstatus").textContent="";
-  loadHosts();
+  (async()=>{await loadHosts();await loadDirsFor($("#newhost").value||"local");})();
   setTimeout(()=>$("#newintent").focus(),40);
 }
 function closeNew(){$("#newmodal").classList.remove("open");}
@@ -1446,16 +1557,20 @@ async function doSuggest(){
   const intent=$("#newintent").value.trim();
   if(!intent){$("#newerr").textContent="describe what you want to do first";return;}
   const b=$("#newsuggest");b.disabled=true;b.textContent="thinking…";
-  $("#newerr").textContent="";$("#newstatus").textContent="asking claude";
+  $("#newerr").textContent="";
+  // if the user already picked a machine, that pins the cascade; else claude picks it
+  const pinned=$("#newpin").checked?$("#newhost").value:"";
+  $("#newstatus").textContent=pinned?("choosing a dir on "+pinned):"choosing machine → dir";
   const r=await api("/api/suggest",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({intent})});
+    body:JSON.stringify({intent,host:pinned})});
   b.disabled=false;b.textContent="✦ suggest";$("#newstatus").textContent="";
   if(!r.ok){$("#newerr").textContent=r.error||"suggest failed";return;}
+  if(r.host){$("#newhost").value=r.host;}
+  if(r.dirs)setDirs(r.dirs);             // the dirs it actually chose from
   if(r.name)$("#newname").value=r.name;
   if(r.cwd)$("#newcwd").value=r.cwd;
   if(r.command!==undefined)$("#newcmd").value=r.command||"";
-  if(r.host)$("#newhost").value=r.host;
-  $("#newwhy").textContent=r.why?("✦ "+r.why):"";
+  $("#newwhy").textContent=r.why?((r.verified?"✦ ":"⚠ unverified path — ")+r.why):"";
 }
 async function doCreate(){
   const name=$("#newname").value.trim();
@@ -1470,6 +1585,7 @@ async function doCreate(){
   closeNew();$("#newintent").value="";$("#newname").value="";$("#newcmd").value="";
   refresh();
 }
+$("#newhost").onchange=onHostChange;   // the cascade: machine → its real dirs
 $("#newbtn").onclick=openNew;
 $("#newclose").onclick=closeNew;
 $("#newback").onclick=closeNew;
@@ -1597,7 +1713,13 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": str(e)})
             return
         if url.path == "/api/hosts":
-            self._json({"ok": True, "hosts": _known_hosts(), "dirs": _candidate_dirs()})
+            self._json({"ok": True, "hosts": _known_hosts()})
+            return
+        if url.path == "/api/dirs":
+            # directories that exist ON the chosen machine — the cascade's 2nd level
+            h = (parse_qs(url.query).get("host") or ["local"])[0]
+            dirs = _candidate_dirs(None if h in ("", "local") else h)
+            self._json({"ok": True, "host": h, "dirs": dirs})
             return
         self._json({"ok": False, "error": "not_found"}, 404)
 
@@ -1623,7 +1745,9 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             if not intent:
                 self._json({"ok": False, "error": "missing_intent"}, 400)
                 return
-            r = _suggest_session(intent)
+            # a machine the user already picked pins the cascade; else the model picks it
+            pinned = (data.get("host") or "").strip()
+            r = _suggest_session(intent, host=pinned or None)
             if "_error" in r:
                 self._json({"ok": False, "error": r["_error"]})
             else:
