@@ -134,9 +134,12 @@ def capture_payload(session: str, lines: int = 300) -> dict[str, Any]:
 # that all report as "node". Glyphs are monochrome Unicode to match the theme.
 # (key, label, glyph, command-name substrings, content substrings)
 _AGENT_TABLE = [
-    ("claude", "Claude Code", "✳", ("claude",), ("claude code", "anthropic")),
+    ("claude", "Claude Code", "✳", ("claude",),
+     ("claude code", "anthropic", "esc to interrupt", "? for shortcuts", "bypass permissions")),
     ("codex", "Codex", "◇", ("codex",), ("openai codex", "codex cli")),
     ("gemini", "Gemini", "♊", ("gemini",), ("gemini cli", "google gemini")),
+    ("grok", "Grok", "⚡", ("grok",), ("grok", "xai")),
+    ("opencode", "opencode", "❖", ("opencode",), ("opencode",)),
     ("hermes", "Hermes", "☿", ("hermes",), ("hermes", " nous ")),
     ("aider", "Aider", "✦", ("aider",), ("aider ",)),
 ]
@@ -166,6 +169,9 @@ def _detect_agent(session: str, content: str) -> dict[str, str]:
         return {"agent": "shell", "label": "shell", "glyph": "$"}
     if cmd in _EDITORS:
         return {"agent": "editor", "label": cmd, "glyph": "✎"}
+    # Claude Code retitles its pane to a bare version string (e.g. "2.1.207").
+    if re.match(r"^\d+\.\d+\.\d+", cmd):
+        return {"agent": "claude", "label": "Claude Code", "glyph": "✳"}
     if cmd:
         return {"agent": cmd, "label": cmd, "glyph": "▸"}
     return {"agent": "unknown", "label": "—", "glyph": "·"}
@@ -441,6 +447,10 @@ body::after{
 }
 .fbox pre.empty{color:var(--text-dim);font-style:italic;justify-content:center;text-align:center}
 .agentbadge{color:var(--amber-dim);font-size:10px;letter-spacing:1px;margin-left:6px}
+.agi{font-weight:700}
+.ag-claude{color:#d97757}.ag-codex{color:#10a37f}.ag-gemini{color:#5a8dff}
+.ag-grok{color:#e8e8e8}.ag-opencode{color:#b57bff}.ag-aider{color:#f0a020}
+.ag-hermes{color:#b07de0}.ag-shell{color:#8a8a72}.ag-editor{color:#8a8a72}
 .edge{stroke:var(--amber);stroke-width:2;fill:none;stroke-dasharray:7 5;animation:flow 1.1s linear infinite;
   filter:drop-shadow(0 0 4px rgba(255,176,0,.4))}
 @keyframes flow{to{stroke-dashoffset:-12}}
@@ -705,7 +715,7 @@ function renderSidebar(){
     const att=s.attached?'<span class="att">●attached</span>':"";
     const up=s.live?uptime(s.created_unix):"";
     const ag=s.agent||{glyph:"",label:""};
-    const agspan=(s.live&&ag.label&&ag.label!=="—")?'<span>'+ag.glyph+' '+ag.label+'</span>':"";
+    const agspan=(s.live&&ag.label&&ag.label!=="—")?'<span>'+agentHTML(s)+'</span>':"";
     const tagspans=(s.tags||[]).map(t=>'<span class="tagjump" data-tag="'+t+'">#'+t+'</span>').join("");
     const badges=(s.registered?"<span>registered</span>":"<span>unregistered</span>")
       +agspan+(s.attached?"<span>attached</span>":"")+tagspans;
@@ -727,7 +737,7 @@ function makeTile(s){
   const h=document.createElement("header");
   const att=s.attached?'<span class="att">●</span>':"";
   const ag=s.agent||{glyph:"",label:""};
-  const agbadge=(s.live&&ag.label&&ag.label!=="—")?'<span class="agentbadge">'+ag.glyph+' '+ag.label+'</span>':"";
+  const agbadge=(s.live&&ag.label&&ag.label!=="—")?'<span class="agentbadge">'+agentHTML(s)+'</span>':"";
   h.innerHTML='<span class="dot '+(s.live?"live":"stale")+'"></span><span class="nm">'+s.name+att+'</span>'+agbadge
     +'<span class="age '+(s.live?ageClass(s.last_change_age):"t-old")+'">'+(s.live?ageLabel(s.last_change_age):"gone")+'</span>';
   const p=document.createElement("pre");
@@ -804,7 +814,9 @@ function renderActivity(){
 function el(tag,attrs){const e=document.createElementNS(SVGNS,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);return e;}
 
 function paneText(s){return (s.live&&s.content.trim())?s.content.replace(/\s+$/,"").split("\n").slice(-9).join("\n"):"";}
-function agentText(s){const ag=s.agent||{};return s.live?((ag.glyph?ag.glyph+" ":"")+(ag.label||"—")):"gone";}
+function agentHTML(s){const ag=s.agent||{};if(!s.live)return "gone";
+  const g=ag.glyph?'<span class="agi ag-'+(ag.agent||"x")+'">'+ag.glyph+'</span> ':'';
+  return g+(ag.label||"—");}
 
 // Update flow boxes in place (no DOM teardown) — keeps the panes LIVE and smooth.
 function updateFlowPanes(){
@@ -812,7 +824,7 @@ function updateFlowPanes(){
     const d=flowBox[s.name], pre=flowPre[s.name];
     if(!d||!pre)return;
     d.className="fbox"+(hot(s)?" hot":"")+(s.live?"":" dead");
-    const ag=d.querySelector(".ag");if(ag)ag.textContent=agentText(s);
+    const ag=d.querySelector(".ag");if(ag)ag.innerHTML=agentHTML(s);
     const txt=paneText(s);
     if(txt){pre.className="";if(pre.textContent!==txt)pre.textContent=txt;}
     else{pre.className="empty";pre.textContent=s.live?"(blank pane)":"tmux session gone";}
@@ -912,7 +924,7 @@ function renderFlow(){
     d.className="fbox"+(hot(s)?" hot":"")+(s.live?"":" dead");
     d.style.left=p.x+"px";d.style.top=p.y+"px";d.style.width=BW+"px";
     const title='<div class="ftitle"><span class="dot '+(s.live?"live":"stale")+'"></span>'
-      +'<span class="nm">'+s.name+'</span><span class="ag">'+agentText(s)+'</span></div>';
+      +'<span class="nm">'+s.name+'</span><span class="ag">'+agentHTML(s)+'</span></div>';
     const pre=document.createElement("pre");
     const txt=paneText(s);
     if(txt)pre.textContent=txt;else{pre.className="empty";pre.textContent=s.live?"(blank pane)":"tmux session gone";}
@@ -1047,7 +1059,7 @@ let modalSession=null, modalTimer=null;
 function openModal(s){
   modalSession=s;
   $("#modalname").textContent=s.name;
-  $("#modalagent").textContent=agentText(s);
+  $("#modalagent").innerHTML=agentHTML(s);
   $("#modalstatus").textContent="connecting…";$("#modalstatus").style.color="";
   const sc=$("#modalscreen");sc.textContent="";sc.dataset.last="";
   $("#modal").classList.add("open");

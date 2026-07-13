@@ -2,6 +2,12 @@
 
 All notable changes to Emux are documented here.
 
+## v0.14.0 - 2026-07-12
+
+- **`move_to_emux` MCP tool** — a Claude Code chat moves ITSELF into emux. Reads `CLAUDE_CODE_SESSION_ID` from the environment, derives the session's cwd from its transcript, and spawns a tmux window running `claude --resume <id>`, registered + managed like any other session (visible in the web control room, classifiable, steerable from the modal). One call turns the conversation you're in into a first-class fleet member.
+- **Per-window AI-tool icons, brand-colored.** Each session's tile/flow/modal shows the detected tool's glyph in its brand color — Claude ✳ (clay), Codex ◇ (green), Gemini ♊ (blue), Grok ⚡, opencode ❖ (purple), Aider ✦, Hermes ☿. Grok and opencode added to the detection table.
+- **Fixed: Claude Code sessions weren't detected as Claude.** Claude Code retitles its tmux pane to a bare version string (e.g. `2.1.207`), so the `"claude"` command-match never fired and it fell through to a generic `▸ 2.1.207` badge. Now a semver pane title resolves to Claude Code, and the content-signature fallback gained real TUI tells (`esc to interrupt`, `? for shortcuts`, `bypass permissions`).
+
 ## v0.13.0 - 2026-07-12
 
 - Added the deterministic **session-state classifier** (`emux/judge.py`) — Tier-0, no LLM. `classify()` labels a session running / planning / editing / waiting_external / waiting_human / thrashing / stuck / error / done_idle / dead, with confidence, a one-line summary, evidence, and orthogonal flags (token_waste, possible_exhaustion, hidden_wait, false_busy, dangerous_blocked). Signal-first: trusts the `@@EMUX@@` up-channel (DONE/ERROR/NEED) before scraping; stateless off the durable stream log. `tmux_classify` MCP tool wraps it.

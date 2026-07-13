@@ -2130,6 +2130,76 @@ async def tmux_wait(
         await asyncio.sleep(1.0)
 
 
+def _session_cwd(sid: str) -> str | None:
+    """The working directory a Claude Code session ran in, read from its own
+    transcript (~/.claude/projects/<slug>/<sid>.jsonl). Robust where slug→path
+    reversal is not (a project dir with a hyphen breaks the slug)."""
+    base = Path.home() / ".claude" / "projects"
+    if not base.is_dir():
+        return None
+    for d in base.iterdir():
+        f = d / f"{sid}.jsonl"
+        if not f.is_file():
+            continue
+        try:
+            with f.open() as fh:
+                for line in fh:
+                    try:
+                        o = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(o, dict) and o.get("cwd"):
+                        return str(o["cwd"])
+        except Exception:
+            return None
+    return None
+
+
+@mcp.tool()
+@audited
+async def move_to_emux(name: str | None = None, session_id: str | None = None,
+                       cwd: str | None = None, gui: bool = True) -> dict[str, Any]:
+    """Move the CURRENT Claude Code session INTO emux — resume this conversation
+    inside a driveable, emux-registered tmux window so emux can watch, classify,
+    and steer it from the web control room.
+
+    Called from inside Claude Code with NO args, it moves THIS chat: the session
+    id comes from `$CLAUDE_CODE_SESSION_ID` and the working dir from the session's
+    own transcript. It spawns a tmux session running `claude --resume <id>` (a GUI
+    window by default) and registers it.
+
+    CAVEAT: resuming makes a SECOND live copy of the conversation. Switch to the
+    new window and CLOSE the original terminal so only one instance stays live —
+    two instances writing the same transcript can conflict.
+
+    Args:
+        name: registry name for the moved session (default `chat-<id8>`).
+        session_id: session to move (default `$CLAUDE_CODE_SESSION_ID`).
+        cwd: dir to resume in (default: the session's own recorded cwd).
+        gui: open a visible terminal window (default True).
+
+    Returns:
+        {ok, name, session_id, cwd, attach, note} — or {ok:false, error}.
+    """
+    sid = session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid:
+        return {"ok": False, "error": "no_session_id",
+                "hint": "not inside a Claude Code session; pass session_id=<id>"}
+    workdir = cwd or _session_cwd(sid) or os.environ.get("HOME") or "."
+    reg_name = name or f"chat-{sid[:8]}"
+    resume = (f"cd {shlex.quote(workdir)} && "
+              f"claude --dangerously-skip-permissions --resume {shlex.quote(sid)}")
+    r = await tmux_spawn(name=reg_name, gui=gui, command=resume,
+                         description=f"Claude Code chat {sid[:8]} — moved into emux",
+                         tags=["claude", "chat", "moved"])
+    if not r.get("ok"):
+        return {"ok": False, "error": "spawn_failed", "detail": r}
+    return {"ok": True, "name": reg_name, "session_id": sid, "cwd": workdir,
+            "attach": f"tmux attach -t {reg_name}",
+            "note": ("A window opened with this conversation resumed. Switch to it and "
+                     "CLOSE the original terminal so only one copy stays live.")}
+
+
 def run_mcp_server() -> None:
     """Start the emux MCP server (stdio transport).
 
