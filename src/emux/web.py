@@ -137,20 +137,9 @@ def capture_payload(session: str, lines: int = 300) -> dict[str, Any]:
     return {"ok": True, "session": session, "content": out}
 
 
-# Which AI/tool is running in a pane. Primary signal is tmux's live foreground
-# process (`pane_current_command`); content signatures catch node-wrapped CLIs
-# that all report as "node". Glyphs are monochrome Unicode to match the theme.
-# (key, label, glyph, command-name substrings, content substrings)
-_AGENT_TABLE = [
-    ("claude", "Claude Code", "✳", ("claude",),
-     ("claude code", "anthropic", "esc to interrupt", "? for shortcuts", "bypass permissions")),
-    ("codex", "Codex", "◇", ("codex",), ("openai codex", "codex cli")),
-    ("gemini", "Gemini", "♊", ("gemini",), ("gemini cli", "google gemini")),
-    ("grok", "Grok", "⚡", ("grok",), ("grok", "xai")),
-    ("opencode", "opencode", "❖", ("opencode",), ("opencode",)),
-    ("hermes", "Hermes", "☿", ("hermes",), ("hermes", " nous ")),
-    ("aider", "Aider", "✦", ("aider",), ("aider ",)),
-]
+# (What each agent looks like in a pane now lives in emux/adapters.py — that is
+# part of the agent's contract, not a private table here.)
+
 # Which company/context a session belongs to, from its cwd.
 # (key, label, color, roots, keywords). `roots` are the repos-<x>/ trees and are
 # authoritative; `keywords` catch a company's repos that live in the generic
@@ -546,8 +535,6 @@ def _iterm_attach(session: str, host: str | None = None) -> tuple[bool, str | No
     return _iterm_run(f"tmux attach -t {shlex.quote(session)}", focus=False)
 
 
-_SHELLS = {"zsh", "-zsh", "bash", "-bash", "fish", "sh", "-sh"}
-_EDITORS = {"vim", "nvim", "vi", "nano", "emacs"}
 
 
 def _pane_command(session: str) -> str:
@@ -559,22 +546,20 @@ def _pane_command(session: str) -> str:
 
 
 def _detect_agent(session: str, content: str) -> dict[str, str]:
-    """Best-effort: which AI system / tool is currently running in the pane."""
+    """Which AI agent is running in this pane.
+
+    The ADAPTERS own this. What an agent looks like is part of that agent's
+    contract — the semver-pane-title trick is a Claude fact and belongs with
+    Claude, not in a private table in the web daemon."""
+    from . import adapters
     cmd = _pane_command(session).lower()
-    low = (content or "").lower()
-    for key, label, glyph, cmds, _sigs in _AGENT_TABLE:
-        if any(c in cmd for c in cmds):
-            return {"agent": key, "label": label, "glyph": glyph}
-    for key, label, glyph, _cmds, sigs in _AGENT_TABLE:
-        if any(s in low for s in sigs):
-            return {"agent": key, "label": label, "glyph": glyph}
-    if cmd in _SHELLS:
+    a = adapters.detect(cmd, content)
+    if a is not None:
+        return {"agent": a.key, "label": a.label, "glyph": a.glyph}
+    if cmd in adapters.SHELLS:
         return {"agent": "shell", "label": "shell", "glyph": "$"}
-    if cmd in _EDITORS:
+    if cmd in adapters.EDITORS:
         return {"agent": "editor", "label": cmd, "glyph": "✎"}
-    # Claude Code retitles its pane to a bare version string (e.g. "2.1.207").
-    if re.match(r"^\d+\.\d+\.\d+", cmd):
-        return {"agent": "claude", "label": "Claude Code", "glyph": "✳"}
     if cmd:
         return {"agent": cmd, "label": cmd, "glyph": "▸"}
     return {"agent": "unknown", "label": "—", "glyph": "·"}

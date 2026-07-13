@@ -2,6 +2,17 @@
 
 All notable changes to Emux are documented here.
 
+## v0.24.0 - 2026-07-13
+
+**One adapter per agent** (`emux/adapters.py`). emux only really knew how to drive ONE agent, and Claude-specific facts were smeared through general code: the semver pane-title trick in the web daemon, `esc to interrupt` inside the judge's regexes, `settle=0.4` in `tmux_send` (a workaround for *Claude's* paste detection), and a Stop hook as *the* way a worker reports done. Each of those is a per-agent contract wearing a general rule's clothes. They now live with their agent.
+
+Each adapter answers four questions: **DETECT** (what does it look like in a pane?), **DRIVE** (how do I type into it without the input being swallowed?), **READ** (how do I tell if it's working, blocked, or done?), **LIVE** (launch / resume / completion signal).
+
+- **`tmux_send` now takes its paste-settle from the pane's agent**, not from the caller. A Claude pane gets its measured 0.4s (text → wait → separate Enter); a shell gets none. Callers no longer have to know one agent's quirk. Cached per session, so it costs no round-trip per keystroke.
+- **Codex is a real adapter, not a glyph.** It has the same lifecycle as Claude and emux never knew: `codex resume <id>` / `--last`, `codex exec` for one-shot, and — the missing piece — **`notify` → `turn-ended`**, which is Codex's answer to Claude's Stop hook. Same idea: the harness fires at a real turn boundary, so nothing is scraped and the worker can't forget to report.
+- **Adapters declare what they DON'T know.** Codex's busy/approval regexes and paste-settle are unmeasured, so they are empty and reported as unknowns rather than inheriting Claude's numbers — a wrong `busy` regex makes the judge confidently mislabel a session. `adapters.table()` prints the honest matrix of detect/drive/read/resume per agent.
+- Detection is now single-source: `web._AGENT_TABLE` is gone.
+
 ## v0.23.0 - 2026-07-12
 
 **Which agent for which scenario — a registry, not folklore.** emux spawns sessions that run AI agents; which one to run was a decision living only in someone's head. `emux/agents.py` is the smallest thing that fixes that: a table you can read, query, and correct.

@@ -271,10 +271,16 @@ def test_send_by_registry_name_resolves(tmp_path, monkeypatch):
         return (0, "", "")
 
     monkeypatch.setattr(server, "_run_tmux", fake_run_tmux)
+    server._PANE_AGENT_CACHE.clear()
     result = asyncio.run(server.tmux_send(target="alpha", keys="echo hi", by_registry_name=True))
     assert result["ok"]
     assert result["resolved_session"] == "real-session-x"
-    assert captured_args[0] == ["send-keys", "-t", "real-session-x", "echo hi", "Enter"]
+    # tmux_send now asks the pane WHICH AGENT is running (to get that agent's
+    # paste-settle from its adapter) before typing. The send itself is unchanged.
+    assert ["display-message", "-p", "-t", "real-session-x",
+            "#{pane_current_command}"] in captured_args
+    sends = [a for a in captured_args if a[0] == "send-keys"]
+    assert sends == [["send-keys", "-t", "real-session-x", "echo hi", "Enter"]]
 
 
 def test_send_by_registry_name_unknown_returns_error(tmp_path, monkeypatch):

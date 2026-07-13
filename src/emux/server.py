@@ -936,6 +936,38 @@ async def tmux_unregister(name: str) -> dict[str, Any]:
     return {"ok": True, "name": name, "removed_entry": removed}
 
 
+_PANE_AGENT_CACHE: dict[str, tuple[float, str | None]] = {}
+_PANE_AGENT_TTL = 30.0
+
+
+def _pane_agent(session: str, host: str | None = None) -> str | None:
+    """Which agent is running in this pane — asks the adapters.
+
+    Cached briefly: a session's agent almost never changes, and this is on the
+    hot path of every send, so it must not cost a tmux round-trip per keystroke.
+    """
+    key = f"{host or ''}/{session}"
+    hit = _PANE_AGENT_CACHE.get(key)
+    if hit and (time.time() - hit[0]) < _PANE_AGENT_TTL:
+        return hit[1]
+    from . import adapters
+    code, out, _ = _run_tmux(
+        ["display-message", "-p", "-t", session, "#{pane_current_command}"], host=host)
+    if code != 0:
+        return None
+    a = adapters.detect(out.strip())
+    val = a.key if a else None
+    _PANE_AGENT_CACHE[key] = (time.time(), val)
+    return val
+
+
+def _pane_settle(session: str, host: str | None = None) -> float:
+    """The paste-detection settle for whatever agent is in this pane. 0 if we
+    haven't measured that agent — better than borrowing another agent's number."""
+    from . import adapters
+    return adapters.settle_for(_pane_agent(session, host))
+
+
 @mcp.tool()
 @audited
 async def tmux_send(
@@ -943,7 +975,7 @@ async def tmux_send(
     keys: str,
     enter: bool = True,
     by_registry_name: bool = False,
-    settle: float = 0.0,
+    settle: float | None = None,
 ) -> dict[str, Any]:
     """Send keystrokes to a tmux session.
 
@@ -960,10 +992,11 @@ async def tmux_send(
         enter: If True (default), append "Enter" to submit the command.
         by_registry_name: If True, resolve `target` via the registry.
         settle: Seconds to wait AFTER typing the text and BEFORE pressing Enter,
-            sending Enter as a separate keystroke. Use this to drive a TUI with
-            paste-detection (Claude Code, some REPLs): a fast text+Enter is read
-            as a multi-line PASTE and never submitted. `settle=0.3` types, waits,
-            then submits. Default 0 = the classic single send-keys.
+            sending Enter as a separate keystroke. A paste-detecting TUI (Claude
+            Code) reads a fast text+Enter as a multi-line PASTE and never submits
+            it. DEFAULT (None) = ask the ADAPTER for the agent actually running in
+            that pane — Claude gets its measured 0.4s, an agent we haven't measured
+            gets 0. Pass a number to override; pass 0 for the classic single send.
 
     Returns:
         {ok, target, resolved_session, sent} on success.
@@ -973,6 +1006,9 @@ async def tmux_send(
         return {"ok": False, "error": err or "not_registered", "name": target}
     if host is None and _resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
+    if settle is None:
+        # The paste-detection quirk belongs to the AGENT, not to the caller.
+        settle = _pane_settle(session, host)
     if enter and settle and settle > 0:
         # Type the text, let the TUI leave paste-mode, THEN submit with a
         # separate Enter — otherwise a paste-detecting TUI swallows the newline.
