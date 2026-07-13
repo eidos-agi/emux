@@ -588,3 +588,16 @@ def test_asking_state_summary_and_question_detection():
     pane = "⏺ Say the word on the routing proposal and I'll implement it.\n───\n❯ \n"
     assert web._looks_like_question(pane) is True
     assert web._quick_state("claude", pane, False) == "asking"
+
+
+def test_menu_parses_to_clickable_options_not_prose():
+    from emux import web
+    menu = ("❯ 1. Expose behind SSO\n  2. Expose open\n  3. Don't expose\n"
+            "Enter to select · ↑/↓ to navigate · Esc to cancel")
+    opts = web._parse_options(menu)
+    assert [o["n"] for o in opts] == [1, 2, 3]
+    assert opts[0]["selected"] is True and opts[1]["selected"] is False
+    # a numbered list in prose (no menu hint, no cursor) must NOT become bubbles
+    assert web._parse_options("Steps:\n1. a\n2. b\n3. c\nDone.") == []
+    # a claude selection menu is now a gate (marches ants)
+    assert web._detect_agent  # sanity

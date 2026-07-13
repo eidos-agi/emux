@@ -110,7 +110,10 @@ CLAUDE = Adapter(
     # text+Enter too fast trips paste detection; 0.4s lands it. Verified live.
     send_settle=0.4,
     busy_sigs=("esc to interrupt",),
-    approval_sigs=("do you want to proceed", "❯ 1. yes", "1. yes"),
+    # a y/n confirm OR a selection menu ("Enter to select · ↑/↓ to navigate")
+    # is the agent waiting on YOU to choose — a gate.
+    approval_sigs=("do you want to proceed", "❯ 1. yes", "1. yes",
+                   "enter to select", "↑/↓ to navigate", "to navigate · esc"),
     launch_flags=("--dangerously-skip-permissions",),
     resume_fmt="claude --resume {id}",
     oneshot_fmt="claude -p {prompt}",

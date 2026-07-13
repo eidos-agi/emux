@@ -2,6 +2,15 @@
 
 All notable changes to Emux are documented here.
 
+## v0.39.0 - 2026-07-13
+
+**You can tell when you're personally needed — and answer with a click.**
+
+- **A selection menu is now a gate.** A Claude "Enter to select · ↑/↓ to navigate" menu (or a y/n) marks the session `waiting_human` → it marches ants in the grid AND flow. Previously only formal y/n gates counted, so a session sitting on a multi-option menu looked idle.
+- **Broadened "needs you" text detection** for idle sessions that stated a decision is needed without a literal `?`: "decision needed", "waiting on you", "your call/input/approval", "approve/amend", "blocking the fleet", "pick one", etc. → state `asking` (pulsing `?` + ants).
+- **Gate detection restricted to the live bottom of the pane** (last ~10 lines), so a session that merely PRINTED menu text up in its scrollback isn't falsely flagged.
+- **Clickable answer bubbles.** When a session shows a numbered menu, the modal renders each option as a **clickable bubble** overlaying the chat (`_parse_options` — only for a real menu, never a prose list). Clicking navigates the ❯ cursor from where it is to your choice and presses Enter — universal across Claude/Codex cursor menus, no reliance on digit-select. Answer a fleet's prompts with taps instead of attaching to each terminal.
+
 ## v0.38.0 - 2026-07-13
 
 **A super-cheap always-on "what's happening" rail — no model, no GPU.** A thin rail sits above each session's terminal box with a one-line, plain-English read of what the agent is doing right now; hover it for the full text.

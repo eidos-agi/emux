@@ -199,7 +199,8 @@ def capture_payload(session: str, lines: int = 300,
         host=host, timeout=20)
     if code != 0:
         return {"ok": False, "error": "tmux_capture_failed", "stderr": err}
-    return {"ok": True, "session": session, "host": host, "content": out}
+    return {"ok": True, "session": session, "host": host, "content": out,
+            "options": _parse_options(out)}   # clickable menu bubbles, if a menu is up
 
 
 # (What each agent looks like in a pane now lives in emux/adapters.py — that is
@@ -969,7 +970,10 @@ def _capture_and_observe(session: str, lines: int, host: str | None = None) -> s
     # (every Claude pane has those in scrollback); that over-fires on everything.
     # The UI marches ants around a genuinely-blocked session so you can't miss it.
     from . import adapters
-    needs_human = bool(adapters.gated(agent_key, content))
+    # a real gate/menu lives at the LIVE BOTTOM of the pane — only look there, so
+    # a session that merely PRINTED menu text up in its scrollback isn't flagged.
+    tail = "\n".join(content.splitlines()[-10:])
+    needs_human = bool(adapters.gated(agent_key, tail))
     state = _quick_state(agent_key, content, needs_human)
     summary = _summarize(agent.get("label", ""), state, content)
     with _LOCK:
@@ -1014,6 +1018,38 @@ def _headline(content: str) -> str:
     return ""
 
 
+_OPT_RE = re.compile(r"^\s*(❯|>|›|▶)?\s*(\d{1,2})[.)]\s+(\S.*?)\s*$")
+
+
+def _parse_options(content: str) -> list[dict[str, Any]]:
+    """Pull a numbered selection menu out of the live pane, so the UI can offer
+    it as CLICKABLE BUBBLES. Only fires when a menu is genuinely on screen — a
+    navigate/select hint near the bottom, or a ❯-cursored numbered list — not any
+    stray numbered list in the agent's prose."""
+    lines = content.splitlines()
+    tail = "\n".join(lines[-12:]).lower()
+    has_menu_hint = ("to navigate" in tail or "enter to select" in tail
+                     or "esc to cancel" in tail)
+    opts, cursor = [], False
+    for ln in lines[-14:]:
+        m = _OPT_RE.match(ln)
+        if m:
+            sel = bool(m.group(1))
+            cursor = cursor or sel
+            opts.append({"n": int(m.group(2)), "label": m.group(3).strip()[:70],
+                         "selected": sel})
+    # need ≥2 options AND (a menu hint OR a ❯ cursor) to be sure it's a real menu
+    if len(opts) >= 2 and (has_menu_hint or cursor):
+        # de-dupe by number, keep order
+        seen, out = set(), []
+        for o in opts:
+            if o["n"] not in seen:
+                seen.add(o["n"])
+                out.append(o)
+        return out
+    return []
+
+
 def _summarize(agent_label: str, state: str, content: str) -> str:
     """A super-cheap, LOCAL, always-on one-liner of what a session is doing right
     now — the 'thin rail' text. Deterministic (state verb + the last real output
@@ -1028,8 +1064,12 @@ def _summarize(agent_label: str, state: str, content: str) -> str:
 _QUESTION_PHRASES = re.compile(
     r"\b(do you want|would you like|should i|shall i|which (?:one|option|of)|"
     r"let me know|your call|say the word|approve|amend|confirm|"
-    r"waiting (?:on|for) (?:you|your)|awaiting your|need (?:you|your)|"
-    r"want me to|proceed\?|go ahead\?)\b", re.I)
+    r"waiting (?:on|for) (?:you|your)|awaiting your|need(?:s)? (?:you|your)|"
+    r"want me to|proceed\?|go ahead\?|"
+    # requests that aren't literal questions but still need the human:
+    r"decision needed|needs? (?:a |your )?decision|your (?:input|approval|sign-?off|go-?ahead)|"
+    r"blocking the fleet|which do you (?:want|prefer)|pick (?:one|an option)|"
+    r"enter to select|↑/↓ to navigate)\b", re.I)
 # tmux chrome / composer lines to ignore when looking for the agent's own words
 _CHROME_RE = re.compile(r"^\s*(❯|>|⏵|›|»|─+|\[PONYTAIL\]|▶▶|▸▸)|esc to interrupt|shift\+tab",
                         re.I)
@@ -1614,6 +1654,20 @@ body{
 .s-running{color:#8fd88f}.s-done_idle{color:#8a8a72}.s-error{color:#ff5f56}
 .s-thrashing{color:#ff9f43}.s-stuck{color:#ffb000}.s-waiting_human{color:#38d9ff}
 .s-waiting_external{color:#7a8fd8}.s-planning{color:#d0b24a}.s-editing{color:#d0b24a}.s-dead{color:#666}
+/* clickable answer bubbles — overlay the chat when the agent shows a menu */
+#modalopts{display:none}
+#modalopts.on{display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px 2px;
+  border-top:1px solid var(--amber-faint);background:var(--bg-raise)}
+#modalopts .ohint{flex-basis:100%;font-size:10px;letter-spacing:1px;text-transform:uppercase;
+  color:var(--amber-dim);margin-bottom:2px}
+.obub{background:var(--bg-card);border:1px solid var(--amber-faint);color:var(--text);
+  font-family:inherit;font-size:13px;padding:7px 13px;border-radius:16px;cursor:pointer;
+  transition:background .12s,border-color .12s;max-width:100%;text-align:left}
+.obub:hover{background:var(--amber);color:var(--on-accent);border-color:var(--amber)}
+.obub b{color:var(--amber-dim);margin-right:5px}
+.obub:hover b{color:var(--on-accent)}
+.obub.sel{border-color:var(--amber);box-shadow:0 0 0 1px var(--amber)}
+.obub:disabled{opacity:.5;cursor:default}
 #modalchips{display:flex;gap:8px;padding:10px 16px 0}
 #modalrow{display:flex;gap:10px;padding:10px 16px 14px}
 #modalinput{flex:1;background:var(--bg-card);border:1px solid var(--line);color:var(--text);
@@ -1686,6 +1740,7 @@ body{
     </div>
     <div id="modaljudge"></div>
     <div id="modalscreen"></div>
+    <div id="modalopts"></div>
     <div id="modalchips">
       <button class="chip" data-keys="C-c">^C</button>
       <button class="chip" data-keys="Escape">ESC</button>
@@ -2347,9 +2402,31 @@ async function modalRefresh(){
         const cur=document.createElement("span");cur.className="cursorblock";sc.appendChild(cur);
         if(atBottom)sc.scrollTop=sc.scrollHeight;
       }
+      renderOptions(r.options);   // a menu on screen → clickable bubbles
     }else{$("#modalstatus").textContent=r.error||"error";$("#modalstatus").style.color="var(--stale)";}
   }catch(e){$("#modalstatus").textContent="unreachable";$("#modalstatus").style.color="var(--stale)";}
   modalJudge();
+}
+// turn an on-screen numbered menu into clickable bubbles that answer it for you.
+function renderOptions(opts){
+  const box=$("#modalopts");
+  if(!opts||!opts.length){box.className="";box.innerHTML="";return;}
+  box.className="on";
+  box.innerHTML='<div class="ohint">pick one — it answers the prompt for you</div>'
+    +opts.map(o=>'<button class="obub'+(o.selected?" sel":"")+'" data-n="'+o.n+'">'
+      +'<b>'+o.n+'</b> '+esc(o.label)+'</button>').join("");
+  const send=k=>api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session:modalSession.session,keys:k,literal:false,enter:false})});
+  box.querySelectorAll(".obub").forEach(b=>b.onclick=async()=>{
+    box.querySelectorAll(".obub").forEach(x=>x.disabled=true);
+    // navigate the ❯ cursor from where it is to the target, then confirm — works
+    // for any cursor menu (Claude/Codex), no reliance on digit-select.
+    const target=+b.dataset.n, cur=((opts.find(o=>o.selected))||opts[0]).n;
+    const arrow=target>=cur?"Down":"Up";
+    for(let i=0;i<Math.abs(target-cur);i++){await send(arrow);await new Promise(r=>setTimeout(r,90));}
+    await send("Enter");
+    setTimeout(modalRefresh,500);
+  });
 }
 async function modalJudge(){
   if(!modalSession)return;
