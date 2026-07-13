@@ -810,11 +810,14 @@ def _reply_suggestions(session: str, host: str | None) -> dict[str, Any]:
         "to respond. Here is its recent output:\n<<<\n" + pane[-3500:] + "\n>>>\n\n"
         "Reply with ONE line of JSON, nothing else:\n"
         '{"digest": "<1-2 plain sentences: what the agent is doing, or the '
-        'decision/question it is waiting on>", "suggestions": ["<a short, '
-        'ready-to-send reply>", "..."]}\n'
+        'decision/question it is waiting on>", "suggestions": [{"text": "<a short, '
+        'ready-to-send reply>", "confidence": <0-100>}, ...]}\n'
         "Give 0-4 suggestions — each a concrete message the human could send RIGHT "
         "NOW to move it forward (approve, redirect, answer, ask a clarifier). Keep "
         "each under ~14 words, phrased as the human talking TO the agent. "
+        "For each, set `confidence` = how likely THIS reply is the right move for the "
+        "human right now (0-100). Make them genuinely comparative — the best option "
+        "high, weaker ones lower; they need not sum to 100. Order best-first. "
         "IMPORTANT: phrase each as a DECISIVE instruction that authorises the agent "
         "to PROCEED and finish autonomously without coming back to ask again — e.g. "
         "'yes, switch it and proceed — don't re-confirm' rather than a bare 'yes'. "
@@ -824,7 +827,16 @@ def _reply_suggestions(session: str, host: str | None) -> dict[str, Any]:
         "list and say so in the digest.", task="gist", timeout=45)
     if "_error" in r:
         return {"ok": False, "error": r["_error"]}
-    sugg = [s for s in (r.get("suggestions") or []) if isinstance(s, str) and s.strip()][:4]
+    sugg = []
+    for s in (r.get("suggestions") or [])[:4]:
+        if isinstance(s, dict) and str(s.get("text", "")).strip():
+            try:
+                conf = max(0, min(100, int(round(float(s.get("confidence", 50))))))
+            except (TypeError, ValueError):
+                conf = 50
+            sugg.append({"text": str(s["text"]).strip(), "confidence": conf})
+        elif isinstance(s, str) and s.strip():   # tolerate a plain-string reply
+            sugg.append({"text": s.strip(), "confidence": 50})
     return {"ok": True, "digest": (r.get("digest") or "").strip(), "suggestions": sugg}
 
 
@@ -2044,12 +2056,21 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
   display:flex;justify-content:space-between;align-items:center}
 #tchathead b{font-weight:800}
 #tchatmin{background:transparent;border:none;color:var(--on-accent);font-size:15px;cursor:pointer}
+#tchatlog{padding:9px 11px 0;display:flex;flex-direction:column;gap:6px;overflow:auto;max-height:26vh}
+#tchatlog:empty{display:none}
+.tcmsg{max-width:86%;padding:6px 10px;border-radius:11px;font-size:12px;line-height:1.35;white-space:pre-wrap;word-break:break-word}
+.tcmsg.bot{align-self:flex-start;background:var(--bg-card);color:var(--text-dim);border:1px solid var(--line)}
+.tcmsg.you{align-self:flex-end;background:var(--amber);color:var(--on-accent);font-weight:600}
 #tchatchips{padding:11px;display:flex;flex-direction:column;gap:7px;overflow:auto}
 .tc-opt,.tc-sug{border:none;border-radius:12px;padding:9px 13px;font-family:inherit;font-size:12.5px;
-  font-weight:600;cursor:pointer;text-align:left;box-shadow:0 2px 5px rgba(0,0,0,.18);transition:filter .12s}
+  font-weight:600;cursor:pointer;text-align:left;box-shadow:0 2px 5px rgba(0,0,0,.18);transition:filter .12s;
+  display:flex;align-items:center;gap:8px}
 .tc-opt{background:var(--amber);color:var(--on-accent)}
 .tc-opt b{opacity:.8;font-weight:800;margin-right:6px}
 .tc-sug{background:var(--bg-card);color:var(--text);border:1.5px solid var(--amber)}
+.tc-txt{flex:1}
+.cpie{flex:0 0 auto;width:16px;height:16px;border-radius:50%;box-shadow:inset 0 0 0 1px rgba(0,0,0,.15)}
+.cpct{flex:0 0 auto;font-size:11px;font-weight:800;color:#2ea043;min-width:30px}
 .tc-opt:hover,.tc-sug:hover{filter:brightness(1.1)}
 .tc-opt:disabled,.tc-sug:disabled{opacity:.5;cursor:default}
 .tc-opt.sel{box-shadow:0 0 0 2px var(--bg-raise),0 0 0 4px var(--amber)}
@@ -2153,6 +2174,7 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
       <button id="tchatlauncher" onclick="tchatToggle()">💬<span id="tchatbadge"></span></button>
       <div id="tchatpanel">
         <div id="tchathead"><span>💬 reply to <b id="tchatsess"></b></span><button id="tchatmin" onclick="tchatToggle()" title="minimize">▾</button></div>
+        <div id="tchatlog"></div>
         <div id="tchatchips"></div>
         <div id="tchatrow"><input id="tchatinput" placeholder="choose one, or type your reply…" autocomplete="off" spellcheck="false"><button id="tchatsend" onclick="tchatSend()">➤</button></div>
       </div>
@@ -2859,7 +2881,8 @@ function openModal(s){
   const sc=$("#modalscreen");sc.textContent="";sc.dataset.last="";
   $("#modaldigest").className="";$("#modaldigest .dgtext").textContent="";$("#modaldigest .dgsugg").innerHTML="";
   setPending("");$("#modalthink").className="";
-  tOpts=[];tSugg=[];tchatCollapsed=false;$("#tchatsess").textContent=s.name;$("#tchat").className="collapsed";renderTChat();
+  tOpts=[];tSugg=[];tchatCollapsed=false;tLoggedDigest="";$("#tchatlog").innerHTML="";
+  $("#tchatsess").textContent=s.name;$("#tchat").className="collapsed";renderTChat();
   $("#modal").classList.add("open");
   modalRefresh();clearInterval(modalTimer);modalTimer=setInterval(modalRefresh,1200);
   loadDigest();                                  // the gist + suggested replies, up front
@@ -2911,13 +2934,22 @@ async function loadDigest(){
     $("#modaldigest .dgtext").textContent="(couldn't summarize — "+(r.error||"")+")"+more;return;}
   digestErr=false;digestRetries=0;   // recovered
   $("#modaldigest .dgtext").textContent=r.digest||"(nothing notable)";
-  setSuggestions(r.suggestions||[]);   // gist replies become chips in the floating chat
+  if(r.digest&&r.digest!==tLoggedDigest){tchatLog("bot",r.digest);tLoggedDigest=r.digest;}  // the gist opens the chat
+  setSuggestions(r.suggestions||[]);   // gist replies become chips (with confidence pies)
 }
 // turn an on-screen numbered menu into clickable bubbles that answer it for you.
 // The choices for a terminal live in a floating chat LOCAL to that terminal:
 // on-screen menu options + the gist's suggested replies become quick chips, and
 // there's a box to type your own — choose one, or chat. (NCDMV-style.)
-let tOpts=[], tSugg=[], tchatCollapsed=false;
+let tOpts=[], tSugg=[], tchatCollapsed=false, tLoggedDigest="";
+// a green pie/wedge filled to the confidence %, shown on each suggested reply so you
+// can see at a glance how strong emux thinks that choice is.
+function pieHTML(pct){const p=Math.round(pct);
+  return '<span class="cpie" title="'+p+'% confidence" style="background:conic-gradient(#2ea043 '+p+'%,rgba(127,127,127,.26) 0)"></span>'
+    +'<span class="cpct">'+p+'%</span>';}
+function tchatLog(who,text){const log=$("#tchatlog");if(!log||!text)return;
+  const b=document.createElement("div");b.className="tcmsg "+who;b.textContent=text;
+  log.appendChild(b);log.scrollTop=log.scrollHeight;}
 function renderOptions(opts){ tOpts=opts||[]; renderTChat(); }   // a menu on screen → chips
 function setSuggestions(sugg){ tSugg=sugg||[]; renderTChat(); }  // gist replies → chips
 async function sendOption(target){
@@ -2935,14 +2967,18 @@ function renderTChat(){
   const chips=$("#tchatchips"); if(!chips)return;
   const parts=[];
   tOpts.forEach(o=>parts.push('<button class="tc-opt'+(o.selected?" sel":"")+'" data-n="'+o.n+'"><b>'+o.n+'</b> '+esc(o.label)+'</button>'));
-  tSugg.forEach((s,i)=>parts.push('<button class="tc-sug" data-i="'+i+'">'+esc(s)+'</button>'));
+  tSugg.forEach((s,i)=>{
+    const c=Math.max(0,Math.min(100,s.confidence==null?50:s.confidence));
+    parts.push('<button class="tc-sug" data-i="'+i+'">'+pieHTML(c)+'<span class="tc-txt">'+esc(s.text||"")+'</span></button>');
+  });
   chips.innerHTML=parts.join("")||'<div class="tc-empty">no suggestions right now — type your reply below</div>';
   const n=tOpts.length+tSugg.length;
   const badge=$("#tchatbadge");badge.textContent=n||"";badge.style.display=n?"inline-block":"none";
   chips.querySelectorAll(".tc-opt").forEach(b=>b.onclick=()=>{
     chips.querySelectorAll("button").forEach(x=>x.disabled=true);sendOption(+b.dataset.n);});
   chips.querySelectorAll(".tc-sug").forEach(b=>b.onclick=()=>{
-    const t=tSugg[+b.dataset.i];setPending(t);modalKeys(t,true,true);
+    const t=(tSugg[+b.dataset.i]||{}).text||"";if(!t)return;
+    setPending(t);tchatLog("you",t);modalKeys(t,true,true);
     tSugg=[];renderTChat();setTimeout(()=>{modalRefresh();loadDigest();},1500);});
   // when a real choice lands, float the chat open (unless the user minimized it)
   if(n&&!tchatCollapsed)$("#tchat").className="";
@@ -2954,7 +2990,7 @@ function tchatToggle(){
 }
 function tchatSend(){
   const i=$("#tchatinput");const t=i.value.trim();if(!t)return;
-  i.value="";setPending(t);
+  i.value="";setPending(t);tchatLog("you",t);
   modalKeys(t,true,true).then(ok=>{if(!ok){if(!i.value)i.value=t;setPending("");}});
 }
 async function modalJudge(){

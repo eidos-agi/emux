@@ -2,6 +2,12 @@
 
 All notable changes to Emux are documented here.
 
+## v0.50.0 - 2026-07-13
+
+- **Confidence pies on the choices, in the app.** Each suggested reply in the floating chat now shows a green pie/wedge filled to how likely emux thinks that reply is the right move, plus the %. The Gist returns a per-suggestion confidence (0-100, comparative, best-first); the chip renders it as a `conic-gradient` green wedge + a green % — so you can see at a glance which choice to trust.
+- **The floating chat now keeps a transcript.** The gist opens the conversation as an assistant bubble; your sends (chips or typed) echo as your-side bubbles, so the panel reads like a real chat local to that terminal.
+
+
 ## v0.49.0 - 2026-07-13
 
 - **Choices are now a floating per-terminal chat (choose one, or type).** Instead of a bar of option bubbles above the composer, a session's choices live in a floating chat widget local to that terminal (NCDMV-style). It gathers the on-screen menu options (solid chips — picking one walks the cursor and confirms) and the gist's suggested replies (bordered chips), plus a "choose one, or type your reply…" box for a custom message. It floats bottom-right, auto-opens when a real choice lands, and collapses to a launcher bubble with a count badge. The gist digest text stays where it was; only the interactive choices moved into the chat.
