@@ -124,6 +124,22 @@ def test_grid_payload_stale_session_has_no_capture(monkeypatch):
     assert item["activity"] == []
 
 
+def test_detect_company_maps_cwd_to_company():
+    from emux import web
+    cases = {
+        "/Users/x/repos-eidos-agi/helios": "eidos",
+        "/Users/x/repos-eidos-capital/v0": "eidos",
+        "/Users/x/repos-greenmark/university": "greenmark",
+        "/Users/x/repos-aic-holdings/foo": "aic",
+        "/Users/x/repos-personal/notes": "personal",
+        "/Users/x/repos-bv/aic-dashboard": "personal",
+        "/Users/x/some/other/path": "",
+        None: "",
+    }
+    for cwd, want in cases.items():
+        assert web._detect_company(cwd)["company"] == want, cwd
+
+
 def test_normalize_collapses_spinner_and_cursor_noise():
     from emux import web
     # A braille thinking spinner and trailing whitespace are not real change.

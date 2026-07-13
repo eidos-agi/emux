@@ -2,6 +2,10 @@
 
 All notable changes to Emux are documented here.
 
+## v0.16.0 - 2026-07-12
+
+- **Company classifier + filter.** Each session is tagged with the company/context that owns it — Eidos, Greenmark Waste, AIC, Jetta, Momentito, Rhea Impact, ASMP, Personal — derived deterministically from its working directory (`_detect_company`, keyed on the `repos-<x>/` prefix; no LLM). A colored company pill shows on each tile header and sidebar card, and the filter bar leads with filled company chips: click one to narrow every view to that company. Runs off the live pane's cwd, so it's accurate the moment a session is doing real work.
+
 ## v0.15.0 - 2026-07-12
 
 - **Tag filter in the sidebar.** A chip bar under the session filter lists every tag across the fleet with its count; click one to narrow the whole view (grid / groups / activity / flow / sidebar) to sessions carrying that tag, click again (or `✕ all`) to clear. A card's own `#tag` chips now toggle the same filter instead of jumping to the groups anchor — one consistent "filter to this tag" gesture.

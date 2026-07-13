@@ -83,6 +83,7 @@ def sessions_payload() -> dict[str, Any]:
     sessions = []
     for name, entry in sorted(registry.items()):
         target = entry.get("session")
+        cwd = live_by_name.get(target, {}).get("cwd") or entry.get("cwd")
         sessions.append({
             "name": name,
             "session": target,
@@ -93,6 +94,8 @@ def sessions_payload() -> dict[str, Any]:
             "live": target in live_by_name,
             "attached": live_by_name.get(target, {}).get("attached", False),
             "created_unix": live_by_name.get(target, {}).get("created_unix"),
+            "cwd": cwd,
+            "company": _detect_company(cwd),
         })
     registered_targets = {e.get("session") for e in registry.values()}
     for s in live:
@@ -108,6 +111,8 @@ def sessions_payload() -> dict[str, Any]:
             "live": True,
             "attached": s.get("attached", False),
             "created_unix": s.get("created_unix"),
+            "cwd": s.get("cwd"),
+            "company": _detect_company(s.get("cwd")),
         })
     return {"ok": True, "sessions": sessions}
 
@@ -143,6 +148,29 @@ _AGENT_TABLE = [
     ("hermes", "Hermes", "☿", ("hermes",), ("hermes", " nous ")),
     ("aider", "Aider", "✦", ("aider",), ("aider ",)),
 ]
+# Which company/context a session belongs to — keyed on its cwd path prefix.
+# (key, label, color, path-substrings). First match wins, so order specific→general.
+_COMPANY_TABLE = [
+    ("eidos", "Eidos", "#7dd3fc", ("repos-eidos-agi", "repos-eidos-capital")),
+    ("greenmark", "Greenmark Waste", "#7bd88f", ("repos-greenmark",)),
+    ("aic", "AIC", "#c4a3ff", ("repos-aic", "repos-aic-holdings")),
+    ("jetta", "Jetta", "#ffb27d", ("repos-jetta",)),
+    ("momentito", "Momentito", "#ff9ecf", ("repos-momentito",)),
+    ("rhea", "Rhea Impact", "#9ae6e6", ("repos-rheaimpact",)),
+    ("asmp", "ASMP", "#d0c0a0", ("repos-asmp",)),
+    ("personal", "Personal", "#f0d060", ("repos-personal", "repos-local", "repos-bv")),
+]
+
+
+def _detect_company(cwd: str | None) -> dict[str, str]:
+    """Best-effort: which company/context owns a session, from its working dir."""
+    low = (cwd or "").lower()
+    for key, label, color, paths in _COMPANY_TABLE:
+        if any(p in low for p in paths):
+            return {"company": key, "label": label, "color": color}
+    return {"company": "", "label": "", "color": ""}
+
+
 _SHELLS = {"zsh", "-zsh", "bash", "-bash", "fish", "sh", "-sh"}
 _EDITORS = {"vim", "nvim", "vi", "nano", "emacs"}
 
@@ -363,6 +391,14 @@ body::after{
 .tagchip:hover{border-color:var(--amber-faint);color:var(--amber-dim)}
 .tagchip.on{background:var(--amber);border-color:var(--amber);color:#1a1200;font-weight:700}
 .tagchip .cnt{opacity:.6;margin-left:3px}
+.tagchip.clr{color:var(--text-dim)}
+.cochip{font-size:10px;letter-spacing:.3px;padding:2px 7px;border:1px solid;border-radius:10px;
+  cursor:pointer;user-select:none;white-space:nowrap;font-weight:700;opacity:.9}
+.cochip:hover{opacity:1}
+.cochip.on{color:#151005}
+.cochip .cnt{opacity:.7;margin-left:3px;font-weight:400}
+.cco{font-size:9px;font-weight:700;letter-spacing:.3px;padding:1px 6px;border-radius:8px;
+  color:#151005;white-space:nowrap}
 #sessions{flex:1;overflow-y:auto;padding:8px}
 .card{
   border:1px solid var(--line);border-left:3px solid var(--amber-faint);
@@ -648,7 +684,7 @@ body::after{
 const $=s=>document.querySelector(s);
 const SVGNS="http://www.w3.org/2000/svg";
 let mode="grid", current=null, grid=[], chatTimer=null, gridTimer=null, screenEl=null;
-let filterStr="", flashOn=false, activeTag="";
+let filterStr="", flashOn=false, activeTag="", activeCompany="";
 let flowSig=null, flowPre={}, flowBox={};   // flow view: rebuild only on topology change, else update panes in place
 const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW"};
 
@@ -677,25 +713,38 @@ function uptime(created){        // session age from tmux created_unix (#16)
 function hot(s){return s.last_change_age!==null&&s.last_change_age!==undefined&&s.last_change_age<6;}
 function shown(){return grid.filter(s=>
   (!filterStr||s.name.toLowerCase().includes(filterStr))
-  &&(!activeTag||(s.tags||[]).includes(activeTag)));}
+  &&(!activeTag||(s.tags||[]).includes(activeTag))
+  &&(!activeCompany||(s.company||{}).company===activeCompany));}
+
+function applyFilters(){renderTagbar();renderSidebar();if(mode!=="chat")render();}
 
 function renderTagbar(){
   const box=$("#tagbar");if(!box)return;
+  // companies (colored, from cwd) then tags — both filter the whole view
+  const comp=new Map();   // key -> {label,color,n}
+  grid.forEach(s=>{const c=s.company||{};if(c.company){
+    const e=comp.get(c.company)||{label:c.label,color:c.color,n:0};e.n++;comp.set(c.company,e);}});
   const counts=new Map();
   grid.forEach(s=>(s.tags||[]).forEach(t=>counts.set(t,(counts.get(t)||0)+1)));
-  if(!counts.size&&!activeTag){box.innerHTML="";return;}
-  const tags=[...counts.keys()].sort();
+  if(!comp.size&&!counts.size&&!activeTag&&!activeCompany){box.innerHTML="";return;}
   let html="";
-  if(activeTag)html+='<span class="tagchip" data-tag="">✕ all</span>';
-  tags.forEach(t=>{
+  if(activeTag||activeCompany)html+='<span class="tagchip clr" data-clear="1">✕ all</span>';
+  [...comp.keys()].sort().forEach(k=>{const e=comp.get(k);
+    const on=k===activeCompany;
+    html+='<span class="cochip'+(on?" on":"")+'" data-co="'+k+'" '
+      +'style="'+(on?'background:'+e.color+';border-color:'+e.color:'color:'+e.color+';border-color:'+e.color)+'">'
+      +e.label+'<span class="cnt">'+e.n+'</span></span>';
+  });
+  [...counts.keys()].sort().forEach(t=>{
     html+='<span class="tagchip'+(t===activeTag?" on":"")+'" data-tag="'+t+'">#'+t
       +'<span class="cnt">'+counts.get(t)+'</span></span>';
   });
   box.innerHTML=html;
-  box.querySelectorAll(".tagchip").forEach(el=>el.onclick=()=>{
-    activeTag=el.dataset.tag===activeTag?"":el.dataset.tag;
-    renderTagbar();renderSidebar();if(mode!=="chat")render();
-  });
+  box.querySelectorAll("[data-clear]").forEach(el=>el.onclick=()=>{activeTag="";activeCompany="";applyFilters();});
+  box.querySelectorAll(".cochip").forEach(el=>el.onclick=()=>{
+    activeCompany=el.dataset.co===activeCompany?"":el.dataset.co;applyFilters();});
+  box.querySelectorAll(".tagchip[data-tag]").forEach(el=>el.onclick=()=>{
+    activeTag=el.dataset.tag===activeTag?"":el.dataset.tag;applyFilters();});
 }
 
 function setMode(m){
@@ -746,8 +795,9 @@ function renderSidebar(){
     const ag=s.agent||{glyph:"",label:""};
     const agspan=(s.live&&ag.label&&ag.label!=="—")?'<span>'+agentHTML(s)+'</span>':"";
     const tagspans=(s.tags||[]).map(t=>'<span class="tagjump" data-tag="'+t+'">#'+t+'</span>').join("");
+    const cobadge=companyHTML(s);
     const badges=(s.registered?"<span>registered</span>":"<span>unregistered</span>")
-      +agspan+(s.attached?"<span>attached</span>":"")+tagspans;
+      +cobadge+agspan+(s.attached?"<span>attached</span>":"")+tagspans;
     d.innerHTML='<div class="nm"><span class="dot '+(s.live?"live":"stale")+'"></span>'+s.name+att+'</div>'
       +'<div class="sub">→ '+s.session+(up?" · "+up:"")+(s.description?" — "+s.description:"")+'</div>'
       +'<div class="badges">'+badges+'</div>';
@@ -768,7 +818,8 @@ function makeTile(s){
   const att=s.attached?'<span class="att">●</span>':"";
   const ag=s.agent||{glyph:"",label:""};
   const agbadge=(s.live&&ag.label&&ag.label!=="—")?'<span class="agentbadge">'+agentHTML(s)+'</span>':"";
-  h.innerHTML='<span class="dot '+(s.live?"live":"stale")+'"></span><span class="nm">'+s.name+att+'</span>'+agbadge
+  h.innerHTML='<span class="dot '+(s.live?"live":"stale")+'"></span><span class="nm">'+s.name+att+'</span>'
+    +companyHTML(s)+agbadge
     +'<span class="age '+(s.live?ageClass(s.last_change_age):"t-old")+'">'+(s.live?ageLabel(s.last_change_age):"gone")+'</span>';
   const p=document.createElement("pre");
   if(s.live&&s.content.trim()){
@@ -847,6 +898,8 @@ function paneText(s){return (s.live&&s.content.trim())?s.content.replace(/\s+$/,
 function agentHTML(s){const ag=s.agent||{};if(!s.live)return "gone";
   const g=ag.glyph?'<span class="agi ag-'+(ag.agent||"x")+'">'+ag.glyph+'</span> ':'';
   return g+(ag.label||"—");}
+function companyHTML(s){const c=s.company||{};if(!c.company)return "";
+  return '<span class="cco" style="background:'+c.color+'">'+c.label+'</span>';}
 
 // Update flow boxes in place (no DOM teardown) — keeps the panes LIVE and smooth.
 function updateFlowPanes(){
