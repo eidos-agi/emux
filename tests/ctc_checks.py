@@ -155,8 +155,26 @@ def visible_manager_worker():         # real-surface GUI — manager + worker ea
     sys.exit(0 if ok else 1)
 
 
+def signal_up_channel():              # event — a worker's up-channel signal reaches the manager
+    """A real worker echoes a @@EMUX@@ sentinel; the manager reads it via
+    tmux_signals — the up-channel proven end-to-end on real tmux, no screen
+    scraping. Harmless: one echo, one throwaway session."""
+    run(s.tmux_spawn(name="ctc-sig", command=(
+        "printf '@@EMUX@@ NEED please approve the thing\\n'; sleep 3600")))
+    kind = ""
+    for _ in range(50):               # up to ~5s for the line to hit the stream log
+        r = run(s.tmux_signals(targets=["ctc-sig"], ack=False))
+        if r["count"]:
+            kind = r["signals"][-1]["kind"]
+            break
+        time.sleep(0.1)
+    s._run_tmux(["kill-session", "-t", "ctc-sig"])
+    sys.exit(0 if kind == "NEED" else 1)
+
+
 if __name__ == "__main__":
     {"happy": happy_search_running, "ended": search_finds_ended,
      "ghost": adopt_ghost_not_live, "refusal": drive_dead_refuses,
      "greenmark": manager_worker_greenmark,
-     "visible": visible_manager_worker}[sys.argv[1]]()
+     "visible": visible_manager_worker,
+     "signal": signal_up_channel}[sys.argv[1]]()

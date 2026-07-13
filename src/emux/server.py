@@ -132,6 +132,90 @@ def _read_log(name: str, lines: int | None = None, strip: bool = True) -> str:
     return data
 
 
+# ── up-channel signals ─────────────────────────────────────────────────────────
+# A worker cannot call emux — emux only ever sees a pane's OUTPUT. So a worker
+# talks UP to its manager by echoing a sentinel line, which lands in the stream
+# log like any other output; emux extracts it. `@@EMUX@@ <KIND> <payload>`,
+# KIND ∈ DONE | NEED | PROGRESS | ERROR.  e.g.  echo "@@EMUX@@ NEED approve? (y/n)"
+_SIGNAL_RE = re.compile(r"@@EMUX@@[ \t]+(DONE|NEED|PROGRESS|ERROR)\b[ \t]*(.*)")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
+_SIGNAL_OFFSETS = _STATE_DIR / "signal_offsets.json"
+_SIGNAL_LEDGER = _STATE_DIR / "signals.jsonl"
+
+
+def _load_offsets() -> dict[str, int]:
+    try:
+        return json.loads(_SIGNAL_OFFSETS.read_text())
+    except Exception:
+        return {}
+
+
+def _save_offsets(offs: dict[str, int]) -> None:
+    try:
+        _SIGNAL_OFFSETS.parent.mkdir(parents=True, exist_ok=True)
+        _SIGNAL_OFFSETS.write_text(json.dumps(offs))
+    except Exception:
+        pass
+
+
+def _new_signals(name: str, ack: bool) -> list[dict[str, Any]]:
+    """Sentinel signals in a session's stream log SINCE the last read. Consumes
+    only complete lines, so a signal straddling a read boundary is never lost.
+    Advances (and persists) the byte offset when ack=True, and appends acked
+    signals to the durable ledger."""
+    path = _log_path(name)
+    if not path.is_file():
+        return []
+    offs = _load_offsets()
+    start = offs.get(name, 0)
+    size = path.stat().st_size
+    if start > size:                       # log truncated/rotated — restart
+        start = 0
+    with path.open("rb") as f:
+        f.seek(start)
+        raw = f.read()
+    last_nl = raw.rfind(b"\n")
+    consumed = raw[: last_nl + 1] if last_nl != -1 else b""
+    text = _ANSI_RE.sub("", consumed.decode("utf-8", "ignore")).replace("\r", "")
+    out = [
+        {"t": int(time.time()), "session": name, "kind": m.group(1),
+         "payload": m.group(2).strip()}
+        for m in _SIGNAL_RE.finditer(text)
+    ]
+    if ack and consumed:
+        offs[name] = start + len(consumed)
+        _save_offsets(offs)
+        for sig in out:
+            try:
+                _SIGNAL_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+                with open(_SIGNAL_LEDGER, "a") as f:
+                    f.write(json.dumps(sig) + "\n")
+            except Exception:
+                pass
+    return out
+
+
+def _resolve_watch_targets(targets: list[str] | None, under: str | None) -> list[str]:
+    """Which sessions to watch: an explicit list, or a manager's `manages`
+    subtree (`under`), or — by default — every registered session."""
+    if targets:
+        return list(targets)
+    reg = _load_registry()
+    if under:
+        return list((reg.get(under) or {}).get("manages") or [])
+    return list(reg.keys())
+
+
+def _name_live(name: str) -> bool:
+    e = _load_registry().get(name)
+    return bool(e) and _session_exists(e["session"], e.get("host"))
+
+
+def _log_size(name: str) -> int:
+    p = _log_path(name)
+    return p.stat().st_size if p.is_file() else 0
+
+
 def _resolve_tmux() -> str | None:
     """Return path to the `tmux` binary, or None if not on PATH."""
     return shutil.which("tmux")
@@ -560,15 +644,17 @@ async def tmux_spawn(
         return {"ok": False, "error": "spawn_failed", "stderr": err,
                 "host": host, "hint": "check ssh reachability + tmux on the host"}
 
-    # 2) launch the command, if any
+    # 2) register FIRST so the stream log is armed (pipe-pane) BEFORE the command
+    #    runs — otherwise a worker that signals early (or exits fast) emits into a
+    #    pane no one is recording yet and its @@EMUX@@ up-channel line is lost.
+    await tmux_register(name=name, session=session, description=description,
+                        tags=tags, host=host, manages=manages)
+
+    # 3) launch the command, if any — its output now flows into the armed log
     launched = False
     if command:
         c2, _o2, _e2 = _run_tmux(["send-keys", "-t", session, command, "Enter"], host=host)
         launched = c2 == 0
-
-    # 3) register so it is addressable by name (carries host → remote-aware ops)
-    await tmux_register(name=name, session=session, description=description,
-                        tags=tags, host=host, manages=manages)
 
     # 4) optional GUI window so a human can watch (best-effort, macOS/iTerm2)
     gui_opened = False
@@ -1685,6 +1771,118 @@ async def tmux_goal(
         pursue, target, goal, max_steps, 2.5, 60.0, 200, None,
         by_registry_name, telos, allow_dangerous,
     )
+
+
+@mcp.tool()
+@audited
+async def tmux_signals(
+    targets: list[str] | None = None,
+    under: str | None = None,
+    ack: bool = True,
+) -> dict[str, Any]:
+    """Read NEW up-channel signals workers have emitted since you last read.
+
+    The up-channel. A worker cannot call emux — emux only sees its output — so a
+    worker talks UP to its manager by echoing a sentinel line:
+
+        @@EMUX@@ <KIND> <payload>          KIND ∈ DONE | NEED | PROGRESS | ERROR
+
+    e.g. `echo "@@EMUX@@ NEED approve deploy to prod? (y/n)"`. emux lifts these
+    out of each session's stream log, so a manager learns "worker 4 finished,
+    worker 7 needs a decision" WITHOUT reading a single screen — the clean way
+    for workers to talk up the tree instead of the manager guessing from pixels.
+
+    Args:
+        targets: registry names to check; omit to check every registered session.
+        under:   a manager's name — check the sessions IT manages (its subtree).
+        ack:     True (default) marks what it returns as consumed, so you only
+                 ever see NEW signals; False peeks without consuming.
+
+    Returns {ok, signals:[{t, session, kind, payload}], count}, oldest→newest.
+    Acked signals are also appended to ~/.local/state/emux/signals.jsonl.
+    """
+    names = _resolve_watch_targets(targets, under)
+    sigs = [sig for n in names for sig in _new_signals(n, ack)]
+    return {"ok": True, "signals": sigs, "count": len(sigs)}
+
+
+_PROMPT_RE = re.compile(r"(\(y/n\)|\[y/n\]|\?[ \t]*$|:[ \t]*$|>[ \t]*$)", re.IGNORECASE)
+
+
+@mcp.tool()
+@audited
+async def tmux_wait(
+    targets: list[str] | None = None,
+    under: str | None = None,
+    until: str = "signal",
+    timeout: float = 60.0,
+    quiet: float = 4.0,
+) -> dict[str, Any]:
+    """Block until one or more sessions NEED you — then return which, and why.
+
+    The poll→event shift. Instead of capturing N workers in a loop and filling
+    your context with screens you didn't need, make ONE call and be woken when
+    something actually happens. emux runs the watch loop internally — cheaply: it
+    stats each session's stream log and only looks closer when one grew — so your
+    context stays empty until there is something to handle. This is what lets one
+    mind manage many: react, don't poll.
+
+    until — what counts as an event:
+      "signal" — a worker emitted a new @@EMUX@@ signal (see tmux_signals). The
+                 reliable path; the ready entry carries the signal. Default.
+      "idle"   — a session's output went quiet for `quiet` seconds (likely done
+                 or blocked).
+      "exit"   — a session ended.
+      "change" — any new output since the call began.
+      "prompt" — the last line looks like it is waiting for input. A HEURISTIC
+                 guess — prefer "signal" when a worker can emit one.
+
+    Args:
+        targets/under: which sessions (as in tmux_signals).
+        until: event type above. timeout: seconds to wait (clamped 1..600).
+        quiet: seconds of no output that count as idle (for until="idle").
+
+    Returns {ok, ready:[{name, why, signal?, last_line}], still_working:[names],
+    timed_out}. Returns the moment ANY target is ready, or at timeout.
+    """
+    names = _resolve_watch_targets(targets, under)
+    timeout = max(1.0, min(float(timeout), 600.0))
+    deadline = time.time() + timeout
+    size = {n: _log_size(n) for n in names}
+    last_grow = {n: time.time() for n in names}
+    while True:
+        ready = []
+        for n in names:
+            why, extra = None, {}
+            if until == "signal":
+                sigs = _new_signals(n, ack=True)
+                if sigs:
+                    why, extra["signal"] = "signal", sigs[-1]
+            elif until == "exit":
+                if not _name_live(n):
+                    why = "exit"
+            else:
+                sz = _log_size(n)
+                if sz != size.get(n, 0):
+                    size[n], last_grow[n] = sz, time.time()
+                    if until == "change":
+                        why = "change"
+                if until == "idle" and time.time() - last_grow.get(n, 0.0) >= quiet \
+                        and _name_live(n):
+                    why = "idle"
+                elif until == "prompt":
+                    line = _read_log(n, lines=1).strip()
+                    if line and _PROMPT_RE.search(line):
+                        why = "prompt"
+            if why:
+                extra.setdefault("last_line", _read_log(n, lines=1).strip()[-200:])
+                ready.append({"name": n, "why": why, **extra})
+        if ready or time.time() >= deadline:
+            done = {r["name"] for r in ready}
+            return {"ok": True, "ready": ready,
+                    "still_working": [n for n in names if n not in done],
+                    "timed_out": not ready}
+        await asyncio.sleep(1.0)
 
 
 def run_mcp_server() -> None:

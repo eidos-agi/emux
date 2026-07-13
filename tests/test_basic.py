@@ -85,6 +85,45 @@ def test_a_tool_call_is_audited(tmp_path, monkeypatch):
     assert rec["op"] == "tmux_search" and rec["query"] == "zzz" and rec["ok"] is True
 
 
+def _signal_env(server, tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "_LOG_DIR", tmp_path)
+    monkeypatch.setattr(server, "_SIGNAL_OFFSETS", tmp_path / "offsets.json")
+    monkeypatch.setattr(server, "_SIGNAL_LEDGER", tmp_path / "signals.jsonl")
+    monkeypatch.setattr(server, "REGISTRY_PATH", tmp_path / "reg.json")
+
+
+def test_tmux_signals_reads_and_acks(tmp_path, monkeypatch):
+    """A worker's @@EMUX@@ sentinel is lifted from its stream log, and ack means
+    you only ever see it once."""
+    from emux import server
+    _signal_env(server, tmp_path, monkeypatch)
+    server._log_path("wrk").write_text("working...\n@@EMUX@@ NEED approve? (y/n)\nmore\n")
+    r = asyncio.run(server.tmux_signals(targets=["wrk"]))
+    assert r["count"] == 1
+    assert r["signals"][0]["kind"] == "NEED" and "approve" in r["signals"][0]["payload"]
+    assert asyncio.run(server.tmux_signals(targets=["wrk"]))["count"] == 0  # acked
+
+
+def test_tmux_wait_returns_on_signal(tmp_path, monkeypatch):
+    """tmux_wait wakes as soon as a target has a signal, and says which + why."""
+    from emux import server
+    _signal_env(server, tmp_path, monkeypatch)
+    server._log_path("wrk").write_text("@@EMUX@@ DONE migration complete\n")
+    r = asyncio.run(server.tmux_wait(targets=["wrk"], until="signal", timeout=3))
+    assert not r["timed_out"]
+    assert r["ready"][0]["name"] == "wrk" and r["ready"][0]["why"] == "signal"
+    assert r["ready"][0]["signal"]["kind"] == "DONE"
+
+
+def test_tmux_wait_times_out(tmp_path, monkeypatch):
+    """No event → a clean timeout, not a hang."""
+    from emux import server
+    _signal_env(server, tmp_path, monkeypatch)
+    server._log_path("wrk").write_text("just noise, no signal\n")
+    r = asyncio.run(server.tmux_wait(targets=["wrk"], until="signal", timeout=1))
+    assert r["timed_out"] and r["ready"] == []
+
+
 def test_load_registry_returns_empty_when_missing(tmp_path, monkeypatch):
     from emux import server
     monkeypatch.setattr(server, "REGISTRY_PATH", tmp_path / "does-not-exist.json")

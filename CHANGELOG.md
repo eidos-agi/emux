@@ -2,6 +2,14 @@
 
 All notable changes to Emux are documented here.
 
+## v0.7.0 - 2026-07-12
+
+The poll→event pair — what lets one intelligence manage many terminals.
+
+- **`tmux_signals` — the up-channel.** A worker talks UP to its manager by echoing a sentinel line, `@@EMUX@@ <KIND> <payload>` (KIND: DONE | NEED | PROGRESS | ERROR). emux lifts these from the stream log, new-since-last-read with byte-offset tracking (and a durable `signals.jsonl` ledger), so a manager learns "worker 4 done, worker 7 needs a decision" without scraping a screen. `under=<manager>` reads a whole `manages` subtree.
+- **`tmux_wait` — poll→event.** Blocks until one or more sessions need you and returns which + why (`signal` / `idle` / `exit` / `change` / `prompt`). emux runs the watch loop internally — cheaply, by `stat`-ing each stream log and only looking closer when one grew — so the agent makes ONE call and stays context-empty until something happens, instead of capturing N sessions in a loop.
+- **Fix (enables the above):** `tmux_spawn` now arms the stream log BEFORE launching the command, so a worker that signals early or exits fast no longer loses its output into an unrecorded pane.
+
 ## v0.6.0 - 2026-07-12
 
 - Added an **operation audit trail**: every emux tool call appends one line to `~/.local/state/emux/audit.jsonl` — `{t, op, <salient args>, ok, error?}`, append-only, best-effort (an audit failure never breaks a tool). This is the per-CALL record that complements the session index (which jobs exist, running or ended) and the stream logs (what a job printed): together they let an agent reconstruct and reboot old jobs. Implemented as one `@audited` decorator under each `@mcp.tool()`, so tool signatures are unchanged.
