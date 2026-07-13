@@ -2,6 +2,27 @@
 
 All notable changes to Emux are documented here.
 
+## v0.11.0 - 2026-07-12
+
+Remote fan-out: a parent hears a child on another machine, over BOTH channels.
+
+- **Remote receive path.** A session with a `host` now has its signals read from
+  the remote box's inbox over ssh (`ssh host cat …`; cheap under ssh ControlMaster
+  multiplexing). `tmux_signals`/`tmux_wait` work for a remote child with no
+  caller changes. (The drive layer — spawn/send/capture/run — was already
+  ssh-capable via `host`.)
+- **Both delivery channels, over a durable local write.** The child always writes
+  its signal to its own inbox first (durable, survives the child's death). Then
+  it's delivered up two ways: **pull** (parent reads the remote inbox over ssh)
+  and **push** (`emux signal … --push HOST` ssh-appends the SAME record to the
+  parent's inbox). Each covers the other's failure — a dying child may not finish
+  a push, the pull still has the durable line; a dropped pull is caught by the
+  pushed line.
+- **Dedup by id.** Every signal now carries a uuid `id`; the parent dedups across
+  push and pull so both channels delivering the same signal collapse to one
+  (at-least-once → idempotent). Legacy id-less lines get a content-hash id.
+- Proven live against a real remote box (eidos-bm): pull + push + dedup all green.
+
 ## v0.10.0 - 2026-07-12
 
 - Added `claude_warm_worker` — a **real Claude Code** ctc case (dim `real-llm`), the end-to-end proof of the warm-worker loop. Spawns a real `claude` worker whose hooks fire deterministically at boundaries — `UserPromptSubmit` → `emux signal PROGRESS` (prompt landed), `Stop` → `emux signal IDLE` (turn done) — dispatches two tasks down the same warm session, and proves it kept context: task 2 recalls task 1's secret. Coordination is **zero-scraping**: PROGRESS confirms the prompt beat Claude's boot/paste timing (retry-until-landed), IDLE confirms completion. Falsifiable — GREEN when warm (recalls 42), RED when cold (a fresh worker never told the number cannot recall). Opt-in (`EMUX_CTC_LIVE=1` on macOS with `claude`); SKIPs otherwise so routine runs stay fast and CI-safe.

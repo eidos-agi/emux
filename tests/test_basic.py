@@ -87,9 +87,30 @@ def test_a_tool_call_is_audited(tmp_path, monkeypatch):
 
 def _signal_env(server, tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_LOG_DIR", tmp_path)
+    monkeypatch.setattr(server, "_INBOX_DIR", tmp_path / "inbox")
     monkeypatch.setattr(server, "_SIGNAL_OFFSETS", tmp_path / "offsets.json")
+    monkeypatch.setattr(server, "_SIGNAL_SEEN", tmp_path / "seen.json")
     monkeypatch.setattr(server, "_SIGNAL_LEDGER", tmp_path / "signals.jsonl")
     monkeypatch.setattr(server, "REGISTRY_PATH", tmp_path / "reg.json")
+
+
+def test_both_channels_deduped_by_id(tmp_path, monkeypatch):
+    """A remote session's signals arrive via BOTH channels — the local inbox
+    (where a child PUSHES) and the remote inbox (which the parent PULLS over ssh).
+    The same signal in both must collapse to ONE, by id. (The live push+pull
+    against a real box is proven separately; here the ssh read is stubbed.)"""
+    from emux import server
+    monkeypatch.setattr(server, "_SIGNAL_SEEN", tmp_path / "seen.json")
+    same = {"id": "A", "t": 1, "session": "w", "kind": "DONE", "payload": ""}
+    only_remote = {"id": "B", "t": 1, "session": "w", "kind": "PROGRESS", "payload": ""}
+
+    def fake_read(name, host):
+        return [same] if host is None else [same, only_remote]   # push landed in both
+
+    monkeypatch.setattr(server, "_read_inbox", fake_read)
+    got = server._new_inbox_signals("w", ack=True, host="somebox")
+    assert sorted(x["id"] for x in got) == ["A", "B"], got   # A deduped, B pulled
+    assert server._new_inbox_signals("w", ack=True, host="somebox") == []  # acked
 
 
 def test_tmux_signals_reads_and_acks(tmp_path, monkeypatch):

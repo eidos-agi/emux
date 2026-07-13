@@ -616,6 +616,25 @@ def _current_tmux_session() -> str | None:
         return None
 
 
+def _push_signal(host: str, session: str, rec: dict) -> str:
+    """Best-effort PUSH: ssh the SAME record (same id) to a target box's inbox.
+    Dedup by id means push + pull collapse to one signal at the parent."""
+    import json
+    import shlex
+    import subprocess
+
+    from .server import remote_inbox_relpath
+    rel = remote_inbox_relpath(session)
+    line = json.dumps(rec)
+    cmd = (f"mkdir -p {shlex.quote(rel.rsplit('/', 1)[0])} && "
+           f"printf '%s\\n' {shlex.quote(line)} >> {shlex.quote(rel)}")
+    try:
+        r = subprocess.run(["ssh", host, cmd], capture_output=True, text=True, timeout=15)
+        return f" (pushed → {host})" if r.returncode == 0 else f" (push → {host} FAILED)"
+    except Exception:
+        return f" (push → {host} errored)"
+
+
 def cmd_signal(args: argparse.Namespace) -> int:
     from .server import inject_signal
     session = args.session or _current_tmux_session()
@@ -623,10 +642,13 @@ def cmd_signal(args: argparse.Namespace) -> int:
         print("emux signal: no --session given and not inside a tmux session",
               file=sys.stderr)
         return 2
-    ok = inject_signal(session, args.kind, args.payload or "")
-    print(f"emux signal: {args.kind.upper()} -> {session}"
-          if ok else "emux signal: write failed")
-    return 0 if ok else 1
+    rec = inject_signal(session, args.kind, args.payload or "")
+    if rec is None:
+        print("emux signal: write failed", file=sys.stderr)
+        return 1
+    pushed = _push_signal(args.push, session, rec) if args.push else ""
+    print(f"emux signal: {rec['kind']} -> {session}{pushed}")
+    return 0
 
 
 def cmd_head(args: argparse.Namespace) -> int:
@@ -748,6 +770,7 @@ def main(argv: list[str] | None = None) -> int:
     p_signal.add_argument("kind", help="IDLE | READY | DONE | NEED | PROGRESS | ERROR")
     p_signal.add_argument("payload", nargs="?", default="", help="optional text (e.g. what a NEED is blocked on)")
     p_signal.add_argument("--session", help="target session name (default: the current tmux session)")
+    p_signal.add_argument("--push", metavar="HOST", help="also PUSH this signal to HOST's inbox over ssh (the parent); the parent dedups push vs pull by id")
 
     p_head = sub.add_parser("head", help="open a real terminal head for a registered session")
     p_head.add_argument("target", help="registered name by default, or tmux session with --session")

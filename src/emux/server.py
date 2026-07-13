@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import functools
+import hashlib
 import json
 import os
 import re
@@ -36,6 +37,7 @@ import shlex
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -152,57 +154,106 @@ _SIGNAL_LEDGER = _STATE_DIR / "signals.jsonl"
 _INBOX_DIR = _STATE_DIR / "inbox"
 
 
+_SIGNAL_SEEN = _STATE_DIR / "signal_seen.json"      # per-session id dedup: {name: [ids]}
+_INBOX_RELPATH = ".local/state/emux/inbox"          # a REMOTE box's inbox, relative to its $HOME
+
+
+def _safe_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name) or "session"
+
+
 def _inbox_path(name: str) -> Path:
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name) or "session"
-    return _INBOX_DIR / f"{safe}.jsonl"
+    return _INBOX_DIR / f"{_safe_name(name)}.jsonl"
 
 
-def inject_signal(session: str, kind: str, payload: str = "") -> bool:
-    """Append a signal to a session's inbox (used by the `emux signal` CLI, which
-    a worker's Stop/Notification hook calls). Best-effort, never raises."""
+def remote_inbox_relpath(name: str) -> str:
+    """A session's inbox path on a REMOTE box, relative to that box's $HOME — the
+    push target and the pull source for a remote child."""
+    return f"{_INBOX_RELPATH}/{_safe_name(name)}.jsonl"
+
+
+def inject_signal(session: str, kind: str, payload: str = "",
+                  sid: str | None = None) -> dict[str, Any] | None:
+    """Append a signal to a session's LOCAL inbox and return the written record
+    (carrying its dedup `id`). Called by the `emux signal` CLI, which a worker's
+    Stop/Notification hook runs. Best-effort; returns None on failure."""
+    rec = {"id": sid or uuid.uuid4().hex[:12], "t": int(time.time()),
+           "session": session, "kind": kind.upper(), "payload": payload}
     try:
         p = _inbox_path(session)
         p.parent.mkdir(parents=True, exist_ok=True)
         with open(p, "a") as f:
-            f.write(json.dumps({"t": int(time.time()), "session": session,
-                                "kind": kind.upper(), "payload": payload}) + "\n")
-        return True
+            f.write(json.dumps(rec) + "\n")
+        return rec
     except Exception:
-        return False
+        return None
 
 
-def _new_inbox_signals(name: str, ack: bool) -> list[dict[str, Any]]:
-    """Hook/CLI-injected signals for a session since the last read (byte offset,
-    keyed `inbox::<name>` in the shared offsets file)."""
-    p = _inbox_path(name)
-    if not p.is_file():
-        return []
-    key = f"inbox::{name}"
-    offs = _load_offsets()
-    start = offs.get(key, 0)
-    size = p.stat().st_size
-    if start > size:
-        start = 0
-    with p.open("rb") as f:
-        f.seek(start)
-        raw = f.read()
-    last_nl = raw.rfind(b"\n")
-    consumed = raw[: last_nl + 1] if last_nl != -1 else b""
+def _parse_inbox_text(name: str, text: str) -> list[dict[str, Any]]:
     out = []
-    for line in consumed.decode("utf-8", "ignore").splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
         try:
             d = json.loads(line)
-            out.append({"t": d.get("t"), "session": name,
-                        "kind": d.get("kind"), "payload": d.get("payload", "")})
         except Exception:
-            pass
-    if ack and consumed:
-        offs[key] = start + len(consumed)
-        _save_offsets(offs)
+            continue
+        d.setdefault("id", hashlib.sha256(line.encode()).hexdigest()[:12])  # legacy id-less
+        out.append({"id": d["id"], "t": d.get("t"), "session": name,
+                    "kind": d.get("kind"), "payload": d.get("payload", "")})
     return out
+
+
+def _read_inbox(name: str, host: str | None) -> list[dict[str, Any]]:
+    """Every signal in a session's inbox — the LOCAL file, or a REMOTE box's file
+    over ssh (`ssh host cat …`; cheap when ssh ControlMaster multiplexing is on)."""
+    if host:
+        try:
+            r = subprocess.run(["ssh", host, "cat", remote_inbox_relpath(name)],
+                               capture_output=True, text=True, timeout=15)
+            return _parse_inbox_text(name, r.stdout) if r.returncode == 0 else []
+        except Exception:
+            return []
+    p = _inbox_path(name)
+    return _parse_inbox_text(name, p.read_text()) if p.is_file() else []
+
+
+def _load_seen() -> dict[str, list[str]]:
+    try:
+        return json.loads(_SIGNAL_SEEN.read_text())
+    except Exception:
+        return {}
+
+
+def _save_seen(d: dict[str, list[str]]) -> None:
+    try:
+        _SIGNAL_SEEN.parent.mkdir(parents=True, exist_ok=True)
+        _SIGNAL_SEEN.write_text(json.dumps(d))
+    except Exception:
+        pass
+
+
+def _new_inbox_signals(name: str, ack: bool, host: str | None = None) -> list[dict[str, Any]]:
+    """NEW signals across BOTH delivery channels — the LOCAL inbox (where a child
+    PUSHES) and, if the session is remote, the REMOTE inbox (which the parent
+    PULLS over ssh) — deduped by signal `id`. Both channels may carry the same
+    signal; id-dedup collapses them to one. `ack` records returned ids as seen so
+    they are never returned twice (the dedup memory is capped)."""
+    seen_all = _load_seen()
+    seen_list = list(seen_all.get(name, []))
+    seen = set(seen_list)
+    fresh = []
+    for d in _read_inbox(name, host=None) + (_read_inbox(name, host=host) if host else []):
+        if d["id"] in seen:
+            continue
+        seen.add(d["id"])
+        seen_list.append(d["id"])
+        fresh.append(d)
+    if ack and fresh:
+        seen_all[name] = seen_list[-1000:]      # keep most-recent ids, bounded
+        _save_seen(seen_all)
+    return fresh
 
 
 def _load_offsets() -> dict[str, int]:
@@ -225,10 +276,13 @@ def _new_signals(name: str, ack: bool) -> list[dict[str, Any]]:
     only complete lines, so a signal straddling a read boundary is never lost.
     Advances (and persists) the byte offset when ack=True, and appends acked
     signals to the durable ledger."""
+    # A REMOTE session's signals live in ITS box's inbox — pull them over ssh.
+    host = _load_registry().get(name, {}).get("host")
     path = _log_path(name)
     if not path.is_file():
-        # No stream log (e.g. a hook-only worker) — still drain the inbox.
-        return _new_inbox_signals(name, ack)
+        # No local stream log (a remote or hook-only worker) — drain the inbox
+        # (local push-destination + remote pull), deduped by id.
+        return _new_inbox_signals(name, ack, host=host)
     offs = _load_offsets()
     start = offs.get(name, 0)
     size = path.stat().st_size
@@ -255,9 +309,10 @@ def _new_signals(name: str, ack: bool) -> list[dict[str, Any]]:
                     f.write(json.dumps(sig) + "\n")
             except Exception:
                 pass
-    # Union the scraped sentinels (above) with the robust hook/CLI inbox. A
-    # manager can't tell — and shouldn't have to — which channel a signal came in.
-    return out + _new_inbox_signals(name, ack)
+    # Union the scraped sentinels (above) with the robust hook/CLI inbox (local
+    # push-destination + remote pull). A manager can't tell — and shouldn't have
+    # to — which channel or machine a signal came from.
+    return out + _new_inbox_signals(name, ack, host=host)
 
 
 def _resolve_watch_targets(targets: list[str] | None, under: str | None) -> list[str]:
