@@ -30,12 +30,14 @@ sweep, not N×M. The cache also evicts sessions once tmux reaps them.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import threading
 import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -148,28 +150,140 @@ _AGENT_TABLE = [
     ("hermes", "Hermes", "☿", ("hermes",), ("hermes", " nous ")),
     ("aider", "Aider", "✦", ("aider",), ("aider ",)),
 ]
-# Which company/context a session belongs to — keyed on its cwd path prefix.
-# (key, label, color, path-substrings). First match wins, so order specific→general.
+# Which company/context a session belongs to, from its cwd.
+# (key, label, color, roots, keywords). `roots` are the repos-<x>/ trees and are
+# authoritative; `keywords` catch a company's repos that live in the generic
+# ~/repos/ tree (e.g. repos/greenmark-claude-toolkit). Roots win over keywords.
 _COMPANY_TABLE = [
-    ("eidos", "Eidos", "#7dd3fc", ("repos-eidos-agi", "repos-eidos-capital")),
-    ("greenmark", "Greenmark Waste", "#7bd88f", ("repos-greenmark",)),
-    ("aic", "AIC", "#c4a3ff", ("repos-aic", "repos-aic-holdings")),
-    ("jetta", "Jetta", "#ffb27d", ("repos-jetta",)),
-    ("momentito", "Momentito", "#ff9ecf", ("repos-momentito",)),
-    ("rhea", "Rhea Impact", "#9ae6e6", ("repos-rheaimpact",)),
-    ("asmp", "ASMP", "#d0c0a0", ("repos-asmp",)),
-    ("boone", "Boone Voyage", "#4db6c9", ("repos-bv",)),
-    ("personal", "Personal", "#f0d060", ("repos-personal", "repos-local")),
+    ("eidos", "Eidos", "#7dd3fc", ("repos-eidos-agi", "repos-eidos-capital"), ("eidos",)),
+    ("greenmark", "Greenmark Waste", "#7bd88f", ("repos-greenmark",), ("greenmark",)),
+    ("aic", "AIC", "#c4a3ff", ("repos-aic", "repos-aic-holdings"), ("aic-",)),
+    ("jetta", "Jetta", "#ffb27d", ("repos-jetta",), ("jetta",)),
+    ("momentito", "Momentito", "#ff9ecf", ("repos-momentito",), ("momentito",)),
+    ("rhea", "Rhea Impact", "#9ae6e6", ("repos-rheaimpact",), ("rheaimpact", "rhea-impact")),
+    ("asmp", "ASMP", "#d0c0a0", ("repos-asmp",), ("asmp",)),
+    ("boone", "Boone Voyage", "#4db6c9", ("repos-bv",), ("boonevoyage", "boone-voyage")),
+    ("personal", "Personal", "#f0d060", ("repos-personal", "repos-local"), ()),
 ]
 
 
 def _detect_company(cwd: str | None) -> dict[str, str]:
-    """Best-effort: which company/context owns a session, from its working dir."""
+    """Best-effort: which company/context owns a session, from its working dir.
+    Match the repos-<x>/ root first (authoritative); fall back to a company
+    keyword anywhere in the path, so e.g. repos/greenmark-claude-toolkit lands."""
     low = (cwd or "").lower()
-    for key, label, color, paths in _COMPANY_TABLE:
-        if any(p in low for p in paths):
+    if not low:
+        return {"company": "", "label": "", "color": ""}
+    for key, label, color, roots, _kw in _COMPANY_TABLE:
+        if any(r in low for r in roots):
+            return {"company": key, "label": label, "color": color}
+    for key, label, color, _roots, kw in _COMPANY_TABLE:
+        if any(k in low for k in kw):
             return {"company": key, "label": label, "color": color}
     return {"company": "", "label": "", "color": ""}
+
+
+def _known_hosts() -> list[str]:
+    """Machines you can spawn on: local + ~/.ssh/config aliases + hosts already
+    used by registered sessions."""
+    hosts: list[str] = []
+    cfg = Path(os.path.expanduser("~/.ssh/config"))
+    if cfg.is_file():
+        try:
+            for line in cfg.read_text(errors="replace").splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0].lower() == "host":
+                    hosts.extend(h for h in parts[1:] if "*" not in h and "?" not in h)
+        except OSError:
+            pass
+    try:
+        for e in _server._load_registry().values():
+            h = e.get("host")
+            if isinstance(h, str) and h:
+                hosts.append(h)
+    except Exception:  # noqa: BLE001
+        pass
+    seen, out = set(), ["local"]
+    for h in hosts:
+        if h not in seen and h != "local":
+            seen.add(h)
+            out.append(h)
+    return out
+
+
+def _candidate_dirs(limit: int = 160) -> list[str]:
+    """Plausible working directories to start a session in: the repo trees."""
+    home = Path.home()
+    dirs: list[str] = []
+    for base in sorted(home.glob("repos*")):
+        if not base.is_dir():
+            continue
+        for d in sorted(base.iterdir()):
+            if d.is_dir() and not d.name.startswith("."):
+                dirs.append(str(d))
+    return dirs[:limit]
+
+
+def _suggest_session(intent: str) -> dict[str, Any]:
+    """Ask `claude -p` (fixed-cost CLI — never the API) where to start a session
+    for what the user wants to do. Returns {name, cwd, command, host, why}."""
+    import shutil
+    import subprocess
+    claude = shutil.which("claude")
+    if claude is None:
+        return {"_error": "claude CLI not on PATH"}
+    dirs = _candidate_dirs()
+    hosts = _known_hosts()
+    prompt = (
+        "You place a new terminal (tmux) session for a developer.\n\n"
+        f"WHAT THEY WANT TO DO: {intent}\n\n"
+        f"MACHINES: {hosts}\n\n"
+        "CANDIDATE WORKING DIRECTORIES (pick the best fit, or a sensible "
+        "subdirectory of one):\n" + "\n".join(f"  {d}" for d in dirs) + "\n\n"
+        "Reply with ONE line of JSON, nothing else:\n"
+        '{"name": "<short-kebab-session-name>", "host": "<machine from MACHINES>", '
+        '"cwd": "<absolute path>", "command": "<command to run, e.g. claude or a '
+        'shell command; empty for a plain shell>", "why": "<one short sentence>"}\n'
+        "Prefer a cockpit directory for planning/strategy work, and the relevant "
+        "repo for code work. Use host \"local\" unless the intent names a machine."
+    )
+    try:
+        proc = subprocess.run(
+            [claude, "-p", prompt, "--model",
+             os.environ.get("EMUX_NAV_MODEL", "claude-haiku-4-5-20251001")],
+            capture_output=True, text=True, timeout=90,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"_error": f"claude -p failed: {e}"}
+    m = re.search(r"\{.*\}", proc.stdout or "", re.DOTALL)
+    if not m:
+        return {"_error": "no JSON in model reply", "raw": (proc.stdout or "")[:300]}
+    try:
+        return json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return {"_error": "unparseable JSON", "raw": m.group(0)[:300]}
+
+
+def _spawn_session(data: dict[str, Any]) -> dict[str, Any]:
+    """Create a new session (local or remote) via the server's spawn primitive."""
+    import asyncio
+    name = (data.get("name") or "").strip()
+    if not name:
+        return {"ok": False, "error": "missing_name"}
+    host = (data.get("host") or "").strip()
+    if host in ("", "local"):
+        host = None
+    cwd = (data.get("cwd") or "").strip() or None
+    command = (data.get("command") or "").strip() or None
+    try:
+        return asyncio.run(_server.tmux_spawn(
+            name=name, command=command, host=host, cwd=cwd,
+            gui=bool(data.get("gui", False)),
+            description=(data.get("description") or "").strip() or None,
+            tags=data.get("tags") or None,
+        ))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
 
 
 def _iterm_attach(session: str) -> tuple[bool, str | None]:
@@ -615,6 +729,41 @@ body::after{
 #modalhead .st{margin-left:auto;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim)}
 #modalclose{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:14px;cursor:pointer;padding:2px 11px;margin-left:10px}
 #modalclose:hover{color:var(--amber);border-color:var(--amber-dim)}
+/* --- new-session modal --- */
+#newmodal{display:none;position:fixed;inset:0;z-index:60}
+#newmodal.open{display:block}
+#newback{position:absolute;inset:0;background:rgba(0,0,0,.72)}
+#newpanel{position:relative;margin:6vh auto;width:min(720px,92vw);background:var(--bg-card);
+  border:1px solid var(--amber-faint);box-shadow:0 0 60px rgba(0,0,0,.7);display:flex;flex-direction:column}
+#newhead{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--line)}
+#newhead .nm{font-family:"VT323",monospace;font-size:24px;color:var(--amber);letter-spacing:1px}
+#newhead .st{margin-left:auto;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim)}
+#newclose{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:14px;cursor:pointer;padding:2px 11px;margin-left:10px}
+#newclose:hover{color:var(--amber);border-color:var(--amber-dim)}
+#newbody{padding:16px;display:flex;flex-direction:column;gap:6px;max-height:66vh;overflow-y:auto}
+#newbody label{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);margin-top:8px}
+#newbody label small{text-transform:none;letter-spacing:0;margin-left:8px;opacity:.7}
+#newbody input[type=text],#newbody input:not([type]),#newbody select{
+  background:var(--bg);border:1px solid var(--line);color:var(--amber);font-family:inherit;
+  font-size:13px;padding:7px 10px;width:100%}
+#newbody input:focus,#newbody select:focus{outline:none;border-color:var(--amber-dim)}
+#newbody .introw{display:flex;gap:8px}
+#newbody .fgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+#newbody .chk{display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--amber-dim)}
+#newbody .chk input{width:auto}
+#newsuggest{background:transparent;border:1px solid var(--amber-faint);color:var(--amber-dim);
+  font-family:inherit;font-size:12px;cursor:pointer;padding:0 14px;white-space:nowrap}
+#newsuggest:hover{color:var(--amber);border-color:var(--amber-dim)}
+#newsuggest:disabled{opacity:.5;cursor:default}
+#newwhy{font-size:11px;color:var(--amber-dim);font-style:italic;min-height:0}
+#newwhy:empty{display:none}
+#newerr{color:#ff5f56;font-size:11px}
+#newerr:empty{display:none}
+#newfoot{padding:12px 16px;border-top:1px solid var(--line);display:flex;justify-content:flex-end}
+#newcreate{font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:5px 28px;
+  background:var(--amber);border:none;color:#151005;cursor:pointer;font-weight:700}
+#newcreate:hover{box-shadow:0 0 18px rgba(255,176,0,.5)}
+#newcreate:disabled{opacity:.5;cursor:default;box-shadow:none}
 #modaliterm{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 11px;margin-left:10px}
 #modaliterm:hover{color:var(--amber);border-color:var(--amber-dim)}
 #modaliterm:disabled{opacity:.6;cursor:default}
@@ -660,6 +809,7 @@ body::after{
     <span id="title">grid</span>
     <span id="status">connecting…</span>
     <button id="attachbtn" class="act" style="display:none">⧉ copy attach</button>
+    <button id="newbtn" class="act">+ NEW SESSION</button>
     <button id="refreshbtn" class="act">↻ refresh</button>
     <div id="tabs">
       <button class="tab" data-mode="grid">GRID</button>
@@ -710,6 +860,37 @@ body::after{
       <input id="modalinput" placeholder="prompt / steer this session… (Enter sends)" autocomplete="off" spellcheck="false">
       <button id="modalsend">SEND</button>
     </div>
+  </div>
+</div>
+
+<div id="newmodal">
+  <div id="newback"></div>
+  <div id="newpanel">
+    <div id="newhead">
+      <span class="nm">+ new session</span>
+      <span class="st" id="newstatus"></span>
+      <button id="newclose">✕ close</button>
+    </div>
+    <div id="newbody">
+      <label>what do you want to do?<small>optional — Claude picks the machine, folder, and command</small></label>
+      <div class="introw">
+        <input id="newintent" placeholder="e.g. plan the next Greenmark sprint / fix the helios auth bug" autocomplete="off">
+        <button id="newsuggest">✦ suggest</button>
+      </div>
+      <div id="newwhy"></div>
+      <div class="fgrid">
+        <div><label>machine</label><select id="newhost"></select></div>
+        <div><label>name</label><input id="newname" placeholder="session name" autocomplete="off"></div>
+      </div>
+      <label>directory</label>
+      <input id="newcwd" list="dirlist" placeholder="/Users/…" autocomplete="off">
+      <datalist id="dirlist"></datalist>
+      <label>command<small>empty = plain shell</small></label>
+      <input id="newcmd" placeholder="e.g. claude" autocomplete="off">
+      <label class="chk"><input type="checkbox" id="newgui" checked> open an iTerm2 window attached to it</label>
+      <div id="newerr"></div>
+    </div>
+    <div id="newfoot"><button id="newcreate">CREATE SESSION</button></div>
   </div>
 </div>
 <script>
@@ -1244,14 +1425,68 @@ $("#modaliterm").onclick=async()=>{
   b.textContent=r.ok?"⧉ opened":("✕ "+(r.error||"failed"));
   setTimeout(()=>{b.textContent=was;b.disabled=false;},r.ok?1400:3000);
 };
+// ---- new session ----
+let hostsLoaded=false;
+async function loadHosts(){
+  if(hostsLoaded)return;
+  const r=await api("/api/hosts");
+  if(!r.ok)return;
+  $("#newhost").innerHTML=(r.hosts||[]).map(h=>'<option value="'+h+'">'+h+'</option>').join("");
+  $("#dirlist").innerHTML=(r.dirs||[]).map(d=>'<option value="'+d+'">').join("");
+  hostsLoaded=true;
+}
+function openNew(){
+  $("#newmodal").classList.add("open");
+  $("#newerr").textContent="";$("#newwhy").textContent="";$("#newstatus").textContent="";
+  loadHosts();
+  setTimeout(()=>$("#newintent").focus(),40);
+}
+function closeNew(){$("#newmodal").classList.remove("open");}
+async function doSuggest(){
+  const intent=$("#newintent").value.trim();
+  if(!intent){$("#newerr").textContent="describe what you want to do first";return;}
+  const b=$("#newsuggest");b.disabled=true;b.textContent="thinking…";
+  $("#newerr").textContent="";$("#newstatus").textContent="asking claude";
+  const r=await api("/api/suggest",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({intent})});
+  b.disabled=false;b.textContent="✦ suggest";$("#newstatus").textContent="";
+  if(!r.ok){$("#newerr").textContent=r.error||"suggest failed";return;}
+  if(r.name)$("#newname").value=r.name;
+  if(r.cwd)$("#newcwd").value=r.cwd;
+  if(r.command!==undefined)$("#newcmd").value=r.command||"";
+  if(r.host)$("#newhost").value=r.host;
+  $("#newwhy").textContent=r.why?("✦ "+r.why):"";
+}
+async function doCreate(){
+  const name=$("#newname").value.trim();
+  if(!name){$("#newerr").textContent="a session needs a name";return;}
+  const b=$("#newcreate");b.disabled=true;b.textContent="CREATING…";$("#newerr").textContent="";
+  const r=await api("/api/spawn",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({name,host:$("#newhost").value,cwd:$("#newcwd").value.trim(),
+      command:$("#newcmd").value.trim(),gui:$("#newgui").checked,
+      description:$("#newintent").value.trim()||null})});
+  b.disabled=false;b.textContent="CREATE SESSION";
+  if(!r.ok){$("#newerr").textContent=r.error||"spawn failed";return;}
+  closeNew();$("#newintent").value="";$("#newname").value="";$("#newcmd").value="";
+  refresh();
+}
+$("#newbtn").onclick=openNew;
+$("#newclose").onclick=closeNew;
+$("#newback").onclick=closeNew;
+$("#newsuggest").onclick=doSuggest;
+$("#newcreate").onclick=doCreate;
+$("#newintent").addEventListener("keydown",e=>{if(e.key==="Enter")doSuggest();});
+
 $("#modalclose").onclick=closeModal;
 $("#modalback").onclick=closeModal;
 document.querySelectorAll("#modalchips .chip").forEach(ch=>ch.onclick=()=>modalKeys(ch.dataset.keys,false,false));
 
 // keyboard: Esc closes the modal first; otherwise 1-4 switch views
 document.addEventListener("keydown",e=>{
+  if($("#newmodal").classList.contains("open")){if(e.key==="Escape")closeNew();return;}
   if($("#modal").classList.contains("open")){if(e.key==="Escape")closeModal();return;}
   if(e.target.id==="filter"||e.target.id==="input"||e.target.id==="modalinput")return;
+  if(e.target.closest&&e.target.closest("#newmodal"))return;
   const map={"1":"grid","2":"groups","3":"activity","4":"flow"};
   if(map[e.key])setMode(map[e.key]);
 });
@@ -1361,11 +1596,14 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
             return
+        if url.path == "/api/hosts":
+            self._json({"ok": True, "hosts": _known_hosts(), "dirs": _candidate_dirs()})
+            return
         self._json({"ok": False, "error": "not_found"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802
         url = urlparse(self.path)
-        if url.path not in ("/api/send", "/api/head"):
+        if url.path not in ("/api/send", "/api/head", "/api/spawn", "/api/suggest"):
             self._json({"ok": False, "error": "not_found"}, 404)
             return
         if not self._host_allowed():
@@ -1379,6 +1617,20 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
             self._json({"ok": False, "error": "bad_json"}, 400)
+            return
+        if url.path == "/api/suggest":
+            intent = (data.get("intent") or "").strip()
+            if not intent:
+                self._json({"ok": False, "error": "missing_intent"}, 400)
+                return
+            r = _suggest_session(intent)
+            if "_error" in r:
+                self._json({"ok": False, "error": r["_error"]})
+            else:
+                self._json({"ok": True, **r})
+            return
+        if url.path == "/api/spawn":
+            self._json(_spawn_session(data))
             return
         session = data.get("session")
         if not isinstance(session, str) or not session:

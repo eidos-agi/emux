@@ -2,6 +2,12 @@
 
 All notable changes to Emux are documented here.
 
+## v0.18.0 - 2026-07-12
+
+- **`+ NEW SESSION` button — start a session from the control room.** Pick the machine (local, or any `~/.ssh/config` alias / host already in the registry), the directory, and the command; optionally have an iTerm2 window open attached to it. New `POST /api/spawn` (wraps `tmux_spawn`, so remote works) and `GET /api/hosts`.
+- **AI-suggested placement.** Type what you actually want to do — "reconcile the Greenmark metrics workbook against the warehouse" — and `✦ suggest` asks `claude -p` (fixed-cost CLI, never the API) to pick the machine, the repo/cockpit directory, the command, and a session name, with a one-line rationale. It reads the real repo trees as candidates, so it lands in the right project rather than guessing.
+- **Fix: company classifier missed company repos in the generic `~/repos/` tree.** It only matched the `repos-<company>/` roots, so `repos/greenmark-claude-toolkit` read as no-company. Roots are still authoritative; a company keyword anywhere in the path is now the fallback.
+
 ## v0.17.0 - 2026-07-12
 
 - **"⧉ iTerm2" button in the session modal.** Open a session, click it, and a new iTerm2 window opens attached to that session's tmux — so you can watch/drive it in a real terminal and close the window when done (the session keeps running; closing just detaches). Driven by AppleScript `write text` (not a `.command` file), so macOS Gatekeeper doesn't throw a quarantine prompt. New `POST /api/head` endpoint.
