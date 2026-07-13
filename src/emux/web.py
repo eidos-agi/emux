@@ -664,11 +664,42 @@ def _escalate_if_gated(session: str, agent_key: str, content: str) -> None:
     if _ESCALATED.get(session) == gate:
         return                             # already escalated THIS gate
     _ESCALATED[session] = gate
+    # (1) the up-channel: a parent blocked in tmux_wait wakes immediately.
     try:
         _server.inject_signal(
             session, "NEED",
             f"blocked on a {agent_key} gate: {gate!r} — needs a human decision")
     except Exception:  # noqa: BLE001, S110  — escalation must never break the poll
+        pass
+    # (2) the HUMAN's tray: file a Hancock request so the block lands where the
+    # human actually looks, with the specific ask — not a jsonl nobody watches.
+    _file_hancock_escalation(session, agent_key, gate)
+
+
+def _file_hancock_escalation(session: str, agent_key: str, gate: str) -> None:
+    """Put a gated worker in the operator's Hancock tray. The queued command
+    opens the worker's terminal (`emux head`) so ONE signature brings it up to
+    resolve; the `why` carries the exact block. High risk ⇒ always waits.
+
+    Best-effort and isolated: if hancock isn't installed or this fails, the NEED
+    signal already fired — escalation degrades, it never breaks the poll."""
+    import shutil
+    import subprocess
+    hancock = shutil.which("hancock")
+    if not hancock:
+        return
+    # a clean env: the daemon may have inherited CLAUDECODE from its spawner,
+    # which trips hancock's "don't drive the queue from Claude Code" guard.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "ANTHROPIC_API_KEY")}
+    try:
+        subprocess.run(
+            [hancock, "add", f"emux head {session}",
+             "-why", f"{session} blocked on a {agent_key} gate: {gate} — "
+                     "approve to open its terminal and resolve, or deny to leave it",
+             "-risk", "high", "--source", f"emux:{session}"],
+            env=env, capture_output=True, text=True, timeout=15, check=False)
+    except Exception:  # noqa: BLE001, S110
         pass
 
 

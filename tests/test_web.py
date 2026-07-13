@@ -445,3 +445,46 @@ def test_manager_inherits_company_from_the_worker_it_manages(monkeypatch):
     assert by["wrk"]["company"]["company"] == "greenmark"
     assert by["mgr"]["company"]["company"] == "greenmark"   # inherited
     assert "_co_explicit" not in by["mgr"]                  # temp flag cleaned up
+
+
+def test_gated_worker_escalates_to_hancock_once_per_gate(monkeypatch, tmp_path):
+    """A blocked worker files a Hancock request carrying the SPECIFIC gate, once
+    per gate, and never inherits Claude-Code env that would trip hancock's guard."""
+    import shutil
+    import subprocess
+
+    from emux import web
+    calls = []
+    fake_hancock = tmp_path / "hancock"
+    fake_hancock.write_text("#!/bin/sh\n")
+    fake_hancock.chmod(0o755)
+    monkeypatch.setattr(shutil, "which", lambda n: str(fake_hancock) if n == "hancock" else None)
+
+    class _R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, env=None, **kw):
+        calls.append({"cmd": cmd, "env": env})
+        return _R()
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("CLAUDECODE", "1")   # the daemon may inherit this
+
+    gate = "Update available!\n1. Update now (runs brew upgrade)\n2. Skip"
+    web._ESCALATED.clear()
+    web._escalate_if_gated("wrk", "codex", gate)
+    web._escalate_if_gated("wrk", "codex", gate)   # same gate again → no new request
+
+    # exactly one hancock request, and it names the gate
+    hancock_calls = [c for c in calls if "add" in c["cmd"]]
+    assert len(hancock_calls) == 1
+    joined = " ".join(hancock_calls[0]["cmd"])
+    assert "update available" in joined.lower() and "-risk" in hancock_calls[0]["cmd"]
+    # the CC guard env was scrubbed
+    assert "CLAUDECODE" not in (hancock_calls[0]["env"] or {})
+
+    # gate clears → rearm → a new gate escalates again
+    web._escalate_if_gated("wrk", "codex", "› write some code")   # not a gate
+    web._escalate_if_gated("wrk", "codex", gate)
+    assert len([c for c in calls if "add" in c["cmd"]]) == 2

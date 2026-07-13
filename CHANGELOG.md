@@ -2,6 +2,14 @@
 
 All notable changes to Emux are documented here.
 
+## v0.28.0 - 2026-07-13
+
+**A blocked worker reaches the human's tray — silence is now impossible.** The gate-escalation added in v0.25 fired a `NEED` signal into a jsonl nobody watches; it now ALSO files a **Hancock request**, so a worker stuck on an approval gate lands in the operator's actual signing tray with the specific ask.
+
+- When the daemon polls a session and `adapters.gated()` sees a gate, it files `hancock add "emux head <session>"` with `-why` carrying the exact block ("blocked on a codex gate: update available — approve to open its terminal and resolve, or deny to leave it") at HIGH risk, so it always waits for a signature. One request per gate; rearmed when the gate clears.
+- The daemon runs a **scrubbed env** (drops `CLAUDECODE`/session id) so Hancock's "don't drive the queue from Claude Code" guard doesn't reject it. Proven live: a synthetic Codex update-gate produced a real HIGH request in the tray.
+- Best-effort and isolated: if hancock isn't installed or the call fails, the NEED signal already fired — escalation degrades, it never breaks the poll. Note: an agent can FILE a request but not withdraw it; only the human denies (in the TUI) — correct by design.
+
 ## v0.27.0 - 2026-07-13
 
 - **A manager inherits the company of what it supervises.** A supervisor is defined by the work it manages, not the directory its process runs in — so a manager whose cwd would derive one company adopts its worker's company instead (when its managed set agrees). Explicit override still wins over both. Fixes a Claude manager running from the emux repo reading as Eidos while it supervised a Greenmark worker.
