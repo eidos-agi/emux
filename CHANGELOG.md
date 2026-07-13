@@ -2,6 +2,10 @@
 
 All notable changes to Emux are documented here.
 
+## v0.15.0 - 2026-07-12
+
+- **Tag filter in the sidebar.** A chip bar under the session filter lists every tag across the fleet with its count; click one to narrow the whole view (grid / groups / activity / flow / sidebar) to sessions carrying that tag, click again (or `✕ all`) to clear. A card's own `#tag` chips now toggle the same filter instead of jumping to the groups anchor — one consistent "filter to this tag" gesture.
+
 ## v0.14.0 - 2026-07-12
 
 - **`move_to_emux` MCP tool** — a Claude Code chat moves ITSELF into emux. Reads `CLAUDE_CODE_SESSION_ID` from the environment, derives the session's cwd from its transcript, and spawns a tmux window running `claude --resume <id>`, registered + managed like any other session (visible in the web control room, classifiable, steerable from the modal). One call turns the conversation you're in into a first-class fleet member.

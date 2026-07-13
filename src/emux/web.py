@@ -356,6 +356,13 @@ body::after{
   color:var(--amber);text-shadow:0 0 18px rgba(255,176,0,.45),0 0 2px rgba(255,176,0,.9);
 }
 #brand small{color:var(--text-dim);font-size:11px;letter-spacing:3px;text-transform:uppercase}
+#tagbar{display:flex;flex-wrap:wrap;gap:4px;padding:4px 8px 0}
+#tagbar:empty{display:none}
+.tagchip{font-size:10px;letter-spacing:.5px;padding:2px 7px;border:1px solid var(--line);
+  border-radius:10px;color:var(--text-dim);cursor:pointer;user-select:none;white-space:nowrap}
+.tagchip:hover{border-color:var(--amber-faint);color:var(--amber-dim)}
+.tagchip.on{background:var(--amber);border-color:var(--amber);color:#1a1200;font-weight:700}
+.tagchip .cnt{opacity:.6;margin-left:3px}
 #sessions{flex:1;overflow-y:auto;padding:8px}
 .card{
   border:1px solid var(--line);border-left:3px solid var(--amber-faint);
@@ -577,6 +584,7 @@ body::after{
 <aside id="side">
   <div id="brand"><h1>EMUX</h1><small>control room</small></div>
   <input id="filter" placeholder="filter sessions…" autocomplete="off" spellcheck="false">
+  <div id="tagbar"></div>
   <div id="sessions"></div>
   <footer id="footer">daemon · v__VERSION__</footer>
 </aside>
@@ -640,7 +648,7 @@ body::after{
 const $=s=>document.querySelector(s);
 const SVGNS="http://www.w3.org/2000/svg";
 let mode="grid", current=null, grid=[], chatTimer=null, gridTimer=null, screenEl=null;
-let filterStr="", flashOn=false;
+let filterStr="", flashOn=false, activeTag="";
 let flowSig=null, flowPre={}, flowBox={};   // flow view: rebuild only on topology change, else update panes in place
 const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW"};
 
@@ -667,7 +675,28 @@ function uptime(created){        // session age from tmux created_unix (#16)
   return "up "+Math.round(s/86400)+"d";
 }
 function hot(s){return s.last_change_age!==null&&s.last_change_age!==undefined&&s.last_change_age<6;}
-function shown(){return grid.filter(s=>!filterStr||s.name.toLowerCase().includes(filterStr));}
+function shown(){return grid.filter(s=>
+  (!filterStr||s.name.toLowerCase().includes(filterStr))
+  &&(!activeTag||(s.tags||[]).includes(activeTag)));}
+
+function renderTagbar(){
+  const box=$("#tagbar");if(!box)return;
+  const counts=new Map();
+  grid.forEach(s=>(s.tags||[]).forEach(t=>counts.set(t,(counts.get(t)||0)+1)));
+  if(!counts.size&&!activeTag){box.innerHTML="";return;}
+  const tags=[...counts.keys()].sort();
+  let html="";
+  if(activeTag)html+='<span class="tagchip" data-tag="">✕ all</span>';
+  tags.forEach(t=>{
+    html+='<span class="tagchip'+(t===activeTag?" on":"")+'" data-tag="'+t+'">#'+t
+      +'<span class="cnt">'+counts.get(t)+'</span></span>';
+  });
+  box.innerHTML=html;
+  box.querySelectorAll(".tagchip").forEach(el=>el.onclick=()=>{
+    activeTag=el.dataset.tag===activeTag?"":el.dataset.tag;
+    renderTagbar();renderSidebar();if(mode!=="chat")render();
+  });
+}
 
 function setMode(m){
   mode=m;current=(m==="chat")?current:null;
@@ -701,7 +730,7 @@ async function poll(){
     if(!r.ok){$("#status").textContent=r.error||"error";$("#status").className="err";return;}
     grid=r.sessions;
     $("#status").textContent=grid.filter(s=>s.live).length+" live · polling";$("#status").className="";
-    updateChrome();renderSidebar();
+    updateChrome();renderTagbar();renderSidebar();
     if(mode!=="chat")render();
   }catch(e){$("#status").textContent="daemon unreachable";$("#status").className="err";}
 }
@@ -725,9 +754,10 @@ function renderSidebar(){
     d.onclick=()=>openModal(s);
     box.appendChild(d);
   });
-  document.querySelectorAll(".tagjump").forEach(el=>el.onclick=ev=>{   // clickable tags (#8)
-    ev.stopPropagation();const tag=el.dataset.tag;setMode("groups");
-    setTimeout(()=>{const h=document.getElementById("grp-"+tag);if(h)h.scrollIntoView({behavior:"smooth"});},60);
+  document.querySelectorAll(".tagjump").forEach(el=>el.onclick=ev=>{   // click a card's tag → filter to it
+    ev.stopPropagation();const tag=el.dataset.tag;
+    activeTag=tag===activeTag?"":tag;
+    renderTagbar();renderSidebar();if(mode!=="chat")render();
   });
 }
 
