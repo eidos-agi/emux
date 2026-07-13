@@ -132,7 +132,7 @@ def test_detect_company_maps_cwd_to_company():
         "/Users/x/repos-greenmark/university": "greenmark",
         "/Users/x/repos-aic-holdings/foo": "aic",
         "/Users/x/repos-personal/notes": "personal",
-        "/Users/x/repos-bv/aic-dashboard": "personal",
+        "/Users/x/repos-bv/aic-dashboard": "boone",
         "/Users/x/some/other/path": "",
         None: "",
     }

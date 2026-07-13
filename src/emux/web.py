@@ -158,7 +158,8 @@ _COMPANY_TABLE = [
     ("momentito", "Momentito", "#ff9ecf", ("repos-momentito",)),
     ("rhea", "Rhea Impact", "#9ae6e6", ("repos-rheaimpact",)),
     ("asmp", "ASMP", "#d0c0a0", ("repos-asmp",)),
-    ("personal", "Personal", "#f0d060", ("repos-personal", "repos-local", "repos-bv")),
+    ("boone", "Boone Voyage", "#4db6c9", ("repos-bv",)),
+    ("personal", "Personal", "#f0d060", ("repos-personal", "repos-local")),
 ]
 
 
