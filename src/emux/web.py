@@ -2029,6 +2029,36 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
 #nimtest{background:var(--bg-card);color:var(--text);border:1px solid var(--amber)}
 #nimtestout.ok,#setsaveout.ok{color:#2ea043;font-size:12px}
 #nimtestout.err,#setsaveout.err{color:#e05545;font-size:12px}
+/* --- floating per-terminal chat: choices as chips + type-your-own, NCDMV-style --- */
+#tchat{position:fixed;right:26px;bottom:26px;z-index:60;width:340px;max-width:90vw}
+#tchat.collapsed #tchatpanel{display:none}
+#tchat:not(.collapsed) #tchatlauncher{display:none}
+#tchatlauncher{width:54px;height:54px;border-radius:50%;background:var(--amber);color:var(--on-accent);
+  border:none;font-size:23px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4);position:relative}
+#tchatbadge{position:absolute;top:-3px;right:-3px;background:#c0392b;color:#fff;font-size:11px;
+  min-width:19px;height:19px;border-radius:10px;display:none;align-items:center;justify-content:center;
+  padding:0 4px;font-weight:800;box-shadow:0 1px 4px rgba(0,0,0,.35)}
+#tchatpanel{background:var(--bg-raise);border:1px solid var(--amber);border-radius:14px;overflow:hidden;
+  box-shadow:0 12px 44px rgba(0,0,0,.5);display:flex;flex-direction:column;max-height:64vh}
+#tchathead{background:var(--amber);color:var(--on-accent);padding:9px 13px;font-size:13px;font-weight:650;
+  display:flex;justify-content:space-between;align-items:center}
+#tchathead b{font-weight:800}
+#tchatmin{background:transparent;border:none;color:var(--on-accent);font-size:15px;cursor:pointer}
+#tchatchips{padding:11px;display:flex;flex-direction:column;gap:7px;overflow:auto}
+.tc-opt,.tc-sug{border:none;border-radius:12px;padding:9px 13px;font-family:inherit;font-size:12.5px;
+  font-weight:600;cursor:pointer;text-align:left;box-shadow:0 2px 5px rgba(0,0,0,.18);transition:filter .12s}
+.tc-opt{background:var(--amber);color:var(--on-accent)}
+.tc-opt b{opacity:.8;font-weight:800;margin-right:6px}
+.tc-sug{background:var(--bg-card);color:var(--text);border:1.5px solid var(--amber)}
+.tc-opt:hover,.tc-sug:hover{filter:brightness(1.1)}
+.tc-opt:disabled,.tc-sug:disabled{opacity:.5;cursor:default}
+.tc-opt.sel{box-shadow:0 0 0 2px var(--bg-raise),0 0 0 4px var(--amber)}
+.tc-empty{color:var(--text-dim);font-size:12px;font-style:italic;padding:4px 2px}
+#tchatrow{display:flex;gap:6px;padding:10px 11px;border-top:1px solid var(--line);background:var(--bg-card)}
+#tchatinput{flex:1;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:9px;
+  padding:8px 11px;font-family:inherit;font-size:13px}
+#tchatsend{background:var(--amber);color:var(--on-accent);border:none;border-radius:9px;width:40px;
+  font-size:15px;cursor:pointer}
 .happrove:disabled,.hdeny:disabled{opacity:.4;cursor:default}
 </style>
 </head>
@@ -2119,6 +2149,14 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
       <div class="dgsugg"></div>
     </div>
     <div id="modalscreen"></div>
+    <div id="tchat" class="collapsed">
+      <button id="tchatlauncher" onclick="tchatToggle()">💬<span id="tchatbadge"></span></button>
+      <div id="tchatpanel">
+        <div id="tchathead"><span>💬 reply to <b id="tchatsess"></b></span><button id="tchatmin" onclick="tchatToggle()" title="minimize">▾</button></div>
+        <div id="tchatchips"></div>
+        <div id="tchatrow"><input id="tchatinput" placeholder="choose one, or type your reply…" autocomplete="off" spellcheck="false"><button id="tchatsend" onclick="tchatSend()">➤</button></div>
+      </div>
+    </div>
     <div id="modalopts"></div>
     <div id="modalchips">
       <button class="chip" data-keys="C-c">^C</button>
@@ -2821,6 +2859,7 @@ function openModal(s){
   const sc=$("#modalscreen");sc.textContent="";sc.dataset.last="";
   $("#modaldigest").className="";$("#modaldigest .dgtext").textContent="";$("#modaldigest .dgsugg").innerHTML="";
   setPending("");$("#modalthink").className="";
+  tOpts=[];tSugg=[];tchatCollapsed=false;$("#tchatsess").textContent=s.name;$("#tchat").className="collapsed";renderTChat();
   $("#modal").classList.add("open");
   modalRefresh();clearInterval(modalTimer);modalTimer=setInterval(modalRefresh,1200);
   loadDigest();                                  // the gist + suggested replies, up front
@@ -2872,33 +2911,51 @@ async function loadDigest(){
     $("#modaldigest .dgtext").textContent="(couldn't summarize — "+(r.error||"")+")"+more;return;}
   digestErr=false;digestRetries=0;   // recovered
   $("#modaldigest .dgtext").textContent=r.digest||"(nothing notable)";
-  $("#modaldigest .dgsugg").innerHTML=(r.suggestions||[]).map(s=>'<button class="sgg">'+esc(s)+'</button>').join("");
-  $("#modaldigest .dgsugg").querySelectorAll(".sgg").forEach(b=>b.onclick=()=>{
-    $("#modaldigest .dgsugg").querySelectorAll(".sgg").forEach(x=>x.disabled=true);
-    modalKeys(b.textContent,true,true);          // send the chosen reply as the prompt
-    setTimeout(()=>{modalRefresh();loadDigest();},1600);
-  });
+  setSuggestions(r.suggestions||[]);   // gist replies become chips in the floating chat
 }
 // turn an on-screen numbered menu into clickable bubbles that answer it for you.
-function renderOptions(opts){
-  const box=$("#modalopts");
-  if(!opts||!opts.length){box.className="";box.innerHTML="";return;}
-  box.className="on";
-  box.innerHTML='<div class="ohint">pick one — it answers the prompt for you</div>'
-    +opts.map(o=>'<button class="obub'+(o.selected?" sel":"")+'" data-n="'+o.n+'">'
-      +'<b>'+o.n+'</b> '+esc(o.label)+'</button>').join("");
+// The choices for a terminal live in a floating chat LOCAL to that terminal:
+// on-screen menu options + the gist's suggested replies become quick chips, and
+// there's a box to type your own — choose one, or chat. (NCDMV-style.)
+let tOpts=[], tSugg=[], tchatCollapsed=false;
+function renderOptions(opts){ tOpts=opts||[]; renderTChat(); }   // a menu on screen → chips
+function setSuggestions(sugg){ tSugg=sugg||[]; renderTChat(); }  // gist replies → chips
+async function sendOption(target){
+  // walk the ❯ cursor to the target then confirm — works for any cursor menu
+  // (Claude/Codex), no reliance on digit-select.
+  const cur=((tOpts.find(o=>o.selected))||tOpts[0]||{n:target}).n;
   const send=k=>api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({session:modalSession.session,keys:k,literal:false,enter:false})});
-  box.querySelectorAll(".obub").forEach(b=>b.onclick=async()=>{
-    box.querySelectorAll(".obub").forEach(x=>x.disabled=true);
-    // navigate the ❯ cursor from where it is to the target, then confirm — works
-    // for any cursor menu (Claude/Codex), no reliance on digit-select.
-    const target=+b.dataset.n, cur=((opts.find(o=>o.selected))||opts[0]).n;
-    const arrow=target>=cur?"Down":"Up";
-    for(let i=0;i<Math.abs(target-cur);i++){await send(arrow);await new Promise(r=>setTimeout(r,90));}
-    await send("Enter");
-    setTimeout(modalRefresh,500);
-  });
+  const arrow=target>=cur?"Down":"Up";
+  for(let i=0;i<Math.abs(target-cur);i++){await send(arrow);await new Promise(r=>setTimeout(r,90));}
+  await send("Enter");
+  setTimeout(()=>{modalRefresh();loadDigest();},600);
+}
+function renderTChat(){
+  const chips=$("#tchatchips"); if(!chips)return;
+  const parts=[];
+  tOpts.forEach(o=>parts.push('<button class="tc-opt'+(o.selected?" sel":"")+'" data-n="'+o.n+'"><b>'+o.n+'</b> '+esc(o.label)+'</button>'));
+  tSugg.forEach((s,i)=>parts.push('<button class="tc-sug" data-i="'+i+'">'+esc(s)+'</button>'));
+  chips.innerHTML=parts.join("")||'<div class="tc-empty">no suggestions right now — type your reply below</div>';
+  const n=tOpts.length+tSugg.length;
+  const badge=$("#tchatbadge");badge.textContent=n||"";badge.style.display=n?"inline-block":"none";
+  chips.querySelectorAll(".tc-opt").forEach(b=>b.onclick=()=>{
+    chips.querySelectorAll("button").forEach(x=>x.disabled=true);sendOption(+b.dataset.n);});
+  chips.querySelectorAll(".tc-sug").forEach(b=>b.onclick=()=>{
+    const t=tSugg[+b.dataset.i];setPending(t);modalKeys(t,true,true);
+    tSugg=[];renderTChat();setTimeout(()=>{modalRefresh();loadDigest();},1500);});
+  // when a real choice lands, float the chat open (unless the user minimized it)
+  if(n&&!tchatCollapsed)$("#tchat").className="";
+}
+function tchatToggle(){
+  tchatCollapsed=!tchatCollapsed;
+  $("#tchat").className=tchatCollapsed?"collapsed":"";
+  if(!tchatCollapsed)setTimeout(()=>$("#tchatinput").focus(),50);
+}
+function tchatSend(){
+  const i=$("#tchatinput");const t=i.value.trim();if(!t)return;
+  i.value="";setPending(t);
+  modalKeys(t,true,true).then(ok=>{if(!ok){if(!i.value)i.value=t;setPending("");}});
 }
 async function modalJudge(){
   if(!modalSession)return;
@@ -2945,6 +3002,7 @@ function updateThinking(t){const el=$("#modalthink");
   else el.className="";}
 $("#modalsend").onclick=modalSubmit;
 $("#modalinput").addEventListener("keydown",e=>{if(e.key==="Enter")modalSubmit();});
+$("#tchatinput").addEventListener("keydown",e=>{if(e.key==="Enter")tchatSend();});
 $("#modaliterm").onclick=async()=>{
   if(!modalSession)return;
   const b=$("#modaliterm");const was=b.textContent;b.disabled=true;b.textContent="opening…";

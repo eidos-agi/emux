@@ -2,6 +2,11 @@
 
 All notable changes to Emux are documented here.
 
+## v0.49.0 - 2026-07-13
+
+- **Choices are now a floating per-terminal chat (choose one, or type).** Instead of a bar of option bubbles above the composer, a session's choices live in a floating chat widget local to that terminal (NCDMV-style). It gathers the on-screen menu options (solid chips — picking one walks the cursor and confirms) and the gist's suggested replies (bordered chips), plus a "choose one, or type your reply…" box for a custom message. It floats bottom-right, auto-opens when a real choice lands, and collapses to a launcher bubble with a count badge. The gist digest text stays where it was; only the interactive choices moved into the chat.
+
+
 ## v0.48.0 - 2026-07-13
 
 - **"Needs you" is now impossible to miss.** A session waiting on you gets a red ring + glow and a pulsing "⚠ NEEDS YOU" corner badge (red reads as attention against the amber theme; the old amber-on-amber ants blended). Detection broadened: besides formal gates/questions, a session whose gist reads like it's parked on a human action ("on your desk", "awaiting your approval", "until you authorize") is flagged too — catching an idle manager that's actually relaying a decision to you. Kept conservative so normal output (verify/paste/login/tests) does not false-positive.
