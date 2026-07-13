@@ -1,6 +1,6 @@
 {
   "name": "emux",
-  "version": "0.22.0",
+  "version": "0.23.0",
   "description": "Eidos mux: TUI picker and MCP server for named tmux sessions.",
   "author": {
     "name": "Eidos AGI",

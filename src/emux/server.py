@@ -2130,6 +2130,35 @@ async def tmux_wait(
         await asyncio.sleep(1.0)
 
 
+@mcp.tool()
+@audited
+async def agent_advice(scenario: str = "") -> dict[str, Any]:
+    """Which AI agent should run for this kind of work — and why.
+
+    emux spawns sessions that run coding agents; WHICH agent is a real decision.
+    This is the registry of that decision, kept in `emux/agents.py` and
+    overridable at ~/.config/emux/agents.json.
+
+    The axis is CAPABILITY, not price: the operator subscribes to both Claude
+    Code and Codex (flat fee), and the metered API is a hard no. So "route cheap
+    tokens to a cheap tier" saves nothing here — route on what each agent is
+    actually good at.
+
+    Args:
+        scenario: plain English — what the session is FOR ("refactor the auth
+            module", "leave a long build running overnight", "second opinion on
+            this design"). Omit to get the whole table.
+
+    Returns:
+        With a scenario: {agent, command, why, evidence, matched, installed, access}.
+        Without: the full registry — agents, routes, rejected claims, what's installed.
+    """
+    from . import agents as _agents
+    if not (scenario or "").strip():
+        return {"ok": True, **_agents.table()}
+    return {"ok": True, **_agents.advise(scenario)}
+
+
 def _session_cwd(sid: str) -> str | None:
     """The working directory a Claude Code session ran in, read from its own
     transcript (~/.claude/projects/<slug>/<sid>.jsonl). Robust where slug→path

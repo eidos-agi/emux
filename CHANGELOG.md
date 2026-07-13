@@ -2,6 +2,16 @@
 
 All notable changes to Emux are documented here.
 
+## v0.23.0 - 2026-07-12
+
+**Which agent for which scenario — a registry, not folklore.** emux spawns sessions that run AI agents; which one to run was a decision living only in someone's head. `emux/agents.py` is the smallest thing that fixes that: a table you can read, query, and correct.
+
+- **The axis is capability, not price.** The operator subscribes to both Claude Code and Codex (flat fee), and the metered API is a hard constraint violation. So "route cheap tokens to a cheap tier to cut your bill" saves nothing here — routes are keyed on what each agent is GOOD at.
+- **`agent_advice(scenario)` MCP tool + `GET /api/agents`.** Plain English in ("leave a long build running overnight") → agent, command, why, evidence, and whether it's actually installed. Omit the scenario for the whole table.
+- **The new-session cascade routes the command through it.** The model no longer free-styles what runs in a session; the registry decides, and the model's suggestion is only a fallback.
+- **Rejected claims are recorded so they don't get re-litigated**, each with source and date — including the "3-tier stack cuts cost 80%" claim (irrelevant under a subscription, and its own arithmetic gives ~52%, not 80%) and the forbidden metered-API route.
+- Every route and note carries `evidence` + `updated`, and `~/.config/emux/agents.json` overrides the defaults. It is deliberately rudimentary — correct it as evidence arrives.
+
 ## v0.22.0 - 2026-07-12
 
 **Show the answer, hide the machinery.** The cascade was correct but unreadable — four numbered steps, lane toggles, filters, 29 sessions and 200 directories all on screen at once. The tree is the mechanism; it is not what you should have to read.

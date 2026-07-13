@@ -452,10 +452,22 @@ def _suggest_session(intent: str, host: str | None = None) -> dict[str, Any]:
     cwd, verified = "", False
     if isinstance(di, int) and 0 <= di < len(dirs):
         cwd, verified = dirs[di], True   # a real dir on that machine, not invented
+
+    # WHICH AGENT runs here is a routing decision with a registry behind it —
+    # not something the model should free-style. Registry wins; the model's
+    # command is only a fallback when nothing routes.
+    from . import agents as _agents
+    adv = _agents.advise(intent)
+    command = r2.get("command") or ""
+    agent_why = ""
+    if adv.get("matched") and adv.get("command"):
+        command = adv["command"]
+        agent_why = f"{adv['agent']}: {adv['why']}"
     return {**base, "action": "new", "verified": verified,
             "session": "", "cwd": cwd,
             "name": r2.get("name") or "",
-            "command": r2.get("command") or "", "why": why}
+            "command": command, "why": why,
+            "agent": adv.get("agent"), "agentWhy": agent_why}
 
 
 def _ago(sec: int) -> str:
@@ -2089,6 +2101,11 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/hosts":
             self._json({"ok": True, "hosts": _known_hosts()})
+            return
+        if url.path == "/api/agents":
+            from . import agents as _agents
+            q = (parse_qs(url.query).get("scenario") or [""])[0]
+            self._json({"ok": True, **(_agents.advise(q) if q else _agents.table())})
             return
         if url.path == "/api/peek":
             q = parse_qs(url.query)

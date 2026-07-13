@@ -408,3 +408,22 @@ def test_launchd_plist_is_well_formed():
     assert "com.eidos.emux-web" in plist
     assert "<string>9999</string>" in plist
     assert plist.strip().startswith("<?xml")
+
+
+def test_agent_registry_routes_on_capability_not_price():
+    from emux import agents
+    # long unattended coding loop -> codex; judgment/refactor -> claude
+    assert agents.advise("leave a long autonomous build running overnight")["agent"] == "codex"
+    assert agents.advise("refactor the auth module and fix the failing tests")["agent"] == "claude"
+    assert agents.advise("plan the next sprint")["agent"] == "claude"
+    # a second opinion should NOT come from the same model that did the work
+    assert agents.advise("get a second opinion / cross-check this design")["agent"] == "codex"
+    # unknown scenario still answers, but says it guessed
+    d = agents.advise("xyzzy")
+    assert d["agent"] == "claude" and d["matched"] is False
+    # both defaults are flat-fee: price is not a routing axis here
+    t = agents.table()
+    assert t["agents"]["claude"]["access"] == "subscription"
+    assert t["agents"]["codex"]["access"] == "subscription"
+    # and the metered-API route is recorded as forbidden, so it can't be re-litigated
+    assert any(n["verdict"] == "FORBIDDEN" for n in t["notes"])
