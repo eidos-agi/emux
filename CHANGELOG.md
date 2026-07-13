@@ -2,6 +2,14 @@
 
 All notable changes to Emux are documented here.
 
+## v0.29.0 - 2026-07-13
+
+**The control room sees remote workers.** The web daemon only ever talked to LOCAL tmux, so a registered session on another machine (a rentamac worker) showed as "gone", its modal failed to capture (`TMUX_CAPTURE_FAILED`, blank pane), and its classifier was stale — even while the worker was alive and working. Found the hard way: a laptop slept, the ssh attach died, the remote worker survived (as tmux is meant to), and the control room reported it dead.
+
+- **Liveness over ssh.** `sessions_payload` probes each distinct remote host once (`_remote_live_names`, cached 5s) so a session with a `host` reads LIVE, not gone.
+- **Capture + steer over ssh.** `capture_payload` and `send_payload` take a `host`; the modal's `/api/capture` and `/api/send` resolve it from the registry (`_session_host`), so the pane fills and you can drive a remote worker from the modal. Classify was already host-aware (`judge` reads the host from the registry).
+- Proven live against rentamac: `ggo-build` reads live=true host=rentamac, captures its pane over ssh, and classifies `running` — where before it was "gone" with a failed capture.
+
 ## v0.28.0 - 2026-07-13
 
 **A blocked worker reaches the human's tray — silence is now impossible.** The gate-escalation added in v0.25 fired a `NEED` signal into a jsonl nobody watches; it now ALSO files a **Hancock request**, so a worker stuck on an approval gate lands in the operator's actual signing tray with the specific ask.

@@ -54,7 +54,7 @@ def test_send_payload_literal_sends_text_then_enter(monkeypatch):
     from emux import server, web
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
     calls: list[list[str]] = []
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (calls.append(args), (0, "", ""))[1])
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (calls.append(args), (0, "", ""))[1])
     result = web.send_payload("main", "C-c looks like text", literal=True, enter=True)
     assert result["ok"]
     assert calls[0] == ["send-keys", "-t", "main", "-l", "C-c looks like text"]
@@ -65,7 +65,7 @@ def test_send_payload_named_key(monkeypatch):
     from emux import server, web
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
     calls: list[list[str]] = []
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (calls.append(args), (0, "", ""))[1])
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (calls.append(args), (0, "", ""))[1])
     result = web.send_payload("main", "C-c", literal=False, enter=False)
     assert result["ok"]
     assert calls == [["send-keys", "-t", "main", "C-c"]]
@@ -74,7 +74,7 @@ def test_send_payload_named_key(monkeypatch):
 def test_capture_payload_reports_failure(monkeypatch):
     from emux import server, web
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (1, "", "no such session"))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (1, "", "no such session"))
     result = web.capture_payload("nope")
     assert result["ok"] is False
     assert result["error"] == "tmux_capture_failed"
@@ -91,7 +91,7 @@ def test_poll_once_tracks_activity_then_grid_reads_cache(monkeypatch):
                  "manages": ["worker-1"], "registered_at": 0},
     })
     outputs = iter(["pane v1\n", "pane v1\n", "pane v2\n"])
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, next(outputs), ""))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, next(outputs), ""))
     monkeypatch.setattr(web, "_pane_command", lambda s: "")  # don't consume the capture iterator
     web._ACTIVITY.clear()
     web._CACHE.clear()
@@ -163,7 +163,7 @@ def test_observe_ignores_spinner_frame_change():
 def test_poll_once_evicts_dead_sessions(monkeypatch):
     from emux import server, web
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, "x\n", ""))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "x\n", ""))
     web._ACTIVITY.clear()
     web._CACHE.clear()
 
@@ -189,7 +189,7 @@ def daemon(monkeypatch):
         {"name": "main", "windows": 1, "created_unix": 0, "attached": False},
     ])
     monkeypatch.setattr(server, "_load_registry", lambda: {})
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, "pane content here\n", ""))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "pane content here\n", ""))
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), web.EmuxWebHandler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -357,7 +357,7 @@ def test_grid_payload_attaches_agent(monkeypatch):
         {"name": "main", "windows": 1, "created_unix": 0, "attached": False},
     ])
     monkeypatch.setattr(server, "_load_registry", lambda: {})
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, "x\n", ""))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "x\n", ""))
     monkeypatch.setattr(web, "_pane_command", lambda s: "claude")
     web._ACTIVITY.clear()
     web._CACHE.clear()
@@ -388,7 +388,7 @@ def test_flow_handles_recursive_manages_cycle(monkeypatch):
         "a": {"session": "a", "description": None, "tags": [], "manages": ["b"], "registered_at": 0},
         "b": {"session": "b", "description": None, "tags": [], "manages": ["a"], "registered_at": 0},
     })
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, "x\n", ""))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "x\n", ""))
     web._ACTIVITY.clear()
     web._CACHE.clear()
 
@@ -488,3 +488,35 @@ def test_gated_worker_escalates_to_hancock_once_per_gate(monkeypatch, tmp_path):
     web._escalate_if_gated("wrk", "codex", "› write some code")   # not a gate
     web._escalate_if_gated("wrk", "codex", gate)
     assert len([c for c in calls if "add" in c["cmd"]]) == 2
+
+
+def test_remote_session_reads_live_and_captures_over_ssh(monkeypatch):
+    """A registered session on another host must show LIVE (not 'gone') and
+    capture over ssh — the daemon only sees local tmux otherwise."""
+    from emux import server, web
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_live_sessions", lambda: [])   # nothing LOCAL
+    monkeypatch.setattr(server, "_load_registry", lambda: {
+        "remote-wrk": {"session": "wrk", "host": "rentamac",
+                       "manages": [], "tags": [], "registered_at": 0},
+    })
+    calls = []
+    def fake_tmux(args, timeout=10, host=None):
+        calls.append((args[0], host))
+        if args[0] == "ls":
+            return (0, "wrk\nother\n", "") if host == "rentamac" else (0, "", "")
+        if args[0] == "capture-pane":
+            return (0, "remote pane content\n", "")
+        return (0, "", "")
+    monkeypatch.setattr(server, "_run_tmux", fake_tmux)
+    web._RLIVE_CACHE.clear()
+
+    # liveness: the remote ls was consulted, and the session reads LIVE
+    s = next(x for x in web.sessions_payload()["sessions"] if x["name"] == "remote-wrk")
+    assert s["live"] is True and s["host"] == "rentamac"
+    assert ("ls", "rentamac") in calls
+
+    # capture routes over ssh with the resolved host
+    cap = web.capture_payload("wrk", 10, host=web._session_host("wrk"))
+    assert cap["ok"] and cap["host"] == "rentamac" and "remote pane" in cap["content"]
+    assert ("capture-pane", "rentamac") in calls

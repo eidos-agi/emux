@@ -83,18 +83,31 @@ def sessions_payload() -> dict[str, Any]:
     live = _server._live_sessions()
     registry = _server._load_registry()
     live_by_name = {s["name"]: s for s in live}
+    # a registered session may live on another machine — probe each distinct
+    # remote host once so it shows LIVE, not "gone".
+    remote_live: dict[str, set[str]] = {}
+    for entry in registry.values():
+        h = entry.get("host")
+        if h and h not in remote_live:
+            remote_live[h] = _remote_live_names(h)
     sessions = []
     for name, entry in sorted(registry.items()):
         target = entry.get("session")
+        host = entry.get("host")
+        if host:
+            is_live = target in remote_live.get(host, set())
+        else:
+            is_live = target in live_by_name
         cwd = live_by_name.get(target, {}).get("cwd") or entry.get("cwd")
         sessions.append({
             "name": name,
             "session": target,
+            "host": host,
             "description": entry.get("description"),
             "tags": entry.get("tags") or [],
             "manages": entry.get("manages") or [],
             "registered": True,
-            "live": target in live_by_name,
+            "live": is_live,
             "attached": live_by_name.get(target, {}).get("attached", False),
             "created_unix": live_by_name.get(target, {}).get("created_unix"),
             "cwd": cwd,
@@ -142,17 +155,51 @@ def sessions_payload() -> dict[str, Any]:
 # capture + change detection
 # ---------------------------------------------------------------------------
 
-def capture_payload(session: str, lines: int = 300) -> dict[str, Any]:
-    """Capture the active pane of `session` (raw tmux session name). Always live
-    — the chat view wants fresh, deep scrollback for one session, which is cheap."""
-    if _server._resolve_tmux() is None:
+_RLIVE_CACHE: dict[str, tuple[float, set[str]]] = {}
+_RLIVE_TTL = 5.0
+
+
+def _remote_live_names(host: str) -> set[str]:
+    """tmux session names live on a REMOTE host (cached briefly). This is what
+    lets the control room show a rentamac worker as LIVE instead of 'gone' — the
+    daemon only sees local tmux, so a remote session needs an ssh probe."""
+    hit = _RLIVE_CACHE.get(host)
+    if hit and (time.time() - hit[0]) < _RLIVE_TTL:
+        return hit[1]
+    names: set[str] = set()
+    try:
+        code, out, _ = _server._run_tmux(["ls", "-F", "#{session_name}"],
+                                         host=host, timeout=15)
+        if code == 0:
+            names = {ln.strip() for ln in out.splitlines() if ln.strip()}
+    except Exception:  # noqa: BLE001
+        names = set()
+    _RLIVE_CACHE[host] = (time.time(), names)
+    return names
+
+
+def _session_host(session: str) -> str | None:
+    """The registered host for a session id (None = local). Lets host-unaware
+    callers (the modal's capture/send/classify by session id) reach remote."""
+    for e in _server._load_registry().values():
+        if e.get("session") == session:
+            return e.get("host")
+    return None
+
+
+def capture_payload(session: str, lines: int = 300,
+                    host: str | None = None) -> dict[str, Any]:
+    """Capture the active pane of `session` (raw tmux session name), local or —
+    when `host` is set — over ssh. Always live; the chat/modal want fresh, deep
+    scrollback for one session, which is cheap."""
+    if host is None and _server._resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
-    code, out, err = _server._run_tmux([
-        "capture-pane", "-t", session, "-p", "-S", f"-{lines}",
-    ])
+    code, out, err = _server._run_tmux(
+        ["capture-pane", "-t", session, "-p", "-S", f"-{lines}"],
+        host=host, timeout=20)
     if code != 0:
         return {"ok": False, "error": "tmux_capture_failed", "stderr": err}
-    return {"ok": True, "session": session, "content": out}
+    return {"ok": True, "session": session, "host": host, "content": out}
 
 
 # (What each agent looks like in a pane now lives in emux/adapters.py — that is
@@ -703,10 +750,10 @@ def _file_hancock_escalation(session: str, agent_key: str, gate: str) -> None:
         pass
 
 
-def _capture_and_observe(session: str, lines: int) -> str:
-    """Capture a pane, fold it into activity state, detect the running agent,
-    and refresh the cache."""
-    cap = capture_payload(session, lines)
+def _capture_and_observe(session: str, lines: int, host: str | None = None) -> str:
+    """Capture a pane (local or remote), fold it into activity state, detect the
+    running agent, and refresh the cache."""
+    cap = capture_payload(session, lines, host=host)
     content = cap.get("content", "") if cap.get("ok") else ""
     _observe(session, content)
     agent = _detect_agent(session, content)
@@ -745,7 +792,8 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
                 ce = _CACHE.get(item["session"])
                 content = ce["content"] if (ce is not None and (now - ce["ts"]) < _CACHE_TTL) else None
             if content is None:
-                content = _capture_and_observe(item["session"], lines)
+                content = _capture_and_observe(item["session"], lines,
+                                               host=item.get("host"))
             with _LOCK:
                 ce = _CACHE.get(item["session"])
             item["content"] = content
@@ -764,26 +812,27 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
 # send
 # ---------------------------------------------------------------------------
 
-def send_payload(session: str, keys: str, literal: bool = True, enter: bool = True) -> dict[str, Any]:
-    """Send keys to `session`. literal=True sends text verbatim (`send-keys -l`),
-    so chat input like "C-c" types those characters; literal=False interprets
-    tmux key names (used by the UI's control-key chips)."""
-    if _server._resolve_tmux() is None:
+def send_payload(session: str, keys: str, literal: bool = True, enter: bool = True,
+                 host: str | None = None) -> dict[str, Any]:
+    """Send keys to `session`, local or — when `host` is set — over ssh. literal=
+    True sends text verbatim (`send-keys -l`), so chat input like "C-c" types
+    those characters; literal=False interprets tmux key names (UI control chips)."""
+    if host is None and _server._resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
     if literal:
         if keys:
-            code, _, err = _server._run_tmux(["send-keys", "-t", session, "-l", keys])
+            code, _, err = _server._run_tmux(["send-keys", "-t", session, "-l", keys], host=host)
             if code != 0:
                 return {"ok": False, "error": "tmux_send_failed", "stderr": err}
         if enter:
-            code, _, err = _server._run_tmux(["send-keys", "-t", session, "Enter"])
+            code, _, err = _server._run_tmux(["send-keys", "-t", session, "Enter"], host=host)
             if code != 0:
                 return {"ok": False, "error": "tmux_send_failed", "stderr": err}
     else:
         args = ["send-keys", "-t", session, keys]
         if enter:
             args.append("Enter")
-        code, _, err = _server._run_tmux(args)
+        code, _, err = _server._run_tmux(args, host=host)
         if code != 0:
             return {"ok": False, "error": "tmux_send_failed", "stderr": err}
     return {"ok": True, "session": session, "sent": keys, "literal": literal, "enter": enter}
@@ -2164,7 +2213,8 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                 lines = max(1, min(5000, int((q.get("lines") or ["300"])[0])))
             except ValueError:
                 lines = 300
-            self._json(capture_payload(session, lines))
+            # a registered remote session captures over ssh
+            self._json(capture_payload(session, lines, host=_session_host(session)))
             return
         if url.path == "/api/classify":
             q = parse_qs(url.query)
@@ -2263,6 +2313,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             keys,
             literal=bool(data.get("literal", True)),
             enter=bool(data.get("enter", True)),
+            host=_session_host(session),   # steer a remote worker over ssh
         ))
 
     def log_message(self, format: str, *args: Any) -> None:
