@@ -994,19 +994,20 @@ PAGE = r"""<!doctype html>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=VT323&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
 <style>
-:root{
-  --bg:#0c0a07;
-  --bg-raise:#141008;
-  --bg-card:#191307;
-  --amber:#ffb000;
-  --amber-dim:#b87d00;
-  --amber-faint:#3d2e0a;
-  --text:#e8d5a3;
-  --text-dim:#8a774d;
-  --live:#7dff8a;
-  --stale:#ff5d5d;
-  --line:#2a2113;
-  --user:#ffd569;
+:root{   /* Eidos light — the default skin; JS may swap to another via a company pill */
+  --bg:#f0ebe4;
+  --bg-raise:#e9e3db;
+  --bg-card:#e4ded6;
+  --amber:#8e6129;
+  --amber-dim:#a9853f;
+  --amber-faint:#d8cdba;
+  --text:#1e1a17;
+  --text-dim:#6b6159;
+  --live:#4a6a3a;
+  --stale:#ab5036;
+  --line:#cabfae;
+  --user:#8e6129;
+  --on-accent:#f5efe6;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
@@ -1016,12 +1017,6 @@ body{
   font:14px/1.5 "IBM Plex Mono",ui-monospace,monospace;
   display:flex;
   overflow:hidden;
-}
-body::after{
-  content:"";position:fixed;inset:0;pointer-events:none;z-index:99;
-  background:
-    repeating-linear-gradient(0deg, rgba(0,0,0,.16) 0 1px, transparent 1px 3px),
-    radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.45) 100%);
 }
 #side{
   width:280px;flex:none;height:100%;display:flex;flex-direction:column;
@@ -1038,16 +1033,16 @@ body::after{
 .tagchip{font-size:10px;letter-spacing:.5px;padding:2px 7px;border:1px solid var(--line);
   border-radius:10px;color:var(--text-dim);cursor:pointer;user-select:none;white-space:nowrap}
 .tagchip:hover{border-color:var(--amber-faint);color:var(--amber-dim)}
-.tagchip.on{background:var(--amber);border-color:var(--amber);color:#1a1200;font-weight:700}
+.tagchip.on{background:var(--amber);border-color:var(--amber);color:var(--on-accent);font-weight:700}
 .tagchip .cnt{opacity:.6;margin-left:3px}
 .tagchip.clr{color:var(--text-dim)}
 .cochip{font-size:10px;letter-spacing:.3px;padding:2px 7px;border:1px solid;border-radius:10px;
   cursor:pointer;user-select:none;white-space:nowrap;font-weight:700;opacity:.9}
 .cochip:hover{opacity:1}
-.cochip.on{color:#151005}
+.cochip.on{color:var(--on-accent)}
 .cochip .cnt{opacity:.7;margin-left:3px;font-weight:400}
 .cco{font-size:9px;font-weight:700;letter-spacing:.3px;padding:1px 6px;border-radius:8px;
-  color:#151005;white-space:nowrap}
+  color:var(--on-accent);white-space:nowrap}
 #sessions{flex:1;overflow-y:auto;padding:8px}
 .card{
   border:1px solid var(--line);border-left:3px solid var(--amber-faint);
@@ -1100,11 +1095,11 @@ body::after{
   background:transparent;color:var(--text-dim);border:1px solid var(--line);cursor:pointer;
 }
 .tab:hover{color:var(--amber);border-color:var(--amber-dim)}
-.tab.on{background:var(--amber);color:#160f00;border-color:var(--amber)}
+.tab.on{background:var(--amber);color:var(--on-accent);border-color:var(--amber)}
 #views{flex:1;overflow-y:auto;padding:18px}
 .tilegrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
 .tile{
-  border:1px solid var(--line);background:#080705;cursor:pointer;overflow:hidden;
+  border:1px solid var(--line);background:var(--bg-card);cursor:pointer;overflow:hidden;
   display:flex;flex-direction:column;transition:border-color .2s, box-shadow .4s;
 }
 .tile:hover{border-color:var(--amber-dim)}
@@ -1149,7 +1144,7 @@ body::after{
 .actrow:hover{border-color:var(--amber-dim)}
 .actrow .nm{color:var(--amber);font-weight:600;width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:none}
 .cells{display:flex;gap:2px;flex:1;min-width:0}
-.cell{width:9px;height:18px;background:#1a140a;flex:none}
+.cell{width:9px;height:18px;background:var(--bg-card);flex:none}
 .cell.on{background:var(--amber);box-shadow:0 0 5px rgba(255,176,0,.6)}
 .cell.recent{background:var(--user)}
 .actrow .age{font-size:11px;color:var(--text-dim);width:120px;text-align:right;flex:none;letter-spacing:1px}
@@ -1158,7 +1153,7 @@ body::after{
 #flowsvg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 .fbox{
   position:absolute;transform:translate(-50%,-50%);z-index:1;
-  border:1px solid var(--line);background:#080705;cursor:pointer;overflow:hidden;
+  border:1px solid var(--line);background:var(--bg-card);cursor:pointer;overflow:hidden;
   transition:border-color .2s, box-shadow .4s;
 }
 .fbox:hover{border-color:var(--amber-dim)}
@@ -1189,13 +1184,13 @@ body::after{
 .bubble{max-width:88%;padding:10px 14px;border:1px solid var(--line);position:relative}
 .bubble .who{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);margin-bottom:5px}
 .bubble.user{
-  align-self:flex-end;background:#1d1605;border-color:var(--amber-faint);
+  align-self:flex-end;background:var(--bg-raise);border-color:var(--amber-faint);
   color:var(--user);border-radius:10px 10px 0 10px;
 }
 .bubble.sys{align-self:center;color:var(--text-dim);font-size:11px;border:none;font-style:italic}
 #screen-bubble{
   align-self:flex-start;width:100%;max-width:100%;
-  background:#080705;border:1px solid var(--line);border-radius:10px 10px 10px 0;
+  background:var(--bg-card);border:1px solid var(--line);border-radius:10px 10px 10px 0;
 }
 #screen{
   font:12.5px/1.45 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
@@ -1216,13 +1211,13 @@ body::after{
 .chip:hover{color:var(--amber);border-color:var(--amber-dim)}
 #row{display:flex;gap:10px}
 #input{
-  flex:1;background:#080705;border:1px solid var(--line);color:var(--text);
+  flex:1;background:var(--bg-card);border:1px solid var(--line);color:var(--text);
   font:14px "IBM Plex Mono",monospace;padding:11px 14px;outline:none;caret-color:var(--amber);
 }
 #input:focus{border-color:var(--amber-dim);box-shadow:0 0 12px rgba(255,176,0,.1)}
 #send{
   font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:0 26px;
-  background:var(--amber);color:#160f00;border:none;cursor:pointer;
+  background:var(--amber);color:var(--on-accent);border:none;cursor:pointer;
 }
 #send:hover{box-shadow:0 0 18px rgba(255,176,0,.5)}
 /* recency-tiered age coloring (#17) */
@@ -1236,7 +1231,7 @@ body::after{
 .att{color:var(--live);font-size:10px;letter-spacing:1px;margin-left:6px}
 /* sidebar filter (#7) */
 #filter{
-  margin:0 8px 8px;width:calc(100% - 16px);background:#080705;border:1px solid var(--line);
+  margin:0 8px 8px;width:calc(100% - 16px);background:var(--bg-card);border:1px solid var(--line);
   color:var(--text);font:11px "IBM Plex Mono",monospace;padding:6px 9px;outline:none;
 }
 #filter:focus{border-color:var(--amber-dim)}
@@ -1252,7 +1247,7 @@ body::after{
 #jump{
   position:absolute;left:50%;transform:translateX(-50%);bottom:96px;display:none;
   font-family:"VT323",monospace;font-size:16px;letter-spacing:1px;
-  background:var(--amber);color:#160f00;border:none;padding:4px 16px;cursor:pointer;
+  background:var(--amber);color:var(--on-accent);border:none;padding:4px 16px;cursor:pointer;
   box-shadow:0 0 14px rgba(255,176,0,.5);z-index:5;
 }
 /* zoom-in steer modal */
@@ -1318,7 +1313,7 @@ body::after{
 .steph{display:flex;align-items:center;gap:8px;margin-bottom:6px}
 .steph .num{width:16px;height:16px;border-radius:50%;border:1px solid var(--amber-faint);
   color:var(--amber-dim);font-size:10px;display:flex;align-items:center;justify-content:center}
-.step.done .steph .num{background:var(--amber);border-color:var(--amber);color:#151005;font-weight:700}
+.step.done .steph .num{background:var(--amber);border-color:var(--amber);color:var(--on-accent);font-weight:700}
 .steph .lbl{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim)}
 .steph .sub{font-size:10px;color:var(--text-dim);opacity:.65}
 .steph .why{margin-left:auto;font-size:10px;font-style:italic;color:var(--amber-dim);
@@ -1327,7 +1322,7 @@ body::after{
 .hchip{font-size:11px;padding:3px 10px;border:1px solid var(--line);border-radius:11px;
   color:var(--text-dim);cursor:pointer;user-select:none}
 .hchip:hover{border-color:var(--amber-faint);color:var(--amber-dim)}
-.hchip.on{background:var(--amber);border-color:var(--amber);color:#151005;font-weight:700}
+.hchip.on{background:var(--amber);border-color:var(--amber);color:var(--on-accent);font-weight:700}
 .hchip.ai::after{content:" ✦";opacity:.8}
 .lanes{display:flex;gap:6px;margin-bottom:5px}
 .lane{font-size:10px;letter-spacing:.5px;padding:3px 10px;border:1px solid var(--line);
@@ -1352,7 +1347,7 @@ body::after{
 .dirrow{padding:5px 9px;font-size:12px;color:var(--text-dim);cursor:pointer;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid rgba(255,176,0,.06)}
 .dirrow:hover{background:rgba(255,176,0,.07);color:var(--amber-dim)}
-.dirrow.on{background:var(--amber);color:#151005;font-weight:700}
+.dirrow.on{background:var(--amber);color:var(--on-accent);font-weight:700}
 .dirrow .ai{opacity:.75;margin-left:6px}
 #newbody .chk{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--amber-dim);margin-top:8px}
 #newbody .chk input{width:auto}
@@ -1368,7 +1363,7 @@ body::after{
 #newerr:empty{display:none}
 #newfoot{padding:12px 16px;border-top:1px solid var(--line);display:flex;justify-content:flex-end}
 #newcreate{font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:5px 28px;
-  background:var(--amber);border:none;color:#151005;cursor:pointer;font-weight:700}
+  background:var(--amber);border:none;color:var(--on-accent);cursor:pointer;font-weight:700}
 #newcreate:hover{box-shadow:0 0 18px rgba(255,176,0,.5)}
 #newcreate:disabled{opacity:.5;cursor:default;box-shadow:none}
 #modaliterm{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 11px;margin-left:10px}
@@ -1376,11 +1371,11 @@ body::after{
 #modaliterm:disabled{opacity:.6;cursor:default}
 #modalscreen{
   flex:1;overflow-y:auto;font:12.5px/1.45 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
-  white-space:pre-wrap;word-break:break-word;padding:14px 16px;background:#080705;
+  white-space:pre-wrap;word-break:break-word;padding:14px 16px;background:var(--bg-card);
 }
 /* live classifier strip (emux judge) */
 #modaljudge{display:none;align-items:center;gap:12px;padding:8px 16px;flex:none;
-  border-bottom:1px solid var(--line);background:#0c0a06;font:11px "IBM Plex Mono",monospace}
+  border-bottom:1px solid var(--line);background:var(--bg-raise);font:11px "IBM Plex Mono",monospace}
 #modaljudge.on{display:flex}
 #modaljudge .jstate{font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:12px;white-space:nowrap}
 #modaljudge .jconf{color:var(--text-dim);font-size:10px;white-space:nowrap}
@@ -1392,11 +1387,11 @@ body::after{
 .s-waiting_external{color:#7a8fd8}.s-planning{color:#d0b24a}.s-editing{color:#d0b24a}.s-dead{color:#666}
 #modalchips{display:flex;gap:8px;padding:10px 16px 0}
 #modalrow{display:flex;gap:10px;padding:10px 16px 14px}
-#modalinput{flex:1;background:#080705;border:1px solid var(--line);color:var(--text);
+#modalinput{flex:1;background:var(--bg-card);border:1px solid var(--line);color:var(--text);
   font:14px "IBM Plex Mono",monospace;padding:11px 14px;outline:none;caret-color:var(--amber)}
 #modalinput:focus{border-color:var(--amber-dim);box-shadow:0 0 12px rgba(255,176,0,.1)}
 #modalsend{font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:0 24px;
-  background:var(--amber);color:#160f00;border:none;cursor:pointer}
+  background:var(--amber);color:var(--on-accent);border:none;cursor:pointer}
 #modalsend:hover{box-shadow:0 0 18px rgba(255,176,0,.5)}
 ::-webkit-scrollbar{width:8px}
 ::-webkit-scrollbar-thumb{background:var(--amber-faint)}
@@ -1592,16 +1587,17 @@ const THEMES={
   "eidos-light":{"--bg":"#f0ebe4","--bg-raise":"#e9e3db","--bg-card":"#e4ded6",
     "--amber":"#8e6129","--amber-dim":"#a9853f","--amber-faint":"#d8cdba",
     "--text":"#1e1a17","--text-dim":"#6b6159","--live":"#4a6a3a","--stale":"#ab5036",
-    "--line":"#cabfae","--user":"#8e6129"},
+    "--line":"#cabfae","--user":"#8e6129","--on-accent":"#f5efe6"},
   "eidos-dark":{"--bg":"#15110f","--bg-raise":"#1a1613","--bg-card":"#1e1a17",
     "--amber":"#c4935a","--amber-dim":"#9a6d35","--amber-faint":"#3a2f22",
     "--text":"#dcd5cb","--text-dim":"#8b8179","--live":"#7a8c72","--stale":"#c4694f",
-    "--line":"#332a20","--user":"#d4a870"},
-  // Greenmark Waste — deep forest green (brand #2d4a3e family) + cream + brand gold.
-  "greenmark":{"--bg":"#16291d","--bg-raise":"#0f2016","--bg-card":"#1e3a2b",
-    "--amber":"#e8c95a","--amber-dim":"#b39a45","--amber-faint":"#2a4433",
-    "--text":"#eef0e4","--text-dim":"#9fb4a4","--live":"#7fd8a0","--stale":"#e5534b",
-    "--line":"#2d4a3e","--user":"#ffe26a"},
+    "--line":"#332a20","--user":"#d4a870","--on-accent":"#1a1207"},
+  // Greenmark Waste — its actual brand: forest-green ink (#2d4a3e) on warm cream,
+  // gold as the secondary pop. Light, per the brand's own palette.json.
+  "greenmark":{"--bg":"#f5f0e8","--bg-raise":"#efe8da","--bg-card":"#e8e0d0",
+    "--amber":"#2d4a3e","--amber-dim":"#3d6b56","--amber-faint":"#d7e0d3",
+    "--text":"#1f2937","--text-dim":"#6b7280","--live":"#3d6b56","--stale":"#b3261e",
+    "--line":"#d3ccbb","--user":"#2d4a3e","--on-accent":"#f5f0e8"},
 };
 // company key → skin. Anything unmapped falls back to the default light Eidos.
 const CO_THEME={"":"eidos-light","eidos":"eidos-dark","greenmark":"greenmark"};

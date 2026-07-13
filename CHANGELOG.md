@@ -2,6 +2,15 @@
 
 All notable changes to Emux are documented here.
 
+## v0.33.0 - 2026-07-13
+
+**Readability + honest skinning.**
+
+- **Removed the CRT scanline/vignette overlay.** It was cleverness at the cost of legibility — a dark line grid over the whole page, unreadable on the light skins. Gone.
+- **Surfaces now follow the skin.** Tiles, terminal panes, the filter box, the modal input/screen, chips and the composer were hardcoded near-black (`#080705`) and stayed dark under a light theme. They now use the theme vars, so a light skin is light everywhere (cream panes, dark text) and a dark skin is dark everywhere.
+- **`--on-accent`** — button/pill text on the accent color is now a per-theme token, so it stays legible whether the accent is brass, gold, or forest green (light text on the dark-brass Eidos-light accent, dark text on the lighter dark-mode brass).
+- **Greenmark is now LIGHT** — its actual brand: forest-green ink (`#2d4a3e`) on warm cream (`#f5f0e8`), gold as the secondary. `:root` defaults to the Eidos-light palette so the first paint matches (no dark flash).
+
 ## v0.32.0 - 2026-07-13
 
 **Skins: the whole UI recolors to what you're working on.** Selecting a company pill re-skins the entire control room, so the color IS the "what am I working on" signal.
