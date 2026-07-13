@@ -2,6 +2,15 @@
 
 All notable changes to Emux are documented here.
 
+## v0.26.0 - 2026-07-13
+
+**Cross-machine, cross-vendor management — proven live.** A **Codex** manager on a MacBook supervised a **Claude** worker on a remote box (rentamac), through emux, over ssh. The manager called `tmux_capture(target="ggo-build", by_registry_name=True)` and got the worker's live pane back with `"host": "rentamac"` — it never had to know the worker was remote; it just used the registry name. The `manages` edge renders the manager→worker arrow across machines.
+
+Two hard constraints found by doing it, both now in the Codex adapter:
+
+- **`codex exec` cannot call MCP tools — it can only think.** Every tool call is auto-cancelled ("user cancelled MCP tool call") because Codex asks for approval PER TOOL CALL and headless has no one to answer. Verified against emux *and* a known-good server, so it is not an emux fault. Recorded as `oneshot_can_use_tools=False`: **a Codex manager must be an interactive session** (which is the right shape anyway — a manager should be warm).
+- **Codex's per-tool MCP approval menu is now a gate** ("Allow the … MCP server to run tool …"), as is the second presentation of the hook gate ("Press t to trust all; enter to review hooks"). Driving blindly through either would auto-approve tools or grant trust.
+
 ## v0.25.0 - 2026-07-13
 
 **Codex is a real fleet member now** — measured against a live Codex in tmux, not guessed. It has the same lifecycle emux already relies on for Claude, and every number below was established by experiment.

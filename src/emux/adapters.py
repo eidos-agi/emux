@@ -59,6 +59,9 @@ class Adapter:
     resume_fmt: str | None = None           # e.g. "claude --resume {id}"
     resume_last: str | None = None          # resume the most recent session
     oneshot_fmt: str | None = None          # non-interactive: prompt in, text out
+    # Can the one-shot mode call MCP tools? If False, a one-shot of this agent
+    # can only THINK — it cannot act, so it is useless as a manager.
+    oneshot_can_use_tools: bool = True
     # how this agent can be made to emit a completion signal. Two agents, two
     # mechanisms, same idea: the harness fires at a real turn boundary, so
     # nothing is scraped and the worker can't forget to report.
@@ -136,7 +139,13 @@ CODEX = Adapter(
     approval_sigs=(
         "do you trust the contents of this directory",   # 1st launch in a dir
         "hooks need review",                             # hook hashes changed
+        "enter to review hooks",                         # …its 2nd presentation
         "update available",                              # ← default is BREW UPGRADE
+        # Codex asks approval PER MCP TOOL CALL, with a menu. This is why a
+        # `codex exec` manager is useless: headless has no approver, so every
+        # MCP call auto-cancels ("user cancelled MCP tool call") — measured
+        # against emux AND a known-good server, so it is not an emux fault.
+        "allow the",                                     # "Allow the X MCP server to run tool …"
         "press enter to continue",
         "press enter to confirm",
     ),
@@ -147,7 +156,13 @@ CODEX = Adapter(
     launch_flags=("--dangerously-bypass-hook-trust",),
     resume_fmt="codex resume {id}",
     resume_last="codex resume --last",
+    # `codex exec` is TEXT-ONLY. It can reason, but it CANNOT call MCP tools:
+    # every call is auto-cancelled because headless has no one to answer Codex's
+    # per-tool approval menu. Measured against emux and a known-good server, so
+    # it is not an emux fault. A Codex MANAGER must therefore be an INTERACTIVE
+    # session (which is the right shape anyway — a manager should be warm).
     oneshot_fmt="codex exec {prompt}",
+    oneshot_can_use_tools=False,
     # Codex has a NATIVE Stop hook, same JSON shape as Claude's — better than the
     # `notify` path. PROVEN LIVE: hook fired `emux signal IDLE` into the inbox
     # ~9s after the turn ended, and the judge read the session as done_idle.

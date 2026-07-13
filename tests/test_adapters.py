@@ -139,3 +139,21 @@ def test_both_subscribed_agents_now_have_a_proven_done_signal():
     # and codex no longer has unknowns that stop the judge reading it
     codex = next(r for r in adapters.table() if r["agent"] == "codex")
     assert codex["read"] is True and codex["unknowns"] == []
+
+
+def test_codex_exec_cannot_call_tools_so_a_oneshot_manager_is_useless():
+    # MEASURED: `codex exec` auto-cancels every MCP tool call (no approver in
+    # headless), for emux AND a known-good server. A codex MANAGER must be an
+    # interactive session. Claude's -p can call tools, so it may be one-shot.
+    assert adapters.CODEX.oneshot_can_use_tools is False
+    assert adapters.CLAUDE.oneshot_can_use_tools is True
+
+
+def test_codex_mcp_approval_menu_is_a_gate():
+    # Codex asks approval PER MCP TOOL CALL. Driving through that menu blindly
+    # would auto-approve tools, so it must register as a gate.
+    screen = ('Allow the emux MCP server to run tool "tmux_capture"?\n'
+              '› 1. Allow\n  2. Allow for this session\n  4. Cancel')
+    assert adapters.gated("codex", screen) is not None
+    # …and its second hook-gate presentation, seen live
+    assert adapters.gated("codex", "Press t to trust all; enter to review hooks; esc to close")
