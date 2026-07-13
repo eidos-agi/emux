@@ -2,6 +2,14 @@
 
 All notable changes to Emux are documented here.
 
+## v0.20.0 - 2026-07-12
+
+**The new-session UX is the cascade now, not a form with an AI bolted on.** v0.19 fixed the data dependency but still presented four independent-looking fields; the dependency was invisible.
+
+- **Say it in plain English; it classifies down a series of real choices.** One sentence — "check on the eidos-mail sync running on the hostkey server" — resolves to ① machine, ② directory, ③ what runs there, ④ name. Each step shows the model's pick marked ✦ **alongside the real alternatives**, so every level is a choice you can override rather than a field that got filled in.
+- **Steps are visibly dependent.** ②③④ render locked/dimmed until the step above resolves ("pick a machine first"), and the directory step lists the directories that actually exist on the chosen machine (9 on `eidos-bm`, 200 on `local`).
+- **Changing an upper choice invalidates everything below it.** Switch the machine and the directory, command, and name clear, the directory options re-derive from the new machine, and CREATE disables until the cascade is complete again — so a path from the previous machine can never survive.
+
 ## v0.19.0 - 2026-07-12
 
 **The new-session choices are a cascade, not a flat form.** Which directories exist depends on which machine you picked — so the machine is resolved FIRST and everything below it is derived from that real machine.

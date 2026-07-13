@@ -313,8 +313,8 @@ def _suggest_session(intent: str, host: str | None = None) -> dict[str, Any]:
     dirs = _candidate_dirs(None if chosen_host == "local" else chosen_host)
     if not dirs:
         return {"host": chosen_host, "name": "", "cwd": "", "command": "",
-                "why": (host_why + " — could not list directories on "
-                        f"{chosen_host}; enter one manually.").strip(" —"),
+                "whyHost": host_why,
+                "why": f"could not list directories on {chosen_host}",
                 "dirs": [], "verified": False}
 
     # --- step 3: choose among THOSE directories (a constrained choice, by index) ---
@@ -337,13 +337,13 @@ def _suggest_session(intent: str, host: str | None = None) -> dict[str, Any]:
     cwd, verified = "", False
     if isinstance(idx, int) and 0 <= idx < len(dirs):
         cwd, verified = dirs[idx], True   # a real dir on that machine, not invented
-    why = " ".join(x for x in (host_why, r2.get("why") or "") if x).strip()
     return {
         "host": chosen_host,
         "name": r2.get("name") or "",
         "cwd": cwd,
         "command": r2.get("command") or "",
-        "why": why,
+        "whyHost": host_why,             # why step 1 chose that machine
+        "why": r2.get("why") or "",      # why step 2 chose that directory
         "dirs": dirs,          # so the UI's directory choices match the machine
         "verified": verified,  # the path was CHOSEN from real dirs, not invented
     }
@@ -825,20 +825,41 @@ body::after{
 #newhead .st{margin-left:auto;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim)}
 #newclose{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:14px;cursor:pointer;padding:2px 11px;margin-left:10px}
 #newclose:hover{color:var(--amber);border-color:var(--amber-dim)}
-#newbody{padding:16px;display:flex;flex-direction:column;gap:6px;max-height:66vh;overflow-y:auto}
-#newbody label{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);margin-top:8px}
-#newbody label small{text-transform:none;letter-spacing:0;margin-left:8px;opacity:.7}
-#newbody input[type=text],#newbody input:not([type]),#newbody select{
-  background:var(--bg);border:1px solid var(--line);color:var(--amber);font-family:inherit;
-  font-size:13px;padding:7px 10px;width:100%}
-#newbody input:focus,#newbody select:focus{outline:none;border-color:var(--amber-dim)}
-#newbody .introw{display:flex;gap:8px}
-#newbody .fgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-#newbody .chk{display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--amber-dim)}
+#newbody{padding:16px;display:flex;flex-direction:column;gap:4px;max-height:68vh;overflow-y:auto}
+#newbody input{background:var(--bg);border:1px solid var(--line);color:var(--amber);
+  font-family:inherit;font-size:13px;padding:7px 10px;width:100%}
+#newbody input:focus{outline:none;border-color:var(--amber-dim)}
+#newbody input:disabled{opacity:.45}
+.askrow{display:flex;gap:8px;margin-bottom:6px}
+.askrow input{font-size:14px}
+/* a step is dependent on the one above it — locked until that one resolves */
+.step{border-left:2px solid var(--line);padding:8px 0 10px 12px;margin-left:3px}
+.step.locked{opacity:.38;pointer-events:none}
+.step.done{border-left-color:var(--amber)}
+.steph{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.steph .num{width:16px;height:16px;border-radius:50%;border:1px solid var(--amber-faint);
+  color:var(--amber-dim);font-size:10px;display:flex;align-items:center;justify-content:center}
+.step.done .steph .num{background:var(--amber);border-color:var(--amber);color:#151005;font-weight:700}
+.steph .lbl{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim)}
+.steph .sub{font-size:10px;color:var(--text-dim);opacity:.65}
+.steph .why{margin-left:auto;font-size:10px;font-style:italic;color:var(--amber-dim);
+  max-width:52%;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chips{display:flex;flex-wrap:wrap;gap:5px}
+.hchip{font-size:11px;padding:3px 10px;border:1px solid var(--line);border-radius:11px;
+  color:var(--text-dim);cursor:pointer;user-select:none}
+.hchip:hover{border-color:var(--amber-faint);color:var(--amber-dim)}
+.hchip.on{background:var(--amber);border-color:var(--amber);color:#151005;font-weight:700}
+.hchip.ai::after{content:" ✦";opacity:.8}
+.dirchoices{max-height:150px;overflow-y:auto;border:1px solid var(--line);margin-top:5px}
+.dirrow{padding:5px 9px;font-size:12px;color:var(--text-dim);cursor:pointer;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid rgba(255,176,0,.06)}
+.dirrow:hover{background:rgba(255,176,0,.07);color:var(--amber-dim)}
+.dirrow.on{background:var(--amber);color:#151005;font-weight:700}
+.dirrow .ai{opacity:.75;margin-left:6px}
+#newbody .chk{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--amber-dim);margin-top:8px}
 #newbody .chk input{width:auto}
-#newbody .chk.pin{margin-top:6px;font-size:10px;opacity:.75}
-#newbody input:disabled{opacity:.5}
-#dircount{opacity:.7}
+#newsummary{margin-right:auto;font-size:11px;color:var(--text-dim);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:75%}
 #newsuggest{background:transparent;border:1px solid var(--amber-faint);color:var(--amber-dim);
   font-family:inherit;font-size:12px;cursor:pointer;padding:0 14px;white-space:nowrap}
 #newsuggest:hover{color:var(--amber);border-color:var(--amber-dim)}
@@ -960,29 +981,40 @@ body::after{
       <button id="newclose">✕ close</button>
     </div>
     <div id="newbody">
-      <label>what do you want to do?<small>optional — Claude picks the machine, folder, and command</small></label>
-      <div class="introw">
-        <input id="newintent" placeholder="e.g. plan the next Greenmark sprint / fix the helios auth bug" autocomplete="off">
-        <button id="newsuggest">✦ suggest</button>
+      <div class="askrow">
+        <input id="newintent" placeholder="say what you want to do — e.g. check the eidos-mail sync on the hostkey server" autocomplete="off">
+        <button id="newsuggest">✦ figure it out</button>
       </div>
-      <div id="newwhy"></div>
-      <div class="fgrid">
-        <div>
-          <label>machine<small>changes what directories exist below</small></label>
-          <select id="newhost"></select>
-          <label class="chk pin"><input type="checkbox" id="newpin"> pin this machine when suggesting</label>
-        </div>
-        <div><label>name</label><input id="newname" placeholder="session name" autocomplete="off"></div>
+
+      <div class="step" id="s-host">
+        <div class="steph"><span class="num">1</span><span class="lbl">machine</span>
+          <span class="sub">everything below depends on this</span>
+          <span class="why" id="why-host"></span></div>
+        <div class="chips" id="hostchips"></div>
       </div>
-      <label>directory<small id="dircount"></small></label>
-      <input id="newcwd" list="dirlist" placeholder="/Users/…" autocomplete="off">
-      <datalist id="dirlist"></datalist>
-      <label>command<small>empty = plain shell</small></label>
-      <input id="newcmd" placeholder="e.g. claude" autocomplete="off">
-      <label class="chk"><input type="checkbox" id="newgui" checked> open an iTerm2 window attached to it</label>
+
+      <div class="step locked" id="s-dir">
+        <div class="steph"><span class="num">2</span><span class="lbl">directory</span>
+          <span class="sub" id="dirsub">pick a machine first</span>
+          <span class="why" id="why-dir"></span></div>
+        <input id="dirfilter" placeholder="filter directories…" autocomplete="off">
+        <div class="dirchoices" id="dirchoices"></div>
+      </div>
+
+      <div class="step locked" id="s-cmd">
+        <div class="steph"><span class="num">3</span><span class="lbl">what runs there</span></div>
+        <div class="chips" id="cmdchips"></div>
+        <input id="newcmd" placeholder="custom command… (empty = plain shell)" autocomplete="off">
+      </div>
+
+      <div class="step locked" id="s-name">
+        <div class="steph"><span class="num">4</span><span class="lbl">name it</span></div>
+        <input id="newname" placeholder="session name" autocomplete="off">
+        <label class="chk"><input type="checkbox" id="newgui" checked> open an iTerm2 window attached to it</label>
+      </div>
       <div id="newerr"></div>
     </div>
-    <div id="newfoot"><button id="newcreate">CREATE SESSION</button></div>
+    <div id="newfoot"><span id="newsummary"></span><button id="newcreate" disabled>CREATE SESSION</button></div>
   </div>
 </div>
 <script>
@@ -1517,80 +1549,123 @@ $("#modaliterm").onclick=async()=>{
   b.textContent=r.ok?"⧉ opened":("✕ "+(r.error||"failed"));
   setTimeout(()=>{b.textContent=was;b.disabled=false;},r.ok?1400:3000);
 };
-// ---- new session (a CASCADE: machine → its real dirs → command) ----
-let hostsLoaded=false;
-function setDirs(dirs){
-  $("#dirlist").innerHTML=(dirs||[]).map(d=>'<option value="'+d+'">').join("");
-  $("#dircount").textContent=(dirs&&dirs.length)?(dirs.length+" dirs on this machine"):"no dirs found";
+// ---- new session: a CASCADE. Each choice constrains the ones below it, so
+// changing an upper choice INVALIDATES everything under it and re-derives. ----
+const NS={hosts:[],host:"",dirs:[],cwd:"",cmd:"",name:"",
+          aiHost:"",aiCwd:"",whyHost:"",whyDir:"",loading:false};
+
+function nsReset(level){        // wipe every choice BELOW `level` (1=host,2=dir,3=cmd)
+  if(level<2){NS.dirs=[];NS.cwd="";NS.whyDir="";NS.aiCwd="";}
+  if(level<3){NS.cmd="";}
+  if(level<4){NS.name="";}
 }
-async function loadHosts(){
-  if(hostsLoaded)return;
-  const r=await api("/api/hosts");
-  if(!r.ok)return;
-  $("#newhost").innerHTML=(r.hosts||[]).map(h=>'<option value="'+h+'">'+h+'</option>').join("");
-  hostsLoaded=true;
+function nsRender(){
+  // step 1 — machines
+  $("#hostchips").innerHTML=NS.hosts.map(h=>
+    '<span class="hchip'+(h===NS.host?" on":"")+(h===NS.aiHost&&h!==NS.host?" ai":"")+'" data-h="'+h+'">'+h+'</span>').join("");
+  $("#hostchips").querySelectorAll(".hchip").forEach(el=>el.onclick=()=>pickHost(el.dataset.h));
+  $("#why-host").textContent=NS.whyHost?("✦ "+NS.whyHost):"";
+  $("#s-host").classList.toggle("done",!!NS.host);
+
+  // step 2 — directories THAT EXIST ON THE CHOSEN MACHINE
+  const dl=$("#s-dir");
+  dl.classList.toggle("locked",!NS.host);
+  dl.classList.toggle("done",!!NS.cwd);
+  $("#dirsub").textContent=!NS.host?"pick a machine first"
+    :NS.loading?("listing "+NS.host+"…")
+    :(NS.dirs.length?(NS.dirs.length+" on "+NS.host):("nothing found on "+NS.host));
+  const f=($("#dirfilter").value||"").toLowerCase();
+  const rows=NS.dirs.filter(d=>!f||d.toLowerCase().includes(f));
+  $("#dirchoices").innerHTML=rows.map(d=>
+    '<div class="dirrow'+(d===NS.cwd?" on":"")+'" data-d="'+d+'">'+d
+    +(d===NS.aiCwd?'<span class="ai">✦</span>':"")+'</div>').join("")
+    ||'<div class="dirrow" style="cursor:default;opacity:.5">—</div>';
+  $("#dirchoices").querySelectorAll(".dirrow[data-d]").forEach(el=>el.onclick=()=>pickDir(el.dataset.d));
+  $("#why-dir").textContent=NS.whyDir?((NS.aiCwd?"✦ ":"")+NS.whyDir):"";
+
+  // step 3 — what runs there
+  const cs=$("#s-cmd");
+  cs.classList.toggle("locked",!NS.cwd);
+  cs.classList.toggle("done",!!NS.cwd);
+  const presets=[["","plain shell"],["claude","claude"],["claude --dangerously-skip-permissions","claude (skip perms)"]];
+  $("#cmdchips").innerHTML=presets.map(([v,l])=>
+    '<span class="hchip'+(NS.cmd===v?" on":"")+'" data-c="'+v+'">'+l+'</span>').join("");
+  $("#cmdchips").querySelectorAll(".hchip").forEach(el=>el.onclick=()=>{NS.cmd=el.dataset.c;$("#newcmd").value=NS.cmd;nsRender();});
+
+  // step 4 — name
+  const ns=$("#s-name");
+  ns.classList.toggle("locked",!NS.cwd);
+  ns.classList.toggle("done",!!NS.name);
+
+  // footer
+  const ready=!!(NS.host&&NS.cwd&&NS.name);
+  $("#newcreate").disabled=!ready;
+  $("#newsummary").textContent=ready
+    ? (NS.name+" → "+NS.host+":"+NS.cwd+(NS.cmd?"  $ "+NS.cmd:"  $ shell"))
+    : (!NS.host?"choose a machine":(!NS.cwd?"choose a directory on "+NS.host:"name it"));
 }
-// the machine determines which directories exist — re-derive them on every change
-async function loadDirsFor(host){
-  $("#dircount").textContent="listing "+host+"…";
-  setDirsBusy(true);
-  const r=await api("/api/dirs?host="+encodeURIComponent(host));
-  setDirsBusy(false);
-  if(!r.ok){$("#dircount").textContent="could not list "+host;setDirs([]);return;}
-  setDirs(r.dirs);
+async function pickHost(h){       // step 1 changed ⇒ steps 2+ are no longer valid
+  NS.host=h;NS.whyHost="";nsReset(1);
+  $("#newcmd").value="";$("#newname").value="";$("#dirfilter").value="";
+  NS.loading=true;nsRender();
+  const r=await api("/api/dirs?host="+encodeURIComponent(h));
+  NS.loading=false;
+  NS.dirs=(r.ok&&r.dirs)?r.dirs:[];
+  nsRender();
 }
-function setDirsBusy(b){$("#newcwd").disabled=b;}
-async function onHostChange(){
-  const h=$("#newhost").value;
-  $("#newcwd").value="";          // a path from the old machine is meaningless here
-  $("#newwhy").textContent="";
-  await loadDirsFor(h);
-}
-function openNew(){
+function pickDir(d){NS.cwd=d;if(!NS.name)NS.name=autoName(d);$("#newname").value=NS.name;nsRender();}
+function autoName(d){const base=(d||"").split("/").filter(Boolean).pop()||"session";
+  return base.toLowerCase().replace(/[^a-z0-9]+/g,"-").slice(0,28);}
+
+async function openNew(){
   $("#newmodal").classList.add("open");
-  $("#newerr").textContent="";$("#newwhy").textContent="";$("#newstatus").textContent="";
-  (async()=>{await loadHosts();await loadDirsFor($("#newhost").value||"local");})();
+  $("#newerr").textContent="";$("#newstatus").textContent="";
+  Object.assign(NS,{host:"",dirs:[],cwd:"",cmd:"",name:"",aiHost:"",aiCwd:"",whyHost:"",whyDir:""});
+  $("#newintent").value="";$("#newcmd").value="";$("#newname").value="";$("#dirfilter").value="";
+  if(!NS.hosts.length){const r=await api("/api/hosts");if(r.ok)NS.hosts=r.hosts||[];}
+  nsRender();
   setTimeout(()=>$("#newintent").focus(),40);
 }
 function closeNew(){$("#newmodal").classList.remove("open");}
+
+// plain English → classified DOWN the cascade, each pick shown as a choice you can override
 async function doSuggest(){
   const intent=$("#newintent").value.trim();
-  if(!intent){$("#newerr").textContent="describe what you want to do first";return;}
-  const b=$("#newsuggest");b.disabled=true;b.textContent="thinking…";
-  $("#newerr").textContent="";
-  // if the user already picked a machine, that pins the cascade; else claude picks it
-  const pinned=$("#newpin").checked?$("#newhost").value:"";
-  $("#newstatus").textContent=pinned?("choosing a dir on "+pinned):"choosing machine → dir";
+  if(!intent){$("#newerr").textContent="say what you want to do first";return;}
+  const b=$("#newsuggest");b.disabled=true;b.textContent="thinking…";$("#newerr").textContent="";
+  $("#newstatus").textContent=NS.host?("choosing a directory on "+NS.host):"machine → directory";
   const r=await api("/api/suggest",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({intent,host:pinned})});
-  b.disabled=false;b.textContent="✦ suggest";$("#newstatus").textContent="";
+    body:JSON.stringify({intent,host:NS.host||""})});   // an already-picked machine pins step 1
+  b.disabled=false;b.textContent="✦ figure it out";$("#newstatus").textContent="";
   if(!r.ok){$("#newerr").textContent=r.error||"suggest failed";return;}
-  if(r.host){$("#newhost").value=r.host;}
-  if(r.dirs)setDirs(r.dirs);             // the dirs it actually chose from
-  if(r.name)$("#newname").value=r.name;
-  if(r.cwd)$("#newcwd").value=r.cwd;
-  if(r.command!==undefined)$("#newcmd").value=r.command||"";
-  $("#newwhy").textContent=r.why?((r.verified?"✦ ":"⚠ unverified path — ")+r.why):"";
+  NS.host=r.host||NS.host;NS.aiHost=r.host||"";
+  NS.dirs=r.dirs||[];
+  NS.cwd=r.cwd||"";NS.aiCwd=r.cwd||"";
+  NS.whyHost=r.whyHost||"";
+  NS.whyDir=r.why||"";
+  if(!r.verified&&r.cwd)NS.whyDir="⚠ unverified path — "+NS.whyDir;
+  NS.cmd=r.command||"";$("#newcmd").value=NS.cmd;
+  NS.name=r.name||(r.cwd?autoName(r.cwd):"");$("#newname").value=NS.name;
+  nsRender();
 }
 async function doCreate(){
-  const name=$("#newname").value.trim();
-  if(!name){$("#newerr").textContent="a session needs a name";return;}
+  if(!NS.name){$("#newerr").textContent="a session needs a name";return;}
   const b=$("#newcreate");b.disabled=true;b.textContent="CREATING…";$("#newerr").textContent="";
   const r=await api("/api/spawn",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({name,host:$("#newhost").value,cwd:$("#newcwd").value.trim(),
-      command:$("#newcmd").value.trim(),gui:$("#newgui").checked,
-      description:$("#newintent").value.trim()||null})});
+    body:JSON.stringify({name:NS.name,host:NS.host,cwd:NS.cwd,command:NS.cmd,
+      gui:$("#newgui").checked,description:$("#newintent").value.trim()||null})});
   b.disabled=false;b.textContent="CREATE SESSION";
   if(!r.ok){$("#newerr").textContent=r.error||"spawn failed";return;}
-  closeNew();$("#newintent").value="";$("#newname").value="";$("#newcmd").value="";
-  refresh();
+  closeNew();refresh();
 }
-$("#newhost").onchange=onHostChange;   // the cascade: machine → its real dirs
 $("#newbtn").onclick=openNew;
 $("#newclose").onclick=closeNew;
 $("#newback").onclick=closeNew;
 $("#newsuggest").onclick=doSuggest;
 $("#newcreate").onclick=doCreate;
+$("#dirfilter").addEventListener("input",nsRender);
+$("#newcmd").addEventListener("input",()=>{NS.cmd=$("#newcmd").value;nsRender();});
+$("#newname").addEventListener("input",()=>{NS.name=$("#newname").value.trim();nsRender();});
 $("#newintent").addEventListener("keydown",e=>{if(e.key==="Enter")doSuggest();});
 
 $("#modalclose").onclick=closeModal;
