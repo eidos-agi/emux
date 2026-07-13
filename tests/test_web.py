@@ -634,3 +634,23 @@ def test_gist_cache_hits_and_busts(monkeypatch):
     # force=True always recomputes even on a cache hit
     web._reply_suggestions("s1", None, force=True)
     assert calls["n"] == 3
+
+
+def test_should_warm_gist_pause_and_dedup():
+    """Warm only when settled AND still for the pause AND content is new."""
+    from emux import web
+    P = web._GIST_PAUSE_SECS
+    # settled but not still long enough -> no warm (skips between-turns flicker)
+    assert web._should_warm_gist("idle", P - 1, "n1", None, False) is False
+    # settled + still past the pause + new content -> warm
+    assert web._should_warm_gist("idle", P + 1, "n1", None, False) is True
+    # same content already warmed -> no re-warm
+    assert web._should_warm_gist("idle", P + 5, "n1", "n1", False) is False
+    # new content after a change -> warm again
+    assert web._should_warm_gist("idle", P + 1, "n2", "n1", False) is True
+    # still running (not settled) -> never warm
+    assert web._should_warm_gist("running", P + 9, "n3", None, False) is False
+    # a warm already in flight -> don't double-fire
+    assert web._should_warm_gist("idle", P + 1, "n4", None, True) is False
+    # no recorded change age -> can't judge stillness -> no proactive warm
+    assert web._should_warm_gist("idle", None, "n5", None, False) is False

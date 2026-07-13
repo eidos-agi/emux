@@ -77,12 +77,25 @@ _LOCK = threading.Lock()
 _GIST_CACHE: dict[str, dict[str, Any]] = {}   # session -> {hash, digest, suggestions, ts}
 _GIST_INFLIGHT: set[str] = set()              # sessions being warmed right now (dedupe)
 _SETTLED_STATES = frozenset({"idle", "asking", "waiting_human", "error"})
+# how long a settled session must sit STILL (no pane change) before we treat it as
+# "clearly stopped" and warm its gist — long enough to skip the brief running↔idle
+# flicker between an agent's turns. Override with EMUX_GIST_PAUSE.
+_GIST_PAUSE_SECS = float(os.environ.get("EMUX_GIST_PAUSE", "10"))
 
 
 def _gist_hash(pane: str) -> str:
     """Cache key = a hash of the exact pane slice the gist model reads. When the
     pane changes, the hash changes, so the cache self-busts."""
     return hashlib.sha1(pane[-3500:].encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def _should_warm_gist(state: str, age: float | None, norm: str | None,
+                      prev_warm_norm: str | None, inflight: bool) -> bool:
+    """Warm the gist iff the session is settled, has sat STILL for a real pause
+    (age ≥ threshold — skips the brief between-turns flicker), its content is new
+    since the last warm (norm changed), and no warm is already running."""
+    return (state in _SETTLED_STATES and age is not None and age >= _GIST_PAUSE_SECS
+            and norm is not None and norm != prev_warm_norm and not inflight)
 
 
 # ---------------------------------------------------------------------------
@@ -1243,7 +1256,7 @@ def _capture_and_observe(session: str, lines: int, host: str | None = None) -> s
     running agent, and refresh the cache."""
     cap = capture_payload(session, lines, host=host)
     content = cap.get("content", "") if cap.get("ok") else ""
-    _observe(session, content)
+    meta = _observe(session, content)
     agent = _detect_agent(session, content)
     agent_key = agent.get("agent", "")
     _escalate_if_gated(session, agent_key, content)
@@ -1259,15 +1272,20 @@ def _capture_and_observe(session: str, lines: int, host: str | None = None) -> s
     needs_human = bool(adapters.gated(agent_key, tail))
     state = _quick_state(agent_key, content, needs_human)
     summary = _summarize(agent.get("label", ""), state, content)
+    # "clearly stopped" = settled AND the pane has sat STILL for a real pause (not
+    # the brief flicker between turns). Warm the gist once per genuine stop, deduped
+    # by content-norm so a still session doesn't re-warm every poll.
+    age = meta.get("last_change_age")
+    norm = (_ACTIVITY.get(session) or {}).get("norm")
     with _LOCK:
-        prev_state = _CACHE.get(session, {}).get("state")
+        prev = _CACHE.get(session, {})
+        warm = _should_warm_gist(state, age, norm, prev.get("gist_warm_norm"),
+                                 session in _GIST_INFLIGHT)
         _CACHE[session] = {"content": content, "ts": time.time(), "lines": lines,
                            "agent": agent, "needs_human": needs_human,
-                           "state": state, "summary": summary}
-    # a session that JUST stopped (was running, now settled) → warm its gist right
-    # away so the result is ready before you open it. Edge-triggered, inflight-
-    # guarded, and content-hash-cached, so it's one model call per stop, not per poll.
-    if prev_state == "running" and state in _SETTLED_STATES:
+                           "state": state, "summary": summary,
+                           "gist_warm_norm": norm if warm else prev.get("gist_warm_norm")}
+    if warm:
         threading.Thread(target=_warm_gist, args=(session, host), daemon=True).start()
     return content
 

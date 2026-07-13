@@ -2,6 +2,11 @@
 
 All notable changes to Emux are documented here.
 
+## v0.53.0 - 2026-07-13
+
+- **Gist warm now waits for a real pause, not the between-turns flicker.** The proactive warm fires only when a session is settled AND has sat still (no pane change) for a longer pause (default 10s, `EMUX_GIST_PAUSE`), deduped by content so a still session warms once per genuine stop — instead of on every brief running↔idle flip between an agent's turns.
+
+
 ## v0.52.0 - 2026-07-13
 
 - **The Gist runs the moment a session stops — and is cached.** When a session transitions from running to settled (idle / asking / waiting-on-you / errored), emux warms its gist in the background right away, so the digest + suggested replies are ready before you open it — no waiting.
