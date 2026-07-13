@@ -538,6 +538,18 @@ body::after{
   flex:1;overflow-y:auto;font:12.5px/1.45 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
   white-space:pre-wrap;word-break:break-word;padding:14px 16px;background:#080705;
 }
+/* live classifier strip (emux judge) */
+#modaljudge{display:none;align-items:center;gap:12px;padding:8px 16px;flex:none;
+  border-bottom:1px solid var(--line);background:#0c0a06;font:11px "IBM Plex Mono",monospace}
+#modaljudge.on{display:flex}
+#modaljudge .jstate{font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:12px;white-space:nowrap}
+#modaljudge .jconf{color:var(--text-dim);font-size:10px;white-space:nowrap}
+#modaljudge .jsum{color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#modaljudge .jflag{border:1px solid #7a3a1a;color:#ff9f43;padding:0 5px;font-size:10px;
+  text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
+.s-running{color:#8fd88f}.s-done_idle{color:#8a8a72}.s-error{color:#ff5f56}
+.s-thrashing{color:#ff9f43}.s-stuck{color:#ffb000}.s-waiting_human{color:#38d9ff}
+.s-waiting_external{color:#7a8fd8}.s-planning{color:#d0b24a}.s-editing{color:#d0b24a}.s-dead{color:#666}
 #modalchips{display:flex;gap:8px;padding:10px 16px 0}
 #modalrow{display:flex;gap:10px;padding:10px 16px 14px}
 #modalinput{flex:1;background:#080705;border:1px solid var(--line);color:var(--text);
@@ -599,6 +611,7 @@ body::after{
       <span class="st" id="modalstatus">live</span>
       <button id="modalclose">✕ close</button>
     </div>
+    <div id="modaljudge"></div>
     <div id="modalscreen"></div>
     <div id="modalchips">
       <button class="chip" data-keys="C-c">^C</button>
@@ -849,7 +862,14 @@ function renderFlow(){
   // Each node is a live mini-pane box (title + tiny tmux preview), laid out by
   // level. Boxes are HTML positioned over an SVG edge layer.
   const BW=236,BH=150,COLGAP=40,ROWGAP=64,PAD=30;
-  const W=1200,H=PAD*2+(maxLvl+(unconnected.length?1:0)+1)*(BH+ROWGAP);
+  const W=1200;
+  // Unconnected boxes wrap into a left-aligned GRID that never overlaps — the old
+  // layout crammed every unconnected box onto a single fixed-width row (x =
+  // W*(i+1)/(n+1)), so past ~4 boxes they printed on top of each other.
+  const UNCW=BW+COLGAP;
+  const uncCols=Math.max(1,Math.floor((W-2*PAD+COLGAP)/UNCW));
+  const uncRows=unconnected.length?Math.ceil(unconnected.length/uncCols):0;
+  const H=PAD*2+(maxLvl+1)*(BH+ROWGAP)+(uncRows?ROWGAP+uncRows*(BH+ROWGAP):0);
   const pos={};
   const rowY=lv=>PAD+BH/2+lv*(BH+ROWGAP);
   for(let lv=0;lv<=maxLvl;lv++){
@@ -857,7 +877,10 @@ function renderFlow(){
     row.forEach((n,i)=>{pos[n]={x:W*(i+1)/(row.length+1),y:rowY(lv)};});
   }
   const uncY=rowY(maxLvl+1);
-  unconnected.forEach((s,i)=>{pos[s.name]={x:W*(i+1)/(unconnected.length+1),y:uncY};});
+  unconnected.forEach((s,i)=>{
+    const c=i%uncCols, r=Math.floor(i/uncCols);
+    pos[s.name]={x:PAD+BW/2+c*UNCW, y:uncY+r*(BH+ROWGAP)};
+  });
 
   // edge layer (SVG, behind the boxes)
   const svg=el("svg",{id:"flowsvg",viewBox:"0 0 "+W+" "+H});
@@ -1049,6 +1072,21 @@ async function modalRefresh(){
       }
     }else{$("#modalstatus").textContent=r.error||"error";$("#modalstatus").style.color="var(--stale)";}
   }catch(e){$("#modalstatus").textContent="unreachable";$("#modalstatus").style.color="var(--stale)";}
+  modalJudge();
+}
+async function modalJudge(){
+  if(!modalSession)return;
+  const el=$("#modaljudge");
+  try{
+    const r=await api("/api/classify?name="+encodeURIComponent(modalSession.name));
+    if(r&&r.ok&&r.state){
+      const flags=(r.flags||[]).map(f=>'<span class="jflag">'+f.replace(/_/g," ")+'</span>').join("");
+      el.innerHTML='<span class="jstate s-'+r.state+'">'+r.state.replace(/_/g,"·")+'</span>'
+        +'<span class="jconf">'+Math.round((r.confidence||0)*100)+'% · '+(r.recommended_action||"")+'</span>'
+        +'<span class="jsum">'+(r.summary||"")+'</span>'+flags;
+      el.className="on";
+    }else{el.className="";el.innerHTML="";}
+  }catch(e){el.className="";}
 }
 async function modalKeys(keys,literal,enter){
   if(!modalSession)return false;
@@ -1175,6 +1213,18 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             except ValueError:
                 lines = 300
             self._json(capture_payload(session, lines))
+            return
+        if url.path == "/api/classify":
+            q = parse_qs(url.query)
+            name = (q.get("name") or [""])[0]
+            if not name:
+                self._json({"ok": False, "error": "missing_name"}, 400)
+                return
+            from . import judge
+            try:
+                self._json({"ok": True, **judge.classify_session(name)})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
             return
         self._json({"ok": False, "error": "not_found"}, 404)
 

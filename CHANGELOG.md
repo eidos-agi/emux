@@ -2,6 +2,12 @@
 
 All notable changes to Emux are documented here.
 
+## v0.13.0 - 2026-07-12
+
+- Added the deterministic **session-state classifier** (`emux/judge.py`) — Tier-0, no LLM. `classify()` labels a session running / planning / editing / waiting_external / waiting_human / thrashing / stuck / error / done_idle / dead, with confidence, a one-line summary, evidence, and orthogonal flags (token_waste, possible_exhaustion, hidden_wait, false_busy, dangerous_blocked). Signal-first: trusts the `@@EMUX@@` up-channel (DONE/ERROR/NEED) before scraping; stateless off the durable stream log. `tmux_classify` MCP tool wraps it.
+- **Live classifier report in the web modal**: click a session → a state strip under the header shows its state / confidence / recommended action / summary / flags, updated every ~1.2s (`/api/classify`).
+- **Flow view: unconnected boxes wrap into a grid** — the old layout crammed them onto one fixed-width row and they overlapped past ~4; now they never overlay.
+
 ## v0.12.0 - 2026-07-12
 
 - **Remote pull upgraded from `cat`-per-poll to a persistent `tail -F` follower.**

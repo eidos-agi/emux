@@ -1040,6 +1040,52 @@ async def tmux_capture(
 
 @mcp.tool()
 @audited
+async def tmux_classify(
+    target: str,
+    by_registry_name: bool = False,
+) -> dict[str, Any]:
+    """Classify what a session is CURRENTLY doing — a deterministic, no-LLM read.
+
+    Turns the session's stream log, pending up-channel signals, and live pane
+    command into a single labelled state with a confidence, a one-line summary,
+    the evidence behind it, any warning flags, and a recommended action. This is
+    the Tier-0 signal layer (`docs/emux-smart-classifiers.md`): rules + counters
+    only, no model calls — so it is cheap enough to poll and safe to trust as
+    "facts about the screen".
+
+    States: running, planning, editing, waiting_external, waiting_human,
+    thrashing, stuck, error, done_idle, dead.
+    Flags: token_waste, possible_exhaustion, hidden_wait, false_busy,
+    dangerous_blocked.
+
+    Args:
+        target: tmux session name, or registry name if `by_registry_name=True`.
+        by_registry_name: If True, resolve `target` via the registry (this also
+            lets the classifier read that session's durable log and signals).
+
+    Returns:
+        {ok, target, state, confidence, summary, evidence, flags,
+         recommended_action}
+    """
+    # Imported lazily to avoid an import cycle (judge imports from this module).
+    from . import judge
+
+    name = target
+    host = None
+    if by_registry_name:
+        entry = _load_registry().get(target)
+        if entry is None:
+            return {"ok": False, "error": "not_registered", "name": target}
+        host = entry.get("host")
+    try:
+        result = judge.classify_session(name, host=host)
+    except Exception as e:  # never let a classifier bug take down the caller
+        return {"ok": False, "error": "classify_failed", "detail": str(e), "target": target}
+    return {"ok": True, "target": target, **result}
+
+
+@mcp.tool()
+@audited
 async def tmux_run(
     target: str,
     command: str,
