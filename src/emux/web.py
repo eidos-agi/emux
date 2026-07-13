@@ -80,7 +80,7 @@ _SETTLED_STATES = frozenset({"idle", "asking", "waiting_human", "error"})
 # how long a settled session must sit STILL (no pane change) before we treat it as
 # "clearly stopped" and warm its gist — long enough to skip the brief running↔idle
 # flicker between an agent's turns. Override with EMUX_GIST_PAUSE.
-_GIST_PAUSE_SECS = float(os.environ.get("EMUX_GIST_PAUSE", "10"))
+_GIST_PAUSE_SECS = float(os.environ.get("EMUX_GIST_PAUSE", "8"))
 
 
 def _gist_hash(pane: str) -> str:
