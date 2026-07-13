@@ -2,6 +2,13 @@
 
 All notable changes to Emux are documented here.
 
+## v0.34.0 - 2026-07-13
+
+**Connection-aware filtering: a group of terminals stays together.** Filtering by a company (or tag) used to match each terminal independently — and the flow view ignored the filter entirely, drawing every session. Now there's a real concept of a **group of terminals**: the connected components of the `manages` graph.
+
+- `components()` unions terminals across `manages` edges (undirected). `shown()` is now connection-aware: if ANY terminal in a group matches the active filter, the WHOLE group shows — including members that aren't in the filtered set. So selecting Greenmark shows every Greenmark session AND the full manager→worker chains they belong to, even a connected worker that belongs to another company. An unconnected session of a different company is still excluded.
+- The **flow view now respects the filter** (it built from raw `grid` before), using the same connection-aware set, so a manager and everything it manages render together. Its arrow color is themed too.
+
 ## v0.33.0 - 2026-07-13
 
 **Readability + honest skinning.**

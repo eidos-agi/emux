@@ -1575,10 +1575,31 @@ function uptime(created){        // session age from tmux created_unix (#16)
   return "up "+Math.round(s/86400)+"d";
 }
 function hot(s){return s.last_change_age!==null&&s.last_change_age!==undefined&&s.last_change_age<6;}
-function shown(){return grid.filter(s=>
-  (!filterStr||s.name.toLowerCase().includes(filterStr))
+// does a session directly match the active filter (name / tag / company)?
+function baseMatch(s){return (!filterStr||s.name.toLowerCase().includes(filterStr))
   &&(!activeTag||(s.tags||[]).includes(activeTag))
-  &&(!activeCompany||(s.company||{}).company===activeCompany));}
+  &&(!activeCompany||(s.company||{}).company===activeCompany);}
+
+// TERMINALS grouped into connected components by the `manages` edges (undirected).
+// Returns name -> component id. A "group of terminals" is one component.
+function components(){
+  const parent={};grid.forEach(s=>parent[s.name]=s.name);
+  const find=x=>{while(parent[x]!==x){parent[x]=parent[parent[x]];x=parent[x];}return x;};
+  const uni=(a,b)=>{if(parent[a]!==undefined&&parent[b]!==undefined)parent[find(a)]=find(b);};
+  const byKey={};grid.forEach(s=>{byKey[s.name]=s.name;if(!(s.session in byKey))byKey[s.session]=s.name;});
+  grid.forEach(s=>(s.manages||[]).forEach(t=>{const tn=byKey[t];if(tn)uni(s.name,tn);}));
+  const comp={};grid.forEach(s=>comp[s.name]=find(s.name));return comp;
+}
+
+// shown: the filter, but CONNECTION-AWARE. If any terminal in a group matches,
+// the WHOLE group shows — even members that aren't in the filtered set — so a
+// manager and everything it manages stay together on screen.
+function shown(){
+  if(!(filterStr||activeTag||activeCompany))return grid.slice();
+  const comp=components(),hot=new Set();
+  grid.forEach(s=>{if(baseMatch(s))hot.add(comp[s.name]);});
+  return grid.filter(s=>baseMatch(s)||hot.has(comp[s.name]));
+}
 
 // ---- SKINS: the whole UI recolors to what you're working on ----
 // default = Eidos light; the Eidos pill = Eidos dark; the Greenmark pill = the
@@ -1812,12 +1833,15 @@ function updateFlowPanes(){
 function renderFlow(){
   const v=$("#views");
   if(!grid.length){flowSig=null;v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions found</div></div>';return;}
+  // work on the connection-aware filtered set: whole chains stay together
+  const G=shown();
+  if(!G.length){flowSig=null;v.innerHTML='<div id="empty"><div class="glyph">▚▞</div><div>no matching sessions</div></div>';return;}
   // resolve manage targets by registry name OR underlying tmux session name
-  const byKey={};grid.forEach(s=>{byKey[s.name]=s;if(!(s.session in byKey))byKey[s.session]=s;});
+  const byKey={};G.forEach(s=>{byKey[s.name]=s;if(!(s.session in byKey))byKey[s.session]=s;});
   const children=new Map(),indeg=new Map();
-  grid.forEach(s=>indeg.set(s.name,0));
+  G.forEach(s=>indeg.set(s.name,0));
   const edges=[];
-  grid.forEach(s=>(s.manages||[]).forEach(t=>{
+  G.forEach(s=>(s.manages||[]).forEach(t=>{
     const tg=byKey[t];if(!tg||tg.name===s.name)return;
     edges.push([s.name,tg.name]);
     if(!children.has(s.name))children.set(s.name,[]);
@@ -1828,16 +1852,16 @@ function renderFlow(){
   // level assignment via BFS from roots; guard against cycles
   const level=new Map();
   [...connected].filter(n=>(indeg.get(n)||0)===0).forEach(r=>level.set(r,0));
-  let q=[...level.keys()],guard=0,MAX=grid.length*grid.length+20;
+  let q=[...level.keys()],guard=0,MAX=G.length*G.length+20;
   while(q.length&&guard++<MAX){
     const n=q.shift(),l=level.get(n);
     (children.get(n)||[]).forEach(c=>{
-      if(l+1<grid.length&&(!level.has(c)||level.get(c)<l+1)){level.set(c,l+1);q.push(c);}
+      if(l+1<G.length&&(!level.has(c)||level.get(c)<l+1)){level.set(c,l+1);q.push(c);}
     });
   }
   [...connected].forEach(n=>{if(!level.has(n))level.set(n,0);});
   const maxLvl=Math.max(0,...[...level.values()]);
-  const unconnected=grid.filter(s=>!connected.has(s.name));
+  const unconnected=G.filter(s=>!connected.has(s.name));
 
   // Topology signature: rebuild the DOM only when the structure changes;
   // otherwise just stream new pane content into the existing boxes.
@@ -1876,7 +1900,7 @@ function renderFlow(){
   const svg=el("svg",{id:"flowsvg",viewBox:"0 0 "+W+" "+H});
   const defs=el("defs",{});
   const marker=el("marker",{id:"arrow",viewBox:"0 0 10 10",refX:"9",refY:"5",markerWidth:"7",markerHeight:"7",orient:"auto-start-reverse"});
-  marker.appendChild(el("path",{d:"M0,0 L10,5 L0,10 z",fill:"#ffb000"}));
+  marker.appendChild(el("path",{d:"M0,0 L10,5 L0,10 z",fill:"var(--amber)"}));
   defs.appendChild(marker);svg.appendChild(defs);
   edges.forEach(([a,b])=>{
     const pa=pos[a],pb=pos[b];if(!pa||!pb)return;
