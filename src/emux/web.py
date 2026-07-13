@@ -1552,7 +1552,8 @@ body::after{
 const $=s=>document.querySelector(s);
 const SVGNS="http://www.w3.org/2000/svg";
 let mode="grid", current=null, grid=[], chatTimer=null, gridTimer=null, screenEl=null;
-let filterStr="", flashOn=false, activeTag="", activeCompany="";
+let filterStr="", flashOn=false, activeTag="";
+let activeCompany=localStorage.getItem("emux_company")||"";   // restore the skin you were in
 let flowSig=null, flowPre={}, flowBox={};   // flow view: rebuild only on topology change, else update panes in place
 const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW"};
 
@@ -1584,7 +1585,37 @@ function shown(){return grid.filter(s=>
   &&(!activeTag||(s.tags||[]).includes(activeTag))
   &&(!activeCompany||(s.company||{}).company===activeCompany));}
 
-function applyFilters(){renderTagbar();renderSidebar();if(mode!=="chat")render();}
+// ---- SKINS: the whole UI recolors to what you're working on ----
+// default = Eidos light; the Eidos pill = Eidos dark; the Greenmark pill = the
+// Greenmark Waste forest-green brand. Each theme just remaps the 12 CSS vars.
+const THEMES={
+  "eidos-light":{"--bg":"#f0ebe4","--bg-raise":"#e9e3db","--bg-card":"#e4ded6",
+    "--amber":"#8e6129","--amber-dim":"#a9853f","--amber-faint":"#d8cdba",
+    "--text":"#1e1a17","--text-dim":"#6b6159","--live":"#4a6a3a","--stale":"#ab5036",
+    "--line":"#cabfae","--user":"#8e6129"},
+  "eidos-dark":{"--bg":"#15110f","--bg-raise":"#1a1613","--bg-card":"#1e1a17",
+    "--amber":"#c4935a","--amber-dim":"#9a6d35","--amber-faint":"#3a2f22",
+    "--text":"#dcd5cb","--text-dim":"#8b8179","--live":"#7a8c72","--stale":"#c4694f",
+    "--line":"#332a20","--user":"#d4a870"},
+  // Greenmark Waste — deep forest green (brand #2d4a3e family) + cream + brand gold.
+  "greenmark":{"--bg":"#16291d","--bg-raise":"#0f2016","--bg-card":"#1e3a2b",
+    "--amber":"#e8c95a","--amber-dim":"#b39a45","--amber-faint":"#2a4433",
+    "--text":"#eef0e4","--text-dim":"#9fb4a4","--live":"#7fd8a0","--stale":"#e5534b",
+    "--line":"#2d4a3e","--user":"#ffe26a"},
+};
+// company key → skin. Anything unmapped falls back to the default light Eidos.
+const CO_THEME={"":"eidos-light","eidos":"eidos-dark","greenmark":"greenmark"};
+function applyTheme(name){
+  const t=THEMES[name]||THEMES["eidos-light"];
+  const r=document.documentElement;
+  for(const k in t) r.style.setProperty(k,t[k]);
+  r.dataset.theme=name;
+  localStorage.setItem("emux_theme",name);
+}
+function skinForCompany(){applyTheme(CO_THEME[activeCompany]||"eidos-light");}
+
+function applyFilters(){localStorage.setItem("emux_company",activeCompany);
+  skinForCompany();renderTagbar();renderSidebar();if(mode!=="chat")render();}
 
 function renderTagbar(){
   const box=$("#tagbar");if(!box)return;
@@ -2346,6 +2377,7 @@ $("#feedclose").onclick=()=>setFeed(false);
 setFeed(localStorage.getItem("emux_feed")!=="0");   // open by default
 setInterval(pollFeed,2000);
 
+skinForCompany();                                     // paint the skin before first frame
 setMode(localStorage.getItem("emux_view")||"grid");   // restore last view (#6)
 poll();gridTimer=setInterval(poll,2000);
 </script>

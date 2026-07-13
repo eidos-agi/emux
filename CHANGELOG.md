@@ -2,6 +2,14 @@
 
 All notable changes to Emux are documented here.
 
+## v0.32.0 - 2026-07-13
+
+**Skins: the whole UI recolors to what you're working on.** Selecting a company pill re-skins the entire control room, so the color IS the "what am I working on" signal.
+
+- **Default = Eidos light** (warm cream `#f0ebe4` + amber-brass `#8e6129`). **The Eidos pill = Eidos dark** (`#15110f` + brass `#c4935a`). **The Greenmark pill = Greenmark Waste** (deep forest green `#16291d` + brand gold `#e8c95a` + cream) — the brand's own `#2d4a3e` green family, confirmed against `greenmark-assets/brand/palette.json` and the live site.
+- A theme is just a remap of the 12 CSS vars; `applyTheme()` sets them on `:root`. `CO_THEME` maps company key → skin (unmapped companies fall back to Eidos light), and the choice persists — reload keeps the skin you were in. Adding a new company skin is one entry in `THEMES` + `CO_THEME`.
+- Palettes are faithful to the Eidos brand (`eidos-assets/brand/palette.json`, light + dark) and the Greenmark brand, both researched from their canonical brand files.
+
 ## v0.31.0 - 2026-07-13
 
 **See the fleet act, and see when it needs YOU.** Two additions that make the control room a live surface, not a static grid.
