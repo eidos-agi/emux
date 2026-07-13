@@ -1579,6 +1579,19 @@ body{
 @keyframes ants{to{background-position:14px 0, -14px 100%, 0 -14px, 100% 14px}}
 @keyframes orb{0%,100%{box-shadow:0 0 6px rgba(255,176,0,.35)}50%{box-shadow:0 0 22px 3px rgba(255,176,0,.6)}}
 .card.needy{border-left-color:var(--amber)}
+/* LOUD needs-you: a red ring + glow + a pulsing corner badge — red reads as
+   "attention" against the amber theme, which amber-on-amber ants did not. */
+.tile.needy{border:2px solid #e0483a;animation:needpulse 1.3s ease-in-out infinite}
+.tile.needy::before{background-image:
+  linear-gradient(90deg,#e0483a 50%,transparent 50%),linear-gradient(90deg,#e0483a 50%,transparent 50%),
+  linear-gradient(0deg,#e0483a 50%,transparent 50%),linear-gradient(0deg,#e0483a 50%,transparent 50%)}
+@keyframes needpulse{0%,100%{box-shadow:0 0 0 0 rgba(224,72,58,.55),0 0 14px rgba(224,72,58,.4)}
+  50%{box-shadow:0 0 0 4px rgba(224,72,58,0),0 0 22px 3px rgba(224,72,58,.65)}}
+.needbadge{position:absolute;top:7px;right:7px;z-index:5;background:#c0392b;color:#fff;
+  font-size:9.5px;font-weight:800;letter-spacing:.6px;padding:3px 7px;border-radius:5px;
+  box-shadow:0 1px 5px rgba(0,0,0,.35);animation:needpulse 1.3s ease-in-out infinite}
+.card.needy{border-left:4px solid #e0483a !important;background:rgba(224,72,58,.06)}
+pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pre-wrap}
 .tile header{
   display:flex;align-items:baseline;gap:8px;padding:6px 10px;
   background:var(--bg-card);border-bottom:1px solid var(--line);
@@ -2199,6 +2212,10 @@ const $=s=>document.querySelector(s);
 const SVGNS="http://www.w3.org/2000/svg";
 let mode="grid", current=null, grid=[], chatTimer=null, gridTimer=null, screenEl=null;
 let filterStr="", flashOn=false, activeTag="";
+const metaCache={};   // last-live summary/agent per session name, so a GONE session still shows what it last was
+function cacheMeta(){grid.forEach(s=>{if(s.live&&s.summary)metaCache[s.name]={summary:s.summary,agent:s.agent,state:s.state,ts:Date.now()};});}
+function lastSummary(s){return s.summary||(metaCache[s.name]&&metaCache[s.name].summary)||"";}
+function goneAge(s){const m=metaCache[s.name];if(!m)return"";const sec=Math.round((Date.now()-m.ts)/1000);return sec<60?sec+"s":Math.round(sec/60)+"m";}
 let activeCompany=localStorage.getItem("emux_company")||"";   // restore the skin you were in
 let flowSig=null, flowPre={}, flowBox={};   // flow view: rebuild only on topology change, else update panes in place
 const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW"};
@@ -2261,7 +2278,12 @@ function uptime(created){        // session age from tmux created_unix (#16)
 }
 function hot(s){return s.last_change_age!==null&&s.last_change_age!==undefined&&s.last_change_age<6;}
 // does a session directly match the active filter (name / tag / company)?
-function baseMatch(s){return (!filterStr||s.name.toLowerCase().includes(filterStr))
+function baseMatch(s){
+  // filter now searches CONTENT too — name, target, description, and the live/last
+  // gist — so typing "cloudflare" finds the session whose gist mentions it.
+  const hay=filterStr?((s.name||"")+" "+(s.session||"")+" "+(s.description||"")+" "
+    +lastSummary(s)+" "+(s.path||s.cwd||"")+" "+(s.tags||[]).join(" ")).toLowerCase():"";
+  return (!filterStr||hay.includes(filterStr))
   &&(!activeTag||(s.tags||[]).includes(activeTag))
   &&(!activeCompany||(s.company||{}).company===activeCompany);}
 
@@ -2379,7 +2401,7 @@ async function poll(){
   try{
     const r=await api("/api/grid?lines=14");
     if(!r.ok){$("#status").textContent=r.error||"error";$("#status").className="err";return;}
-    grid=r.sessions;
+    grid=r.sessions;cacheMeta();
     $("#status").textContent=grid.filter(s=>s.live).length+" live · polling";$("#status").className="";
     updateChrome();renderTagbar();renderSidebar();
     if(mode!=="chat")render();
@@ -2416,8 +2438,14 @@ function renderSidebar(){
 const STLABEL={running:"run",idle:"idle",error:"err",asking:"asks you",waiting_human:"needs you",dead:"gone"};
 function statePip(s){const st=s.live?(s.state||"idle"):"dead";
   return '<span class="spip st-'+st+'">'+(STLABEL[st]||st)+'</span>';}
-// a session waiting on YOU — a formal gate, or it asked you a question.
-function needsYou(s){return s.needs_human||s.state==="asking"||s.state==="waiting_human";}
+// a session waiting on YOU — a formal gate, it asked a question, OR its gist reads
+// like it's parked on a human action (authorize / approve / on your desk / until you…).
+// deliberately CONSERVATIVE — only phrases that mean "parked, waiting on the human",
+// which don't show up in ordinary working output. (Broad words like verify/paste/login
+// false-positived on normal agent chatter.)
+const _NEEDY_GIST=/(on your desk|await(ing)? your|waiting (on|for) (you|your)|needs? your (approval|sign|decision|input|go)|your (approval|sign-?off|authoriz)|until you (authoriz|approv|confirm|sign|respond))/i;
+function needsYou(s){return s.live&&(s.needs_human||s.state==="asking"||s.state==="waiting_human"
+  ||_NEEDY_GIST.test(lastSummary(s)));}
 // the live indicator: heartbeat EKG when running, a QUESTION MARK when it's
 // asking you something, else a colored dot by state.
 const EKG='<svg class="ekg" viewBox="0 0 44 16" preserveAspectRatio="none">'
@@ -2452,9 +2480,14 @@ function makeTile(s){
     +companyHTML(s)+agbadge
     +'<span class="age '+(s.live?ageClass(s.last_change_age):"t-old")+'">'+(s.live?ageLabel(s.last_change_age):"gone")+'</span>'
     +statePip(s);
+  if(needsYou(s)){const b=document.createElement("div");b.className="needbadge";b.textContent="⚠ NEEDS YOU";t.appendChild(b);}
   const p=document.createElement("pre");
   if(s.live&&s.content.trim()){
     p.textContent=s.content.replace(/\s+$/,"").split("\n").slice(-14).join("\n");
+  }else if(!s.live&&lastSummary(s)){
+    // GONE, but we remember what it was doing — show it instead of a blank ghost
+    p.className="empty gonecache";
+    p.textContent="⏹ session ended"+(goneAge(s)?" · "+goneAge(s)+" ago":"")+"\nlast: "+lastSummary(s);
   }else{
     p.className="empty";p.textContent=s.live?"(blank pane)":"tmux session gone";
   }

@@ -2,6 +2,13 @@
 
 All notable changes to Emux are documented here.
 
+## v0.48.0 - 2026-07-13
+
+- **"Needs you" is now impossible to miss.** A session waiting on you gets a red ring + glow and a pulsing "⚠ NEEDS YOU" corner badge (red reads as attention against the amber theme; the old amber-on-amber ants blended). Detection broadened: besides formal gates/questions, a session whose gist reads like it's parked on a human action ("on your desk", "awaiting your approval", "until you authorize") is flagged too — catching an idle manager that's actually relaying a decision to you. Kept conservative so normal output (verify/paste/login/tests) does not false-positive.
+- **Gone sessions are cached, not blanked.** When a session you were watching ends, its tile keeps its last gist ("⏹ session ended · 2m ago — last: …") instead of an empty "tmux session gone" ghost, so you can still see what it was doing and roughly when it went.
+- **The filter searches content, not just names.** Typing "cloudflare" now matches a session whose gist/description/target mentions it — not only its name — so you can find the one that needs attention by what it is doing.
+
+
 ## v0.47.0 - 2026-07-13
 
 - **Model-routing settings page (⚙ SETTINGS).** Route emux's model-backed tasks — The Gist (session digest + suggested replies) and session placement — to a self-hosted NIM instead of the Claude subscription, to cut token cost. Configure a NIM endpoint (base URL, model, optional key), test the connection, and pick the backend per task. **NIM must be self-hosted / fixed-cost** — if it's unset or unreachable, emux falls back to `claude -p` automatically, so nothing breaks. Persisted to `~/.config/emux/models.json`.
