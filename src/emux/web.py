@@ -967,7 +967,29 @@ body::after{
 #newbody input:focus{outline:none;border-color:var(--amber-dim)}
 #newbody input:disabled{opacity:.45}
 .askrow{display:flex;gap:8px;margin-bottom:6px}
-.askrow input{font-size:14px}
+.askrow input{font-size:15px;padding:11px 12px}
+/* THE ANSWER — the only thing you should have to read */
+#result{display:none;padding:14px 2px 4px}
+#result.show{display:block}
+#rverb{font-size:10px;letter-spacing:3px;text-transform:uppercase;color:var(--text-dim);margin-bottom:2px}
+#rwhat{font-family:"VT323",monospace;font-size:30px;line-height:1.1;color:var(--amber);letter-spacing:1px}
+#rwhere{font-size:12px;color:var(--amber-dim);margin-top:3px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#rflags{margin-top:6px}
+#rflags .flag{font-size:9.5px;padding:2px 7px;border-radius:9px;margin-right:5px;
+  background:rgba(255,95,86,.16);color:#ff8a80;border:1px solid rgba(255,95,86,.4)}
+#rwhy{font-size:11px;font-style:italic;color:var(--text-dim);margin-top:8px}
+#rpeek{margin-top:8px}
+#rpeek summary{font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-dim);cursor:pointer}
+#rpeek[hidden]{display:none}
+#peek2{margin:6px 0 0;padding:7px 9px;border:1px solid var(--line);background:var(--bg);
+  font-size:10.5px;line-height:1.35;color:var(--amber-dim);max-height:120px;overflow:auto;white-space:pre;opacity:.85}
+/* the machinery — only when you ask for it */
+#tree{display:none}
+#tree.show{display:block}
+.linkish{background:transparent;border:none;color:var(--text-dim);font-family:inherit;
+  font-size:11px;cursor:pointer;margin-right:auto;text-decoration:underline;padding:0}
+.linkish:hover{color:var(--amber-dim)}
 /* a step is dependent on the one above it — locked until that one resolves */
 .step{border-left:2px solid var(--line);padding:8px 0 10px 12px;margin-left:3px}
 .step.locked{opacity:.38;pointer-events:none}
@@ -1137,10 +1159,21 @@ body::after{
     </div>
     <div id="newbody">
       <div class="askrow">
-        <input id="newintent" placeholder="say what you want to do — e.g. check the eidos-mail sync on the hostkey server" autocomplete="off">
-        <button id="newsuggest">✦ figure it out</button>
+        <input id="newintent" placeholder="say what you want to do…" autocomplete="off">
+        <button id="newsuggest">✦ go</button>
       </div>
 
+      <!-- THE ANSWER: one readable card. The tree below is the machinery, hidden. -->
+      <div id="result">
+        <div id="rverb"></div>
+        <div id="rwhat"></div>
+        <div id="rwhere"></div>
+        <div id="rflags"></div>
+        <details id="rpeek"><summary>what's in it</summary><pre id="peek2"></pre></details>
+        <div id="rwhy"></div>
+      </div>
+
+      <div id="tree">
       <div class="step" id="s-host">
         <div class="steph"><span class="num">1</span><span class="lbl">machine</span>
           <span class="sub">everything below depends on this</span>
@@ -1179,9 +1212,13 @@ body::after{
           <span id="guilbl">open an iTerm2 window attached to it</span></label>
         <div id="guinote"></div>
       </div>
+      </div><!-- /tree -->
       <div id="newerr"></div>
     </div>
-    <div id="newfoot"><span id="newsummary"></span><button id="newcreate" disabled>CREATE SESSION</button></div>
+    <div id="newfoot">
+      <button id="newchange" class="linkish">change…</button>
+      <button id="newcreate" disabled>CREATE SESSION</button>
+    </div>
   </div>
 </div>
 <script>
@@ -1722,7 +1759,7 @@ $("#modaliterm").onclick=async()=>{
 // Its nodes are enumerated from REALITY; the LLM only classifies your sentence into
 // a path through it and pre-fills the picks (marked ✦), which you can override.
 const NS={hosts:[],host:"",dirs:[],running:[],lane:"new",session:"",cwd:"",cmd:"",name:"",
-          aiHost:"",aiPick:"",whyHost:"",whyDir:"",loading:false};
+          aiHost:"",aiPick:"",whyHost:"",whyDir:"",loading:false,manual:false};
 
 function nsReset(level){        // wipe every choice BELOW `level` (1=machine, 2=target)
   if(level<2){NS.dirs=[];NS.running=[];NS.session="";NS.cwd="";NS.whyDir="";NS.aiPick="";}
@@ -1803,17 +1840,25 @@ function nsRender(){
     ? "⚠ it is already running; the window opens WITHOUT taking focus so it can't swallow your keystrokes"
     : "";
 
-  // footer
+  // ── the answer card: one line you can actually read
   const ready=!!(NS.host&&hasTarget()&&NS.name);
+  $("#result").classList.toggle("show",ready&&!NS.manual);
+  if(ready){
+    $("#rverb").textContent=isResume()?"↺ resume":"+ new session";
+    $("#rwhat").textContent=isResume()?NS.session:NS.name;
+    $("#rwhere").textContent=(isResume()?"on ":"on ")+NS.host+" · "+NS.cwd
+      +(isResume()?"":(NS.cmd?" · "+NS.cmd:" · shell"));
+    $("#rwhy").textContent=NS.whyDir||"";
+    $("#rpeek").hidden=!isResume();
+  }
+  // the tree is the machinery — only on demand. Empty state = just the question.
+  $("#tree").classList.toggle("show",NS.manual);
+  $("#newchange").textContent=NS.manual?"← done"
+    :(ready?"change…":"set it up by hand");
+
   const b=$("#newcreate");
   b.disabled=!ready;
-  b.textContent=isResume()?"RESUME SESSION":"CREATE SESSION";
-  $("#newsummary").textContent=ready
-    ? (isResume()
-        ? ("resume "+NS.host+":"+NS.session+"  ("+NS.cwd+")")
-        : (NS.name+" → "+NS.host+":"+NS.cwd+(NS.cmd?"  $ "+NS.cmd:"  $ shell")))
-    : (!NS.host?"choose a machine"
-        :(!hasTarget()?(isResume()?"choose a session to resume":"choose a directory"):"name it"));
+  b.textContent=isResume()?"RESUME":"CREATE";
 }
 function ago(s){return s<3600?Math.floor(s/60)+"m":(s<86400?Math.floor(s/3600)+"h":Math.floor(s/86400)+"d");}
 
@@ -1839,11 +1884,14 @@ async function pickSession(s){
   const r=await api("/api/peek?session="+encodeURIComponent(s)
                     +"&host="+encodeURIComponent(NS.host));
   if(NS.session!==s)return;                     // selection moved on while we read
-  $("#peek").textContent=r.ok?(r.content||"(blank)"):("could not read: "+(r.error||""));
+  const body=r.ok?(r.content||"(blank)"):("could not read: "+(r.error||""));
+  $("#peek").textContent=body;
+  $("#peek2").textContent=body;
   let flags="";
   if(r.ok&&r.unsent)flags+='<span class="flag">holds an unsent prompt</span>';
   if(row.attached)flags+='<span class="flag">already attached elsewhere</span>';
   $("#peekflags").innerHTML=flags;
+  $("#rflags").innerHTML=flags;
   nsRender();
 }
 function autoName(d){const base=(d||"").split("/").filter(Boolean).pop()||"session";
@@ -1853,7 +1901,8 @@ async function openNew(){
   $("#newmodal").classList.add("open");
   $("#newerr").textContent="";$("#newstatus").textContent="";
   Object.assign(NS,{host:"",dirs:[],running:[],lane:"new",session:"",cwd:"",cmd:"",name:"",
-                    aiHost:"",aiPick:"",whyHost:"",whyDir:""});
+                    aiHost:"",aiPick:"",whyHost:"",whyDir:"",manual:false});
+  $("#rflags").innerHTML="";$("#peek2").textContent="";
   $("#newintent").value="";$("#newcmd").value="";$("#newname").value="";$("#dirfilter").value="";
   if(!NS.hosts.length){const r=await api("/api/hosts");if(r.ok)NS.hosts=r.hosts||[];}
   nsRender();
@@ -1914,6 +1963,7 @@ $("#newsuggest").onclick=doSuggest;
 $("#newcreate").onclick=doCreate;
 $("#dirfilter").addEventListener("input",nsRender);
 $("#newgui").addEventListener("change",nsRender);
+$("#newchange").onclick=()=>{NS.manual=!NS.manual;nsRender();};
 $("#newcmd").addEventListener("input",()=>{NS.cmd=$("#newcmd").value;nsRender();});
 $("#newname").addEventListener("input",()=>{NS.name=$("#newname").value.trim();nsRender();});
 $("#newintent").addEventListener("keydown",e=>{if(e.key==="Enter")doSuggest();});

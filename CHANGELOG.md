@@ -2,6 +2,14 @@
 
 All notable changes to Emux are documented here.
 
+## v0.22.0 - 2026-07-12
+
+**Show the answer, hide the machinery.** The cascade was correct but unreadable — four numbered steps, lane toggles, filters, 29 sessions and 200 directories all on screen at once. The tree is the mechanism; it is not what you should have to read.
+
+- **Empty state is one question**: "say what you want to do…" and a go button. Nothing else.
+- **The result is one card**: the verb (↺ RESUME / + NEW SESSION), the name in large type, one line of "on <machine> · <path>", any warning flags, a collapsed "what's in it" preview, and the one-line reason. Then a single button.
+- **The tree lives behind `change…`** — all 11 machines, every running session, every directory, still one click away for overriding any node. Or "set it up by hand" from the empty state to skip the model entirely.
+
 ## v0.21.0 - 2026-07-12
 
 **Resume is not Create.** The tree now branches on what actually exists on a machine: sessions already RUNNING there (resume) or directories to start fresh in (new). The LLM classifies your sentence into a path through that tree and pre-fills it; every node stays an overridable choice.
