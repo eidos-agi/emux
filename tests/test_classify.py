@@ -178,6 +178,43 @@ def test_quota_text_flags_possible_exhaustion():
     assert "possible_exhaustion" in r["flags"]
 
 
+def test_login_method_picker_is_login_gate():
+    cap = (
+        "Select login method:\n"
+        "❯ 1. Claude account with subscription\n"
+        "  2. Anthropic Console account\n"
+    )
+    r = classify(cap, [], _meta())
+    assert r["state"] == "waiting_human"
+    assert "login_gate" in r["flags"]
+    assert "login" in r["summary"].lower()
+
+
+def test_logged_out_banner_is_login_gate():
+    cap = "Invalid API key · Please run /login\n> \n"
+    r = classify(cap, [], _meta())
+    assert r["state"] == "waiting_human"
+    assert "login_gate" in r["flags"]
+
+
+def test_oauth_paste_prompt_is_login_gate():
+    cap = (
+        "Browser didn't open? Use the url below to sign in:\n"
+        "https://claude.ai/oauth/authorize?code=true&client_id=xyz\n"
+        "Paste code here if prompted > \n"
+    )
+    r = classify(cap, [], _meta())
+    assert r["state"] == "waiting_human"
+    assert "login_gate" in r["flags"]
+
+
+def test_login_successful_is_not_login_gate():
+    # The gate is OVER once login succeeded — do not flag a healthy session.
+    cap = "Login successful. Press Enter to continue\n"
+    r = classify(cap, [], _meta())
+    assert "login_gate" not in r["flags"]
+
+
 # --------------------------------------------------------------------------- #
 # signal-first
 # --------------------------------------------------------------------------- #

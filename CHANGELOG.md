@@ -2,6 +2,14 @@
 
 All notable changes to Emux are documented here.
 
+## v0.55.0 - 2026-07-13
+
+- **Manager-operable login gates.** When a managed session logs out (or is on the wrong account), supervision no longer dead-ends until a human finds the pane.
+  - **Detect:** the Tier-0 classifier flags a login/auth sequence on screen (logged-out banner, "Select login method", OAuth URL + paste-code prompt) as `waiting_human` with a new **`login_gate`** flag and a "Needs login" summary, so `tmux_classify` surfaces it as actionable.
+  - **Navigate:** `emux login <target>` (+ MCP `tmux_login`) drives the sequence with deterministic keystrokes — sends `/login`, steps the TUI, and prints the OAuth URL (the one hop that needs a browser). Finish with `--code <paste>`; success is verified from the screen. `--switch` changes account (`/logout` first). Works by registry name across hosts; the code is never persisted and is redacted from the audit trail.
+  - Docs: `docs/emux-login.md`. Tests: `tests/test_login.py` (scripted fake tmux, zero tokens) + `login_gate` classifier cases.
+
+
 ## v0.54.0 - 2026-07-13
 
 - **Cost / usage-overrun detection.** emux now catches when a session hits a usage limit, rate limit, quota, or runs out of credits — read straight from the pane's live bottom (specific phrases only, so ordinary mentions of "limit"/"rate" do not false-fire). A cost-limited session gets a gold ring + a "💸 USAGE / COST LIMIT" badge on its tile/card, and a gold top banner counts how many sessions are throttled and jumps you to one. Distinct from the red needs-you signal, because a throttle is a money/budget event, not a decision gate. (Detection is unit-tested; the automated *response* to an overrun is the next step.)

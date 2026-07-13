@@ -45,6 +45,7 @@ from .server import (
     _save_registry,
     _start_stream_log,
     converse,
+    login_flow,
     navigate,
     pursue,
     run_mcp_server,
@@ -239,6 +240,35 @@ def cmd_goal(args: argparse.Namespace) -> int:
     verdict = "achieved" if result.get("success") else "not achievable"
     print(f"goal {verdict} in {len(result.get('steps', []))} step(s): {result.get('summary','')}")
     return 0 if result.get("success") else 1
+
+
+def cmd_login(args: argparse.Namespace) -> int:
+    """Drive a Claude Code login sequence in a session; print the OAuth URL."""
+    result = login_flow(
+        target=args.target,
+        code=args.code,
+        switch=args.switch,
+        by_registry_name=args.by_name,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("ok") else 1
+    if not result.get("ok"):
+        detail = result.get("detail", "")
+        print(f"emux login: {result.get('error', 'failed')}"
+              + (f" — {detail}" if detail else ""), file=sys.stderr)
+        if result.get("screen"):
+            print(f"  screen: {result['screen']}", file=sys.stderr)
+        return 1
+    if result.get("logged_in"):
+        print("login successful")
+        return 0
+    print("open this url in a browser and sign in:")
+    print()
+    print(f"  {result['url']}")
+    print()
+    print(result["next"])
+    return 0
 
 
 def _watch_targets(
@@ -707,6 +737,13 @@ def main(argv: list[str] | None = None) -> int:
     p_goal.add_argument("--telos", action="store_true", help="guard the run with the telos-md drift-guard (record it; abort on a telos stop signal). Also on via $EMUX_TELOS")
     p_goal.add_argument("--yolo", action="store_true", help="disable the destructive-action gate (also via $EMUX_ALLOW_DANGEROUS)")
 
+    p_login = sub.add_parser("login", help="drive a Claude Code login in a session: surface the OAuth URL, then finish with --code")
+    p_login.add_argument("target", help="tmux session name (or registry name with -n)")
+    p_login.add_argument("-n", "--by-name", action="store_true", help="resolve target via the registry (works across hosts)")
+    p_login.add_argument("--code", default=None, help="finish the flow: paste this authorization code into the waiting prompt")
+    p_login.add_argument("--switch", action="store_true", help="change account: /logout first, then start the login sequence")
+    p_login.add_argument("--json", action="store_true", help="print structured result JSON")
+
     p_web = sub.add_parser("web", help="start the web daemon — monitor sessions in a browser (grid/groups/activity/flow/chat)")
     p_web.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1; no auth — keep it local)")
     p_web.add_argument("--port", type=int, default=8689, help="port (default 8689)")
@@ -802,6 +839,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_navigate(args)
     if args.cmd == "goal":
         return cmd_goal(args)
+    if args.cmd == "login":
+        return cmd_login(args)
     if args.cmd == "watch":
         return cmd_watch(args)
     if args.cmd == "register":

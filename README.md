@@ -18,6 +18,9 @@ emux ask          → Send a prompt to an AI in a session, wait for its
                     reply to settle, print it.
 emux navigate     → Model-driven: reach a target screen through a TUI.
 emux goal         → Autonomous: pursue a whole task through a TUI.
+emux login        → Drive a Claude Code login in a session: surface the
+                    OAuth URL, then finish with --code. --switch to change
+                    account (/logout first).
 
 emux web          → Web daemon. Browser UI that monitors any session
                     like a chatbot: live pane is the bot's side of
@@ -120,6 +123,7 @@ Tools exposed via `emux mcp`:
 | `tmux_ask(target, prompt, ...)` | Send a prompt, wait for the reply to **settle**, return it |
 | `tmux_navigate(target, goal, until?, ...)` | Model-driven: reach a target screen through a TUI |
 | `tmux_goal(target, goal, ...)` | Autonomous: pursue a whole task through a TUI |
+| `tmux_login(target, code?, switch?, ...)` | Drive a Claude Code login sequence; surfaces the OAuth URL |
 
 ### Driving another AI through its TUI
 
@@ -177,6 +181,26 @@ result = await tmux_run(
 )
 print(result["content"])  # tmux pane contents after the command
 ```
+
+### Login gates (`emux login` / `tmux_login`)
+
+A managed session that logs out (or is on the wrong account) dead-ends
+supervision: the classifier reports `waiting_human` with a **`login_gate`**
+flag, and nothing can proceed until the OAuth hop happens in a browser. `emux
+login` drives everything except that hop:
+
+```
+emux login worker-3 -n              → sends /login, steps the TUI, prints the
+                                      OAuth URL to open in a browser
+emux login worker-3 -n --code <c>   → pastes the authorization code, verifies
+                                      "Login successful" on screen
+emux login worker-3 -n --switch     → change account: /logout first, then above
+```
+
+Deterministic keystrokes only — the login TUI is a fixed sequence, so no model
+calls are needed and it works on remote sessions via the registry's host. The
+code is sent as keystrokes and never persisted (redacted from the audit trail).
+Details: `docs/emux-login.md`.
 
 ## Web daemon
 

@@ -2080,6 +2080,204 @@ async def tmux_goal(
     )
 
 
+# ---- login: drive a Claude Code login/logout sequence ------------------------
+#
+# When a managed session hits a LOGIN gate (logged out, wrong account, /login
+# mid-sequence), supervision dead-ends: the OAuth hop needs a browser, and the
+# TUI steps need keystrokes. login_flow does everything BUT the browser hop —
+# it starts/advances the sequence, surfaces the OAuth URL for a human (or a
+# browser-capable agent), then finishes with the pasted code and verifies from
+# the screen. The sequence is a fixed TUI, so the steps are deterministic —
+# no model calls. Host-aware via the registry, like every other emux op.
+
+_OAUTH_URL_RE = re.compile(
+    r"https://(?:claude\.ai|console\.anthropic\.com)/oauth[^\s\"'`)\]]*"
+)
+_LOGIN_SUCCESS_RE = re.compile(r"Login successful|Logged in as", re.I)
+_LOGIN_FAIL_RE = re.compile(r"Invalid (?:code|authorization)|Login failed|OAuth error", re.I)
+
+
+def _login_step(screen: str, code_pending: bool = False,
+                sent_login: bool = False) -> dict[str, Any]:
+    """Decide the next login-flow action from a settled screen. Pure — this is
+    the testable core of login_flow.
+
+    Returns {"action": ...}: "done" (logged in), "paste" (paste-code prompt is
+    up), "url" (OAuth URL on screen — the human/browser hop, with "url" key),
+    "enter" (a menu/confirm step Enter advances), "send_login" (start the
+    sequence), or "unknown" (not a login screen we recognise)."""
+    low = screen.lower()
+    if _LOGIN_SUCCESS_RE.search(screen):
+        return {"action": "done"}
+    if code_pending:
+        # Finishing: only accept if the paste prompt (or its URL) is still up.
+        if "paste code" in low or _OAUTH_URL_RE.search(screen):
+            return {"action": "paste"}
+        return {"action": "unknown"}
+    if m := _OAUTH_URL_RE.search(screen):
+        return {"action": "url", "url": m.group(0)}
+    if "select login method" in low:
+        return {"action": "enter"}  # Enter picks the highlighted (default) method
+    if re.search(r"press enter to (?:log ?in|open|continue|retry)", low):
+        return {"action": "enter"}
+    if not sent_login:
+        return {"action": "send_login"}
+    return {"action": "unknown"}
+
+
+def login_flow(
+    target: str,
+    code: str | None = None,
+    switch: bool = False,
+    by_registry_name: bool = False,
+    max_steps: int = 8,
+    settle_seconds: float = 1.5,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """Drive a Claude Code login sequence in a tmux session, local or remote.
+
+    Three entry shapes:
+      login_flow(t)               — start (or resume) the sequence; returns the
+                                    OAuth URL once it is on screen.
+      login_flow(t, code="…")     — paste the authorization code into the
+                                    waiting prompt and verify success.
+      login_flow(t, switch=True)  — change account: /logout first, then start.
+
+    The code is sent as keystrokes and never persisted anywhere by emux.
+    """
+    session, host, err = _resolve_target(target, by_registry_name)
+    if err is not None or session is None:
+        return {"ok": False, "error": err or "unresolved_target", "name": target}
+    if not _session_exists(session, host=host):
+        return {"ok": False, "error": "session_not_found", "session": session}
+    if _pane_agent(session, host) != "claude":
+        return {"ok": False, "error": "not_a_claude_pane",
+                "detail": "the pane is not running claude — if it exited, "
+                          "restart claude in the session first"}
+
+    def cap() -> str:
+        try:
+            # -J joins wrapped lines so the OAuth URL survives narrow panes.
+            c, out, _ = _run_tmux(
+                ["capture-pane", "-t", session, "-p", "-J", "-S", "-150"], host=host)
+        except FileNotFoundError:
+            return ""
+        return _strip_ansi(out or "") if c == 0 else ""
+
+    def send(text: str | None, *keys: str) -> None:
+        if text:
+            _run_tmux(["send-keys", "-t", session, "-l", text], host=host)
+        for k in keys:
+            _run_tmux(["send-keys", "-t", session, k], host=host)
+
+    def settled(cap_seconds: float = 12.0) -> str:
+        """Poll until the screen is unchanged for settle_seconds (or cap)."""
+        last, stable, waited = cap(), 0.0, 0.0
+        while waited < cap_seconds:
+            time.sleep(0.8)
+            waited += 0.8
+            cur = cap()
+            if cur == last:
+                stable += 0.8
+                if stable >= settle_seconds:
+                    break
+            else:
+                last, stable = cur, 0.0
+        return last
+
+    # ---- finish: paste the code into the waiting prompt, verify success ----
+    if code is not None:
+        screen = settled()
+        if _login_step(screen, code_pending=True)["action"] != "paste":
+            return {"ok": False, "error": "no_paste_prompt",
+                    "detail": "the session is not waiting for a login code",
+                    "screen": _tail(screen, 12)}
+        send(code, "Enter")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(1.5)
+            screen = cap()
+            if _LOGIN_SUCCESS_RE.search(screen):
+                send(None, "Enter")  # dismiss "Press Enter to continue"
+                time.sleep(1.0)
+                return {"ok": True, "logged_in": True, "screen": _tail(cap(), 6)}
+            if _LOGIN_FAIL_RE.search(screen):
+                return {"ok": False, "error": "login_failed",
+                        "screen": _tail(screen, 12)}
+        return {"ok": False, "error": "login_not_confirmed",
+                "detail": "no success marker before timeout",
+                "screen": _tail(cap(), 12)}
+
+    # ---- start: (optionally /logout), step through the TUI to the OAuth URL ----
+    if switch:
+        send("/logout", "Enter")
+        settled()
+
+    finish = (f"emux login {target}{' -n' if by_registry_name else ''} "
+              "--code <paste>")
+    sent_login = False
+    for _ in range(max_steps):
+        screen = settled()
+        if not screen.strip():
+            if not _session_exists(session, host=host):
+                return {"ok": False, "error": "session_gone"}
+            return {"ok": False, "error": "blank_screen"}
+        step = _login_step(screen, sent_login=sent_login)
+        if step["action"] == "done":
+            return {"ok": True, "logged_in": True, "screen": _tail(screen, 6)}
+        if step["action"] == "url":
+            return {"ok": True, "logged_in": False, "url": step["url"],
+                    "next": "open the url in a browser, sign in, then finish "
+                            f"with: {finish}"}
+        if step["action"] == "enter":
+            send(None, "Enter")
+        elif step["action"] == "send_login":
+            send("/login", "Enter")
+            sent_login = True
+        else:
+            return {"ok": False, "error": "unrecognized_screen",
+                    "detail": "not a known login screen — drive it manually "
+                              "with emux navigate / tmux_navigate",
+                    "screen": _tail(screen, 12)}
+        time.sleep(0.5)
+    return {"ok": False, "error": "max_steps_reached", "screen": _tail(cap(), 12)}
+
+
+@mcp.tool()
+async def tmux_login(
+    target: str,
+    code: str | None = None,
+    switch: bool = False,
+    by_registry_name: bool = False,
+) -> dict[str, Any]:
+    """Drive a Claude Code LOGIN sequence in a managed session — the unblock for
+    a `login_gate` flag from tmux_classify.
+
+    Two-call shape (the browser hop is yours):
+      1. tmux_login(target) — starts/advances the sequence (sends /login, picks
+         the default method) and returns the OAuth `url`. Open it, sign in, and
+         copy the authorization code.
+      2. tmux_login(target, code="…") — pastes the code into the waiting prompt
+         and verifies success from the screen.
+
+    `switch=True` changes account: /logout first, then the sequence above.
+
+    Deterministic keystrokes only (no model calls); host-aware via the registry
+    like every other emux op. The code is sent as keystrokes and never persisted
+    or written to the audit trail.
+
+    Returns:
+        {ok, logged_in, url?, next?} — `url` present when the browser hop is
+        needed; {ok: false, error, screen?} on session/screen problems
+        (`not_a_claude_pane`, `no_paste_prompt`, `unrecognized_screen`, …).
+    """
+    result = await asyncio.to_thread(login_flow, target, code, switch, by_registry_name)
+    _audit("tmux_login", {"target": target, "switch": switch,
+                          "by_registry_name": by_registry_name,
+                          "code": "<redacted>" if code else None}, result)
+    return result
+
+
 @mcp.tool()
 @audited
 async def tmux_signals(
