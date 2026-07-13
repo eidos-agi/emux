@@ -1270,6 +1270,7 @@ def _capture_and_observe(session: str, lines: int, host: str | None = None) -> s
     # scrollback isn't flagged, but a real modal dialog still is.
     tail = "\n".join([ln for ln in content.splitlines() if ln.strip()][-10:])
     needs_human = bool(adapters.gated(agent_key, tail))
+    cost = _cost_overrun(content)
     state = _quick_state(agent_key, content, needs_human)
     summary = _summarize(agent.get("label", ""), state, content)
     # "clearly stopped" = settled AND the pane has sat STILL for a real pause (not
@@ -1282,7 +1283,7 @@ def _capture_and_observe(session: str, lines: int, host: str | None = None) -> s
         warm = _should_warm_gist(state, age, norm, prev.get("gist_warm_norm"),
                                  session in _GIST_INFLIGHT)
         _CACHE[session] = {"content": content, "ts": time.time(), "lines": lines,
-                           "agent": agent, "needs_human": needs_human,
+                           "agent": agent, "needs_human": needs_human, "cost": cost,
                            "state": state, "summary": summary,
                            "gist_warm_norm": norm if warm else prev.get("gist_warm_norm")}
     if warm:
@@ -1397,6 +1398,26 @@ def _looks_like_question(content: str) -> bool:
     return tail.endswith("?") or bool(_QUESTION_PHRASES.search(tail))
 
 
+# Cost / usage overrun — an agent that hit a usage limit, rate limit, or quota is
+# burning your budget or stuck; emux catches it from the pane the same way it catches
+# a gate. Deliberately specific phrases (matched at the live bottom) so ordinary
+# mentions of "limit" in output don't false-fire.
+_COST_RE = re.compile(
+    r"usage limit|rate[ _-]?limit|rate.?limited|"
+    r"quota (?:exceeded|reached|remaining|met)|"
+    r"out of (?:credits|tokens|quota)|insufficient (?:credits|quota|balance|funds)|"
+    r"429(?:\b|[^0-9])|too many requests|"
+    r"reached your (?:usage |plan )?limit|limit (?:will )?reset|resets? (?:at|in)|"
+    r"upgrade (?:your plan )?to (?:increase|continue)|overage|billing", re.I)
+
+
+def _cost_overrun(content: str) -> bool:
+    """True if the session's LIVE BOTTOM shows a usage/rate/quota/cost limit —
+    the agent is throttled or over budget and needs you to decide."""
+    tail = "\n".join([ln for ln in content.splitlines() if ln.strip()][-12:])
+    return bool(_COST_RE.search(tail))
+
+
 def _quick_state(agent_key: str, content: str, needs_human: bool) -> str:
     """A cheap, per-poll status for at-a-glance fleet tracking — running /
     waiting_human / asking / error / idle. Shown on every tile and flow box so a
@@ -1477,12 +1498,14 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
             item["content"] = content
             item["agent"] = (ce or {}).get("agent") or {"agent": "unknown", "label": "—", "glyph": "·"}
             item["needs_human"] = bool((ce or {}).get("needs_human"))
+            item["cost"] = bool((ce or {}).get("cost"))
             item["state"] = (ce or {}).get("state") or "idle"
             item["summary"] = (ce or {}).get("summary") or ""
             item.update(_meta(item["session"]))
         else:
             item["content"] = ""
             item["needs_human"] = False
+            item["cost"] = False
             item["state"] = "dead"
             item["summary"] = ""
             item["changed"] = False
@@ -1676,6 +1699,22 @@ body{
   linear-gradient(0deg,#e0483a 50%,transparent 50%),linear-gradient(0deg,#e0483a 50%,transparent 50%)}
 @keyframes needpulse{0%,100%{box-shadow:0 0 0 0 rgba(224,72,58,.55),0 0 14px rgba(224,72,58,.4)}
   50%{box-shadow:0 0 0 4px rgba(224,72,58,0),0 0 22px 3px rgba(224,72,58,.65)}}
+/* COST / usage limit — gold, distinct from the red needs-you, since it's a
+   money/throttle signal, not a decision gate. Still loud: ring + corner badge. */
+.tile.costcap{border:2px solid #d99a00;animation:costpulse 1.5s ease-in-out infinite}
+@keyframes costpulse{0%,100%{box-shadow:0 0 0 0 rgba(217,154,0,.5),0 0 14px rgba(217,154,0,.4)}
+  50%{box-shadow:0 0 0 4px rgba(217,154,0,0),0 0 22px 3px rgba(217,154,0,.6)}}
+.costbadge{position:absolute;top:7px;left:7px;z-index:5;background:#a06800;color:#fff;
+  font-size:9.5px;font-weight:800;letter-spacing:.5px;padding:3px 7px;border-radius:5px;
+  box-shadow:0 1px 5px rgba(0,0,0,.35)}
+.card.costcap{border-left:4px solid #d99a00 !important;background:rgba(217,154,0,.07)}
+#costbanner{display:none;position:fixed;top:0;left:0;right:0;z-index:119;cursor:pointer;
+  background:#a06800;color:#fff;text-align:center;padding:9px 12px;font-weight:600;
+  box-shadow:0 2px 14px rgba(160,104,0,.5)}
+#costbanner u{text-underline-offset:3px}
+body.costalert #costbanner{display:block;animation:costbannerpulse 1.4s ease-in-out infinite}
+body.costalert.hneedy #costbanner{top:38px}   /* stack under the hancock banner if both */
+@keyframes costbannerpulse{0%,100%{background:#a06800}50%{background:#c48400}}
 .needbadge{position:absolute;top:7px;right:7px;z-index:5;background:#c0392b;color:#fff;
   font-size:9.5px;font-weight:800;letter-spacing:.6px;padding:3px 7px;border-radius:5px;
   box-shadow:0 1px 5px rgba(0,0,0,.35);animation:needpulse 1.3s ease-in-out infinite}
@@ -2162,6 +2201,7 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
 </head>
 <body>
 <div id="hbanner" onclick="openHancock()"><span class="hbell">🔔</span> <b id="hbannern">0</b> need your signature — <u>review &amp; approve</u></div>
+<div id="costbanner" onclick="focusCost()">💸 <b id="costn">0</b> <span id="costword">session</span> hit a usage / cost limit — <u>review</u></div>
 <div id="htray">
   <div id="htrayhead"><b>HANCOCK</b> · pending approvals <span id="htrayclose" onclick="closeHancock()">✕</span></div>
   <div id="htoast"></div>
@@ -2544,7 +2584,7 @@ async function poll(){
   try{
     const r=await api("/api/grid?lines=14");
     if(!r.ok){$("#status").textContent=r.error||"error";$("#status").className="err";return;}
-    grid=r.sessions;cacheMeta();
+    grid=r.sessions;cacheMeta();updateCostBanner();
     $("#status").textContent=grid.filter(s=>s.live).length+" live · polling";$("#status").className="";
     updateChrome();renderTagbar();renderSidebar();
     if(mode!=="chat")render();
@@ -2555,7 +2595,7 @@ function renderSidebar(){
   const box=$("#sessions");box.innerHTML="";
   shown().forEach(s=>{
     const d=document.createElement("div");
-    d.className="card"+(current&&current.name===s.name?" active":"")+(needsYou(s)?" needy":"")+(s.live?"":" gone");
+    d.className="card"+(current&&current.name===s.name?" active":"")+(needsYou(s)?" needy":"")+(costHit(s)?" costcap":"")+(s.live?"":" gone");
     d.dataset.name=s.name;
     const att=s.attached?'<span class="att">●attached</span>':"";
     const up=s.live?uptime(s.created_unix):"";
@@ -2589,6 +2629,15 @@ function statePip(s){const st=s.live?(s.state||"idle"):"dead";
 const _NEEDY_GIST=/(on your desk|await(ing)? your|waiting (on|for) (you|your)|needs? your (approval|sign|decision|input|go)|your (approval|sign-?off|authoriz)|until you (authoriz|approv|confirm|sign|respond))/i;
 function needsYou(s){return s.live&&(s.needs_human||s.state==="asking"||s.state==="waiting_human"
   ||_NEEDY_GIST.test(lastSummary(s)));}
+// a session that hit a usage/rate/quota/cost limit — burning budget or throttled.
+function costHit(s){return s.live&&!!s.cost;}
+function updateCostBanner(){
+  const n=(grid||[]).filter(costHit).length;
+  $("#costn").textContent=n;$("#costword").textContent=n===1?"session":"sessions";
+  document.body.classList.toggle("costalert",n>0);
+}
+// jump to a cost-limited session so you can act on it (the grid badges mark the rest)
+function focusCost(){const hit=(grid||[]).filter(costHit);if(hit.length)openModal(hit[0]);}
 // the live indicator: heartbeat EKG when running, a QUESTION MARK when it's
 // asking you something, else a colored dot by state.
 const EKG='<svg class="ekg" viewBox="0 0 44 16" preserveAspectRatio="none">'
@@ -2614,7 +2663,7 @@ function railHTML(s){
 
 function makeTile(s){
   const t=document.createElement("div");
-  t.className="tile"+(hot(s)?" hot":"")+(needsYou(s)?" needy":"")+(s.live?"":" dead");
+  t.className="tile"+(hot(s)?" hot":"")+(needsYou(s)?" needy":"")+(costHit(s)?" costcap":"")+(s.live?"":" dead");
   const h=document.createElement("header");
   const att=s.attached?'<span class="att">●</span>':"";
   const ag=s.agent||{glyph:"",label:""};
@@ -2624,6 +2673,7 @@ function makeTile(s){
     +'<span class="age '+(s.live?ageClass(s.last_change_age):"t-old")+'">'+(s.live?ageLabel(s.last_change_age):"gone")+'</span>'
     +statePip(s);
   if(needsYou(s)){const b=document.createElement("div");b.className="needbadge";b.textContent="⚠ NEEDS YOU";t.appendChild(b);}
+  if(costHit(s)){const c=document.createElement("div");c.className="costbadge";c.textContent="💸 USAGE / COST LIMIT";t.appendChild(c);}
   const p=document.createElement("pre");
   if(s.live&&s.content.trim()){
     p.textContent=s.content.replace(/\s+$/,"").split("\n").slice(-14).join("\n");

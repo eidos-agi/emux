@@ -42,6 +42,9 @@ Flags (orthogonal warnings, any subset may fire):
     hidden_wait         — a human gate is up but nobody is attached to answer it.
     false_busy          — the only motion is a spinner; nothing meaningful moved.
     dangerous_blocked   — a DESTRUCTIVE action is sitting behind a confirm prompt.
+    login_gate          — a login/auth sequence is on screen (logged-out banner,
+                          /login method picker, OAuth URL + paste-code prompt).
+                          Drive it with `emux login <name>` / the tmux_login tool.
 """
 
 from __future__ import annotations
@@ -119,6 +122,22 @@ _APPROVAL_RE = re.compile(
     r"|❯\s*1\.\s*Yes"                    # Claude Code confirmation menu
     r"|1\.\s*Yes\b.*2\.\s*No",
     re.I | re.S,
+)
+# A Claude Code login/auth sequence needing action. Deliberately EXCLUDES
+# "Login successful" — that means the gate is over, not up. Kept in sync with
+# the login driver in server.py (login_flow / _login_step).
+_LOGIN_GATE_RE = re.compile(
+    r"Select login method"
+    r"|Paste code (?:here|if prompted)"
+    r"|Press Enter to (?:log ?in|open)"
+    r"|claude\.ai/oauth"
+    r"|console\.anthropic\.com/oauth"
+    r"|(?:Please )?run /login"
+    r"|Invalid API key"
+    r"|OAuth (?:token|error)"
+    r"|(?:You (?:are|have been)|Successfully) logged out"
+    r"|Login (?:failed|interrupted|expired)",
+    re.I,
 )
 _DESTRUCTIVE_RE = re.compile(
     r"rm\s+-rf"
@@ -336,6 +355,7 @@ def classify(capture_text: str, activity: list[dict], meta: dict) -> dict:
     test_failed = int(fm.group(1)) if fm else 0
     has_success = bool(_SUCCESS_RE.search(tail))
     has_approval = bool(_APPROVAL_RE.search(tail))
+    has_login_gate = bool(_LOGIN_GATE_RE.search(tail))
     has_destructive = bool(_DESTRUCTIVE_RE.search(tail))
     has_conflict = bool(_GIT_CONFLICT_RE.search(text))
     has_quota = bool(_QUOTA_RE.search(tail))
@@ -364,16 +384,26 @@ def classify(capture_text: str, activity: list[dict], meta: dict) -> dict:
     # ================= state decision cascade (first match wins) =================
 
     # 1. waiting_human — a visible human gate dominates everything below it.
-    if has_approval:
-        sig = ["approval/login prompt on screen"]
+    #    A login gate gets its own flag + summary so operators see "needs login"
+    #    (actionable via `emux login`), not a generic approval prompt.
+    if has_approval or has_login_gate:
+        sig = []
+        if has_login_gate:
+            flags.append("login_gate")
+            sig.append("login/auth sequence on screen")
+        if has_approval:
+            sig.append("approval/login prompt on screen")
         if has_destructive:
             flags.append("dangerous_blocked")
             sig.append("destructive action pending")
         if not recent_changed and not attached:
             flags.append("hidden_wait")
             sig.append("no human attached, no input progress")
-        return _result("waiting_human", _confidence(len(sig)),
-                       "Waiting on a human — approval/login/confirmation prompt is up.",
+        summary = ("Needs login — a login/auth sequence is on screen; "
+                   "drive it with `emux login <name>`."
+                   if has_login_gate else
+                   "Waiting on a human — approval/login/confirmation prompt is up.")
+        return _result("waiting_human", _confidence(len(sig)), summary,
                        "; ".join(sig), flags)
 
     # 2. thrashing — busy, but cycling with no net progress. Checked BEFORE error:

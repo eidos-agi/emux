@@ -654,3 +654,25 @@ def test_should_warm_gist_pause_and_dedup():
     assert web._should_warm_gist("idle", P + 1, "n4", None, True) is False
     # no recorded change age -> can't judge stillness -> no proactive warm
     assert web._should_warm_gist("idle", None, "n5", None, False) is False
+
+
+def test_cost_overrun_detection():
+    """Detects usage/rate/quota/cost limits at the live bottom; ignores benign text."""
+    from emux import web
+    hit = [
+        "Claude usage limit reached. Your limit will reset at 5pm.",
+        "Error: 429 Too Many Requests",
+        "You've reached your plan limit — upgrade to increase your usage.",
+        "rate_limit_error: too many requests",
+        "Insufficient credits remaining.",
+    ]
+    miss = [
+        "Running tests, all green. No limit issues.",       # 'limit' but benign
+        "def clamp(x): return max(0, min(100, x))",
+        "The rate of progress is good; committing now.",     # 'rate' but not rate-limit
+        "",
+    ]
+    for c in hit:
+        assert web._cost_overrun("work\n" + c) is True, c
+    for c in miss:
+        assert web._cost_overrun("work\n" + c) is False, c
