@@ -29,6 +29,7 @@ sweep, not N×M. The cache also evicts sessions once tmux reaps them.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -70,6 +71,18 @@ _SPINNER_RE = re.compile(
 _ACTIVITY: dict[str, dict[str, Any]] = {}   # session -> {norm, changed, last_change, samples}
 _CACHE: dict[str, dict[str, Any]] = {}      # session -> {content, ts, lines}
 _LOCK = threading.Lock()
+# The Gist, cached server-side by content hash so it's not recomputed while the
+# pane is unchanged; warmed proactively the moment a session stops (see
+# _capture_and_observe) so its result is ready before you open it.
+_GIST_CACHE: dict[str, dict[str, Any]] = {}   # session -> {hash, digest, suggestions, ts}
+_GIST_INFLIGHT: set[str] = set()              # sessions being warmed right now (dedupe)
+_SETTLED_STATES = frozenset({"idle", "asking", "waiting_human", "error"})
+
+
+def _gist_hash(pane: str) -> str:
+    """Cache key = a hash of the exact pane slice the gist model reads. When the
+    pane changes, the hash changes, so the cache self-busts."""
+    return hashlib.sha1(pane[-3500:].encode("utf-8", "ignore")).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -797,18 +810,52 @@ def _ago(sec: int) -> str:
     return f"{sec // 86400}d"
 
 
-def _reply_suggestions(session: str, host: str | None) -> dict[str, Any]:
+def _reply_suggestions(session: str, host: str | None, *, force: bool = False) -> dict[str, Any]:
     """The reader's-digest + 'what do I say' for a session you're looking at.
 
-    Reads the recent pane and asks `claude -p` (fixed-cost CLI, never the API) for
-    a 1-2 sentence digest of what's going on plus a few ready-to-send replies, so
-    a human staring at a wall of agent output knows the gist AND what to do next
-    — click a reply instead of composing one. On-demand only (when a modal is
-    open), so the cost is one call when you're actually stuck, not per poll."""
+    Reads the recent pane and asks a model (claude -p / a self-hosted NIM, never a
+    metered API) for a 1-2 sentence digest plus a few ready-to-send replies with
+    confidences, so a human staring at a wall of output knows the gist AND what to
+    do next. CACHED by content hash: while the pane is unchanged the cached result
+    is returned instantly (no model call); the poll loop warms it the moment a
+    session stops, so it's ready before you open the modal."""
     cap = capture_payload(session, 45, host=host)
     if not cap.get("ok"):
         return {"ok": False, "error": cap.get("error", "capture_failed")}
     pane = cap.get("content", "")
+    h = _gist_hash(pane)
+    if not force:
+        with _LOCK:
+            c = _GIST_CACHE.get(session)
+        if c and c.get("hash") == h:   # pane unchanged since we last summarized → serve cache
+            return {"ok": True, "digest": c["digest"], "suggestions": c["suggestions"],
+                    "cached": True}
+    out = _compute_gist(pane)
+    if out.get("ok"):
+        with _LOCK:
+            _GIST_CACHE[session] = {"hash": h, "digest": out["digest"],
+                                    "suggestions": out["suggestions"], "ts": time.time()}
+    return out
+
+
+def _warm_gist(session: str, host: str | None) -> None:
+    """Populate the gist cache for a session in the background (dedupe concurrent
+    warms). Fired when a session stops, so its digest is ready on open."""
+    with _LOCK:
+        if session in _GIST_INFLIGHT:
+            return
+        _GIST_INFLIGHT.add(session)
+    try:
+        _reply_suggestions(session, host)
+    except Exception:  # noqa: BLE001, S110  (best-effort warm; never crash the poll)
+        pass
+    finally:
+        with _LOCK:
+            _GIST_INFLIGHT.discard(session)
+
+
+def _compute_gist(pane: str) -> dict[str, Any]:
+    """The actual model call + parse for the gist (no caching)."""
     r = _llm_json(
         "A human is looking at an AI agent's terminal session and may not know how "
         "to respond. Here is its recent output:\n<<<\n" + pane[-3500:] + "\n>>>\n\n"
@@ -1213,9 +1260,15 @@ def _capture_and_observe(session: str, lines: int, host: str | None = None) -> s
     state = _quick_state(agent_key, content, needs_human)
     summary = _summarize(agent.get("label", ""), state, content)
     with _LOCK:
+        prev_state = _CACHE.get(session, {}).get("state")
         _CACHE[session] = {"content": content, "ts": time.time(), "lines": lines,
                            "agent": agent, "needs_human": needs_human,
                            "state": state, "summary": summary}
+    # a session that JUST stopped (was running, now settled) → warm its gist right
+    # away so the result is ready before you open it. Edge-triggered, inflight-
+    # guarded, and content-hash-cached, so it's one model call per stop, not per poll.
+    if prev_state == "running" and state in _SETTLED_STATES:
+        threading.Thread(target=_warm_gist, args=(session, host), daemon=True).start()
     return content
 
 
@@ -1376,6 +1429,8 @@ def poll_once(lines: int = 14) -> None:
         for dead in [k for k in _ACTIVITY if k not in live_names]:
             _ACTIVITY.pop(dead, None)
             _CACHE.pop(dead, None)
+            _GIST_CACHE.pop(dead, None)      # cache-bust: a dead session's gist is void
+            _GIST_INFLIGHT.discard(dead)
 
 
 def grid_payload(lines: int = 14) -> dict[str, Any]:

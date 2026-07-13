@@ -604,3 +604,33 @@ def test_menu_parses_to_clickable_options_not_prose():
     assert web._parse_options("Steps:\n1. a\n2. b\n3. c\nDone.") == []
     # a claude selection menu is now a gate (marches ants)
     assert web._detect_agent  # sanity
+
+
+def test_gist_cache_hits_and_busts(monkeypatch):
+    """The gist is cached by pane hash: an unchanged pane serves the cache
+    (no recompute); a changed pane recomputes; content-hash is the bust key."""
+    from emux import web
+
+    web._GIST_CACHE.clear()
+    calls = {"n": 0}
+    pane = {"content": "AGENT: doing work\nline2\n"}
+    monkeypatch.setattr(web, "capture_payload",
+                        lambda s, n, host=None: {"ok": True, "content": pane["content"]})
+
+    def fake_compute(_pane):
+        calls["n"] += 1
+        return {"ok": True, "digest": "d",
+                "suggestions": [{"text": "go", "confidence": 80}]}
+    monkeypatch.setattr(web, "_compute_gist", fake_compute)
+
+    r1 = web._reply_suggestions("s1", None)          # cold → compute
+    r2 = web._reply_suggestions("s1", None)          # same pane → cache
+    pane["content"] = "AGENT: DIFFERENT now\n"        # pane changed → bust
+    r3 = web._reply_suggestions("s1", None)
+
+    assert calls["n"] == 2                            # the identical 2nd call did NOT recompute
+    assert r2.get("cached") is True
+    assert r1.get("cached") is None and r3.get("ok") is True
+    # force=True always recomputes even on a cache hit
+    web._reply_suggestions("s1", None, force=True)
+    assert calls["n"] == 3

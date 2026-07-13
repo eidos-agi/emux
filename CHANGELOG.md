@@ -2,6 +2,12 @@
 
 All notable changes to Emux are documented here.
 
+## v0.52.0 - 2026-07-13
+
+- **The Gist runs the moment a session stops — and is cached.** When a session transitions from running to settled (idle / asking / waiting-on-you / errored), emux warms its gist in the background right away, so the digest + suggested replies are ready before you open it — no waiting.
+- **Where it caches / cache-busts.** The gist is cached server-side keyed by a hash of the exact pane slice the model reads. An unchanged pane serves the cache instantly (no model call); the pane changing — including when you send a reply — changes the hash and self-busts; a session dying evicts its entry. Warming is edge-triggered (one call per stop, not per poll), inflight-guarded (no concurrent duplicates), and routes through the model-routing settings, so it can go to a local NIM.
+
+
 ## v0.51.0 - 2026-07-13
 
 - **Reeves filter — a personal context, separate from Eidos.** Added a distinct "Reeves" company for the personal ecosystem (reeves-wealth / lens / cockpit / operator / grocery, ~/.reeves*, plugins/reeves). Any `reeves` path now reads as Reeves rather than the generic Personal, with its own periwinkle pill and a cool slate/navy skin (so switching to Reeves visibly signals personal mode). Routes to the mac-mini by default (`company_host.reeves = daniels-mac-mini`). Non-reeves personal paths still read as Personal.
