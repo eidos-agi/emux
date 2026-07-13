@@ -1,0 +1,21 @@
+# .staircase/config.yml — the delivery SLA for this project.
+# Cadence changes: use `staircase set-quota` (never edit cadence_per_day by hand).
+# Time: slot wall-clocks (deadline_local/morning_local) are read in stakeholder_tz; operator_tz is where the agent runs.
+schema: 1
+mission: Let one intelligence manage many terminals without drowning.
+cadence_per_day: 3
+report_slots: [morning, evening]
+stakeholders: []
+proof_adapters: [manual]
+gate_command: 
+texture_notes: true
+retired_vocabulary: []
+operator_tz: America/Chicago
+stakeholder_tz: 
+deadline_local: 18:00
+morning_local: 07:00
+burden_of_proof: artifact
+require_visual_attestation: false
+require_cases: false
+min_cases: 3
+require_dimensions: [happy, negative]

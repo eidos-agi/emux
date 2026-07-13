@@ -1,0 +1,5 @@
+# Objections ledger — the expectation-learning loop.
+# Every stakeholder question or reaction, ledgered: asked | answered | preempted.
+# The red-team command appends here; answering one well often becomes a
+# permanent line in the report template or the expectations record.
+objections: []
