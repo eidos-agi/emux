@@ -427,3 +427,21 @@ def test_agent_registry_routes_on_capability_not_price():
     assert t["agents"]["codex"]["access"] == "subscription"
     # and the metered-API route is recorded as forbidden, so it can't be re-litigated
     assert any(n["verdict"] == "FORBIDDEN" for n in t["notes"])
+
+
+def test_manager_inherits_company_from_the_worker_it_manages(monkeypatch):
+    # A manager is defined by what it supervises, not where its process runs.
+    from emux import server, web
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_live_sessions", lambda: [])
+    monkeypatch.setattr(server, "_load_registry", lambda: {
+        # manager's cwd would derive Eidos, but it manages a Greenmark worker
+        "mgr": {"session": "mgr", "cwd": "/Users/x/repos-eidos-agi/emux",
+                "manages": ["wrk"], "tags": [], "registered_at": 0},
+        "wrk": {"session": "wrk", "company": "greenmark",  # explicit (remote, no cwd)
+                "manages": [], "tags": [], "registered_at": 0},
+    })
+    by = {s["name"]: s for s in web.sessions_payload()["sessions"]}
+    assert by["wrk"]["company"]["company"] == "greenmark"
+    assert by["mgr"]["company"]["company"] == "greenmark"   # inherited
+    assert "_co_explicit" not in by["mgr"]                  # temp flag cleaned up

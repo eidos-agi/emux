@@ -98,7 +98,9 @@ def sessions_payload() -> dict[str, Any]:
             "attached": live_by_name.get(target, {}).get("attached", False),
             "created_unix": live_by_name.get(target, {}).get("created_unix"),
             "cwd": cwd,
-            "company": _detect_company(cwd),
+            # explicit override (remote worker / manager) wins over cwd-derivation
+            "company": _company_by_key(entry.get("company")) or _detect_company(cwd),
+            "_co_explicit": bool(entry.get("company")),
         })
     registered_targets = {e.get("session") for e in registry.values()}
     for s in live:
@@ -117,6 +119,22 @@ def sessions_payload() -> dict[str, Any]:
             "cwd": s.get("cwd"),
             "company": _detect_company(s.get("cwd")),
         })
+    # A manager belongs to the company of what it SUPERVISES, not where its
+    # process runs. So if it manages workers that agree on one company, adopt it
+    # — overriding a cwd-derived guess, but never an explicit override.
+    by_name = {s["name"]: s for s in sessions}
+    for s in sessions:
+        if s.get("_co_explicit") or not s.get("manages"):
+            continue
+        managed_cos = {}
+        for m in s["manages"]:
+            c = (by_name.get(m) or {}).get("company") or {}
+            if c.get("company"):
+                managed_cos[c["company"]] = c
+        if len(managed_cos) == 1:
+            s["company"] = next(iter(managed_cos.values()))
+    for s in sessions:
+        s.pop("_co_explicit", None)
     return {"ok": True, "sessions": sessions}
 
 
@@ -155,6 +173,17 @@ _COMPANY_TABLE = [
     ("boone", "Boone Voyage", "#4db6c9", ("repos-bv",), ("boonevoyage", "boone-voyage")),
     ("personal", "Personal", "#f0d060", ("repos-personal", "repos-local"), ()),
 ]
+
+
+def _company_by_key(key: str | None) -> dict[str, str] | None:
+    """An explicit company override on a registry entry (e.g. a remote worker
+    whose cwd we can't see locally, or a manager). Maps the key to its pill."""
+    if not key:
+        return None
+    for k, label, color, _roots, _kw in _COMPANY_TABLE:
+        if k == key:
+            return {"company": k, "label": label, "color": color}
+    return None
 
 
 def _detect_company(cwd: str | None) -> dict[str, str]:
@@ -610,6 +639,39 @@ def _meta(session: str) -> dict[str, Any]:
         return _meta_locked(st, time.time())
 
 
+_ESCALATED: dict[str, str] = {}   # session -> the gate we've already escalated
+
+
+def _escalate_if_gated(session: str, agent_key: str, content: str) -> None:
+    """A blocked worker must never be SILENT.
+
+    An agent sitting on an approval gate is the fleet's worst failure mode: it
+    looks alive, it changes nothing, and it waits forever for a human who does
+    not know it is waiting. A human manager who is stuck for three hours and
+    says nothing has failed at the job, whatever the reason.
+
+    So the moment a session is gated, it escalates ITSELF up the same `NEED`
+    channel a worker uses to ask for help — carrying the exact decision needed,
+    not a vague "stuck". A parent blocked in `tmux_wait` wakes immediately; the
+    control room shows it. Escalated once per gate (not per poll), and rearmed
+    when the gate clears.
+    """
+    from . import adapters
+    gate = adapters.gated(agent_key, content)
+    if not gate:
+        _ESCALATED.pop(session, None)      # gate cleared — rearm
+        return
+    if _ESCALATED.get(session) == gate:
+        return                             # already escalated THIS gate
+    _ESCALATED[session] = gate
+    try:
+        _server.inject_signal(
+            session, "NEED",
+            f"blocked on a {agent_key} gate: {gate!r} — needs a human decision")
+    except Exception:  # noqa: BLE001, S110  — escalation must never break the poll
+        pass
+
+
 def _capture_and_observe(session: str, lines: int) -> str:
     """Capture a pane, fold it into activity state, detect the running agent,
     and refresh the cache."""
@@ -617,6 +679,7 @@ def _capture_and_observe(session: str, lines: int) -> str:
     content = cap.get("content", "") if cap.get("ok") else ""
     _observe(session, content)
     agent = _detect_agent(session, content)
+    _escalate_if_gated(session, agent.get("agent", ""), content)
     with _LOCK:
         _CACHE[session] = {"content": content, "ts": time.time(), "lines": lines, "agent": agent}
     return content

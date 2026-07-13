@@ -2,6 +2,11 @@
 
 All notable changes to Emux are documented here.
 
+## v0.27.0 - 2026-07-13
+
+- **A manager inherits the company of what it supervises.** A supervisor is defined by the work it manages, not the directory its process runs in — so a manager whose cwd would derive one company adopts its worker's company instead (when its managed set agrees). Explicit override still wins over both. Fixes a Claude manager running from the emux repo reading as Eidos while it supervised a Greenmark worker.
+- **Explicit `company` on a registry entry.** A remote worker whose cwd the local daemon can't see (e.g. a rentamac session on `/Volumes/GREENMARK`) can carry `company` directly; the payload honors it over cwd-derivation.
+
 ## v0.26.0 - 2026-07-13
 
 **Cross-machine, cross-vendor management — proven live.** A **Codex** manager on a MacBook supervised a **Claude** worker on a remote box (rentamac), through emux, over ssh. The manager called `tmux_capture(target="ggo-build", by_registry_name=True)` and got the worker's live pane back with `"host": "rentamac"` — it never had to know the worker was remote; it just used the registry name. The `manages` edge renders the manager→worker arrow across machines.
