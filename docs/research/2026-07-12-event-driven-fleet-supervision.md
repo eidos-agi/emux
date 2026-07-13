@@ -182,5 +182,58 @@ draft mis-read them:
 4. **fs-notify (`watchdog`/`fswatch`)** as the fallback where control-mode isn't
    available; keep `stat()` for network mounts. Real win at many workers, marginal at 2.
 
+## Proven findings from driving REAL Claude Code (2026-07-12)
+
+These were established live, not assumed — several killed a naive design:
+
+- **Driving a Claude worker via `send-keys` needs text and Enter SEPARATELY.** A
+  combined text+Enter hits Claude's paste-detection and lands as an unsubmitted
+  multi-line blob. Fix shipped: `tmux_send(settle=…)` — type, wait, Enter alone.
+- **Boot timing drops early prompts.** A prompt sent before Claude is input-ready
+  vanishes into an empty box. Do NOT scrape for readiness (the ❯ / "bypass
+  permissions" strings render during boot, before input is ready). Robust gate:
+  retry the dispatch until the `UserPromptSubmit` hook confirms it LANDED.
+- **Completion is best detected by the worker's hooks, not by scraping.** A
+  `Stop` hook → `emux signal IDLE` and a `UserPromptSubmit` hook → `emux signal
+  PROGRESS` fire deterministically at turn boundaries. Proven: real Claude, warm
+  context retained across two dispatches, zero TUI scraping. Shipped: the `emux
+  signal` CLI + per-session inbox, read by `tmux_signals`/`tmux_wait` alongside
+  the output sentinel.
+
+## Hook lifecycle & the SELF-HEAL design (proven 2026-07-12)
+
+Requirement (Daniel): it must work WHETHER OR NOT a worker has the hook, and an
+unhooked worker should be detected and repaired by telling the CHILD to install
+the hook — self-healing observability.
+
+Proven behavior:
+- A child CAN install its own hook — told to, a Claude worker wrote a valid
+  `.claude/settings.json` Stop hook. The self-heal ACTION works.
+- BUT **Claude Code caches hooks at startup; a mid-session edit does NOT
+  activate** (verified: after self-install, the next turn still fired zero IDLE).
+  Activating it needs a restart — which wipes the warm context. So self-heal is
+  FUTURE-TENSE, not instant.
+- tmux lifecycle hooks for DEATH are frictionful too: per-session `session-closed`
+  doesn't fire on self-termination; `pane-died` needs `remain-on-exit on` which
+  changes lifecycle and breaks `search_finds_ended`; a global `set-hook -g
+  session-closed` fires reliably but mutates the user's tmux server state.
+
+Resulting layered design (works with or without a hook):
+1. **Spawn hooked from birth** — an emux-spawned worker is born with the
+   PROGRESS/IDLE (and future DEAD) hooks, so it never needs healing. Open
+   question: how to inject hooks without clobbering the user's own
+   `.claude/settings.json` (candidate: `claude --settings <emux-managed file>`).
+2. **Live fallback, ALWAYS** — for any unhooked worker (an adopted session),
+   completion falls back to output-settle / poll and death to a `has-session`
+   poll. Works now, less crisp. NEVER restart a warm worker to activate a hook —
+   context outweighs the hook.
+3. **Self-heal = future-proof, not repair** — detect the missing hook, have the
+   child install it; it activates on the next spawn/restart. Heals the fleet's
+   observability over time without sacrificing a live worker's memory.
+4. **Death as event** is a real gap the up-channel hook does NOT cover (a killed
+   worker fires no Stop hook). Options: a registry-scoped global `session-closed`
+   hook (mutates tmux server state — a user decision) OR keep the cheap
+   `has-session` poll (fine at small scale). Not yet decided.
+
 Full four-agent research transcripts live in this session's task outputs
 (2026-07-12).
