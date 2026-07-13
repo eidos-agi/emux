@@ -1811,9 +1811,9 @@ body{
 #modaldigest.loading .dgtext{color:var(--text-dim);font-style:italic}
 #modaldigest .dgsugg{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
 #modaldigest .dgsugg:empty{display:none}
-.sgg{background:var(--bg-card);border:1px solid var(--amber-faint);color:var(--text);
+.sgg{background:var(--bg-raise);border:1.5px solid var(--amber);color:var(--amber-dim);font-weight:600;
   font-family:inherit;font-size:12.5px;padding:6px 12px;border-radius:15px;cursor:pointer;
-  transition:background .12s,border-color .12s;text-align:left}
+  transition:background .12s,border-color .12s,color .12s;text-align:left;box-shadow:0 1px 2px rgba(0,0,0,.12)}
 .sgg:hover{background:var(--amber);color:var(--on-accent);border-color:var(--amber)}
 .sgg:disabled{opacity:.5;cursor:default}
 /* clickable answer bubbles — overlay the chat when the agent shows a menu */
@@ -1822,13 +1822,13 @@ body{
   border-top:1px solid var(--amber-faint);background:var(--bg-raise)}
 #modalopts .ohint{flex-basis:100%;font-size:10px;letter-spacing:1px;text-transform:uppercase;
   color:var(--amber-dim);margin-bottom:2px}
-.obub{background:var(--bg-card);border:1px solid var(--amber-faint);color:var(--text);
+.obub{background:var(--bg-raise);border:1.5px solid var(--amber);color:var(--amber-dim);font-weight:600;
   font-family:inherit;font-size:13px;padding:7px 13px;border-radius:16px;cursor:pointer;
-  transition:background .12s,border-color .12s;max-width:100%;text-align:left}
+  transition:background .12s,border-color .12s,color .12s;max-width:100%;text-align:left;box-shadow:0 1px 2px rgba(0,0,0,.12)}
 .obub:hover{background:var(--amber);color:var(--on-accent);border-color:var(--amber)}
-.obub b{color:var(--amber-dim);margin-right:5px}
+.obub b{color:var(--amber);margin-right:5px}
 .obub:hover b{color:var(--on-accent)}
-.obub.sel{border-color:var(--amber);box-shadow:0 0 0 1px var(--amber)}
+.obub.sel{border-color:var(--amber);box-shadow:0 0 0 2px var(--amber)}
 .obub:disabled{opacity:.5;cursor:default}
 #modalchips{display:flex;gap:8px;padding:10px 16px 0}
 #modalrow{display:flex;gap:10px;padding:10px 16px 14px}
@@ -1861,6 +1861,12 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
 #htrayhead{padding:12px 14px;border-bottom:1px solid var(--line);color:var(--text);font-size:13px;letter-spacing:.5px}
 #htrayhead b{color:var(--amber)}
 #htrayclose{float:right;cursor:pointer;color:var(--text-dim);font-size:15px}
+#htoast{max-height:0;overflow:hidden;opacity:0;margin:0 10px;border-radius:6px;
+  font-size:12px;font-weight:600;transition:max-height .2s,opacity .2s,padding .2s;padding:0 12px}
+#htoast.show{max-height:44px;opacity:1;padding:9px 12px;margin-top:8px}
+#htoast.ok{background:rgba(46,160,67,.16);color:#2ea043;border:1px solid rgba(46,160,67,.4)}
+#htoast.err{background:rgba(192,57,43,.16);color:#e05545;border:1px solid rgba(192,57,43,.45)}
+.hreq.working{opacity:.55}
 #htraylist{overflow:auto;padding:10px;display:flex;flex-direction:column;gap:10px}
 .hempty{color:var(--text-dim);text-align:center;padding:30px 10px;font-size:13px}
 .hreq{background:var(--bg-card);border:1px solid var(--line);border-left:3px solid var(--stale);border-radius:8px;padding:10px}
@@ -1874,7 +1880,8 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
 .hact{display:flex;gap:8px}
 .happrove,.hdeny{flex:1;padding:7px;border-radius:6px;cursor:pointer;font-weight:600;font-size:12px;border:1px solid}
 .happrove{background:var(--amber);color:var(--on-accent);border-color:var(--amber)}
-.hdeny{background:transparent;color:var(--text-dim);border-color:var(--line)}
+.hdeny{background:var(--bg-raise);color:var(--text);border-color:var(--text-dim);font-weight:600}
+.hdeny:hover{background:#c0392b;color:#fff;border-color:#c0392b}
 .happrove:disabled,.hdeny:disabled{opacity:.4;cursor:default}
 </style>
 </head>
@@ -1882,6 +1889,7 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
 <div id="hbanner" onclick="openHancock()"><span class="hbell">🔔</span> <b id="hbannern">0</b> need your signature — <u>review &amp; approve</u></div>
 <div id="htray">
   <div id="htrayhead"><b>HANCOCK</b> · pending approvals <span id="htrayclose" onclick="closeHancock()">✕</span></div>
+  <div id="htoast"></div>
   <div id="htraylist"></div>
 </div>
 <aside id="side">
@@ -2621,8 +2629,10 @@ $("#chat").addEventListener("scroll",()=>{if(pinned())$("#jump").style.display="
 $("#filter").addEventListener("input",e=>{filterStr=e.target.value.toLowerCase();renderSidebar();if(mode!=="chat")render();syncURL();});
 // ---------- zoom-in steer modal ----------
 let modalSession=null, modalTimer=null;
+let digestErr=false, digestRetries=0;   // The Gist: recover from a failed summarize when the pane changes, capped at 10
 function openModal(s){
   modalSession=s;
+  digestErr=false;digestRetries=0;
   $("#modalname").textContent=s.name;
   $("#modalagent").innerHTML=agentHTML(s);
   $("#modalstatus").textContent="connecting…";$("#modalstatus").style.color="";
@@ -2651,6 +2661,8 @@ async function modalRefresh(){
         sc.dataset.last=r.content;sc.textContent=r.content.replace(/\s+$/,"")+"\n";
         const cur=document.createElement("span");cur.className="cursorblock";sc.appendChild(cur);
         if(atBottom)sc.scrollTop=sc.scrollHeight;
+        // The Gist failed but the web changed — ok to try to recover, capped at 10
+        if(digestErr&&digestRetries<10){digestRetries++;loadDigest();}
       }
       renderOptions(r.options);   // a menu on screen → clickable bubbles
       updateThinking(r.thinking); // movement + timer while it generates
@@ -2672,7 +2684,11 @@ async function loadDigest(){
     body:JSON.stringify({session:sess})});
   if(!modalSession||modalSession.session!==sess)return;   // modal changed while thinking
   el.className="on";
-  if(!r.ok){$("#modaldigest .dgtext").textContent="(couldn't summarize — "+(r.error||"")+")";return;}
+  if(!r.ok){
+    digestErr=true;   // stuck — modalRefresh will retry (≤10x) when the pane content next changes
+    const more=digestRetries<10?" · will retry when the session moves":"";
+    $("#modaldigest .dgtext").textContent="(couldn't summarize — "+(r.error||"")+")"+more;return;}
+  digestErr=false;digestRetries=0;   // recovered
   $("#modaldigest .dgtext").textContent=r.digest||"(nothing notable)";
   $("#modaldigest .dgsugg").innerHTML=(r.suggestions||[]).map(s=>'<button class="sgg">'+esc(s)+'</button>').join("");
   $("#modaldigest .dgsugg").querySelectorAll(".sgg").forEach(b=>b.onclick=()=>{
@@ -3045,7 +3061,7 @@ function renderHancock(){
   if(!hancock.length){box.innerHTML='<div class="hempty">nothing waiting — the fleet is clear ✓</div>';return;}
   box.innerHTML=hancock.map(h=>{
     const risk=(h.risk||"medium");
-    return '<div class="hreq r-'+risk+'">'
+    return '<div class="hreq r-'+risk+'" data-id="'+h.id+'">'
       +'<div class="hrisk">'+risk+'</div>'
       +'<div class="hcmd">'+esc(h.command)+'</div>'
       +(h.why?'<div class="hwhy">'+esc(h.why)+'</div>':'')
@@ -3054,12 +3070,21 @@ function renderHancock(){
       +'<button class="hdeny" onclick="hancockDo(\''+h.id+'\',0)">deny</button></div></div>';
   }).join("");
 }
+let htoastTimer=null;
+function htoast(msg,kind){
+  const t=$("#htoast");t.textContent=msg;t.className="show "+(kind||"");
+  clearTimeout(htoastTimer);htoastTimer=setTimeout(()=>{t.className="";},kind==="err"?5000:2200);
+}
 async function hancockDo(id,ok){
-  const btns=document.querySelectorAll('#htraylist button');btns.forEach(b=>b.disabled=true);
+  const card=document.querySelector('#htraylist .hreq[data-id="'+id+'"]');
+  const btns=card?card.querySelectorAll('button'):[];btns.forEach(b=>b.disabled=true);
+  if(card)card.classList.add("working");
   const path=ok?"/api/hancock/approve":"/api/hancock/deny";
   let r; try{ r=await api(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})}); }
   catch(e){ r={ok:false,error:"unreachable"}; }
-  if(!r.ok){ btns.forEach(b=>b.disabled=false); alert((ok?"approve":"deny")+" failed: "+(r.error||"?")); return; }
+  if(!r.ok){ btns.forEach(b=>b.disabled=false); if(card)card.classList.remove("working");
+    htoast((ok?"Approve":"Deny")+" failed — "+(r.error||"unknown"),"err"); return; }
+  htoast(ok?"Approved & ran ✓":"Denied ✓","ok");
   hancock=hancock.filter(h=>h.id!==id);
   renderHancock();pollHancock();
 }

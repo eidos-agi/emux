@@ -2,6 +2,13 @@
 
 All notable changes to Emux are documented here.
 
+## v0.45.0 - 2026-07-13
+
+- **Choice buttons stand out in every skin.** The suggested-reply and menu-answer bubbles used a faded accent border that blended into some company skins. They now carry the full accent-color border, accent text, weight, and a soft shadow — keyed to each skin's `--amber`, so they contrast against that skin's own background by construction. The Hancock deny button got a visible border too.
+- **Hancock approve/deny gives an inline toast, not a browser alert.** A failed approve/deny now surfaces as a slide-in toast inside the tray (and a success confirmation), instead of a blocking `alert()` dialog. The acting card dims while in flight.
+- **The Gist recovers itself.** If the modal digest ("the gist") fails to summarize but the session's pane then changes, it retries — capped at 10 attempts — instead of staying stuck on the error. The error line says it will retry when the session moves.
+
+
 ## v0.44.0 - 2026-07-13
 
 - **Hancock tray opens itself.** No more waiting for a click: the moment a request needs your signature the tray slides open on its own. Close it and it stays closed for *those* requests — but a brand-new request re-opens it. When the queue clears, it slides away. Async by default; the banner is now the fallback, not the only signal.
