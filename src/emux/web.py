@@ -1856,7 +1856,8 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
 @keyframes hshake{0%,100%{transform:rotate(0)}20%{transform:rotate(-16deg)}40%{transform:rotate(14deg)}60%{transform:rotate(-8deg)}80%{transform:rotate(6deg)}}
 #htray{position:fixed;top:0;right:0;bottom:0;width:380px;max-width:92vw;z-index:130;
   background:var(--bg-raise);border-left:2px solid var(--amber);box-shadow:-8px 0 24px rgba(0,0,0,.35);
-  display:flex;flex-direction:column}
+  display:flex;flex-direction:column;transform:translateX(102%);transition:transform .28s cubic-bezier(.22,1,.36,1)}
+#htray.open{transform:translateX(0)}
 #htrayhead{padding:12px 14px;border-bottom:1px solid var(--line);color:var(--text);font-size:13px;letter-spacing:.5px}
 #htrayhead b{color:var(--amber)}
 #htrayclose{float:right;cursor:pointer;color:var(--text-dim);font-size:15px}
@@ -1879,7 +1880,7 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
 </head>
 <body>
 <div id="hbanner" onclick="openHancock()"><span class="hbell">🔔</span> <b id="hbannern">0</b> need your signature — <u>review &amp; approve</u></div>
-<div id="htray" style="display:none">
+<div id="htray">
   <div id="htrayhead"><b>HANCOCK</b> · pending approvals <span id="htrayclose" onclick="closeHancock()">✕</span></div>
   <div id="htraylist"></div>
 </div>
@@ -3022,19 +3023,22 @@ $("#feedclose").onclick=()=>setFeed(false);
 setFeed(localStorage.getItem("emux_feed")!=="0");   // open by default
 setInterval(pollFeed,2000);
 
-// --- Hancock: pending approvals surfaced loud, cleared in-app ---
-let hancock=[];
+// --- Hancock: pending approvals surfaced loud, opened async, cleared in-app ---
+let hancock=[], hDismissed=new Set();  // ids the user closed the tray on — stay closed until a NEW one arrives
 async function pollHancock(){
   let r; try{ r=await api("/api/hancock"); }catch(e){ return; }
   if(!r||!r.ok)return;
   hancock=r.pending||[];
-  const n=r.count||0;
+  const ids=new Set(hancock.map(h=>h.id));
+  hDismissed.forEach(id=>{ if(!ids.has(id))hDismissed.delete(id); });  // forget cleared requests
+  const n=hancock.length, open=$("#htray").classList.contains("open");
   $("#hbadge").textContent=n;$("#hbadge").style.display=n?"inline-block":"none";
   $("#hbtn").classList.toggle("hot",n>0);
   $("#hbannern").textContent=n;
-  // banner is loud only while there's something to sign AND the tray isn't already open
-  document.body.classList.toggle("hneedy",n>0&&$("#htray").style.display==="none");
-  if($("#htray").style.display!=="none")renderHancock();
+  if(open&&n===0){ $("#htray").classList.remove("open"); }        // queue cleared → slide away
+  else if(!open&&hancock.some(h=>!hDismissed.has(h.id))){ openHancock(); return; }  // fresh request → throw it open, don't wait
+  document.body.classList.toggle("hneedy",n>0&&!$("#htray").classList.contains("open"));
+  if($("#htray").classList.contains("open"))renderHancock();
 }
 function renderHancock(){
   const box=$("#htraylist");
@@ -3059,8 +3063,8 @@ async function hancockDo(id,ok){
   hancock=hancock.filter(h=>h.id!==id);
   renderHancock();pollHancock();
 }
-function openHancock(){ $("#htray").style.display="block";document.body.classList.remove("hneedy");renderHancock();pollHancock(); }
-function closeHancock(){ $("#htray").style.display="none";pollHancock(); }
+function openHancock(){ $("#htray").classList.add("open");document.body.classList.remove("hneedy");renderHancock(); }
+function closeHancock(){ $("#htray").classList.remove("open");hancock.forEach(h=>hDismissed.add(h.id)); }  // stay closed for THESE; a new id re-opens
 pollHancock();setInterval(pollHancock,3000);
 
 applyURL();   // restore view + filters + open session from the URL (falls back to localStorage)
