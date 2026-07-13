@@ -209,10 +209,77 @@ def warm_worker_loop():               # lifecycle — a warm worker is fed two t
     sys.exit(0 if (ok1 and ok2 and retained and still_warm) else 1)
 
 
+def claude_warm_worker():             # real Claude Code — a warm worker keeps context across two dispatches, hook completion
+    """REAL Claude Code, end to end, with ZERO TUI scraping for coordination. The
+    worker's hooks fire deterministically at boundaries: UserPromptSubmit →
+    `emux signal PROGRESS` (the prompt landed), Stop → `emux signal IDLE` (the
+    turn finished). We dispatch two tasks down the same WARM session and prove it
+    kept context — task 2 recalls the secret from task 1. tmux_send(settle) gets
+    past Claude's paste-detection; PROGRESS confirms the prompt landed (retry if a
+    boot-time send dropped); IDLE confirms completion. macOS + claude only → SKIP
+    (77); a real-LLM local case, not CI/headless."""
+    import json as _json
+    import os
+    import pathlib
+    import re
+    import shutil
+    import subprocess
+    import tempfile
+    # Opt-in: this spawns a real Claude session (slow, costs tokens, needs a GUI),
+    # so a routine `ctc run` SKIPs it. Run it explicitly with EMUX_CTC_LIVE=1.
+    if not os.environ.get("EMUX_CTC_LIVE") or sys.platform != "darwin" \
+            or shutil.which("claude") is None:
+        print("claude_warm_worker: set EMUX_CTC_LIVE=1 on macOS with claude to run",
+              file=sys.stderr)
+        sys.exit(77)                  # SKIP — live-only case
+    name = "ctc-claude-warm"
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    base = f"PYTHONPATH={repo}/src python3 -m emux.cli signal"
+    d = pathlib.Path(tempfile.mkdtemp())
+    (d / ".claude").mkdir()
+    (d / ".claude" / "settings.json").write_text(_json.dumps({"hooks": {
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{base} PROGRESS"}]}],
+        "Stop": [{"hooks": [{"type": "command", "command": f"{base} IDLE"}]}],
+    }}))
+
+    def kinds(r):
+        return {x.get("signal", {}).get("kind") for x in r.get("ready", [])}
+
+    def dispatch(task, idle_timeout=90):
+        # Retry until the prompt LANDS (PROGRESS hook), then wait for the turn to
+        # finish (IDLE hook). A boot-time send drops silently — PROGRESS catches it
+        # in ~10s instead of burning the full idle timeout.
+        for _ in range(4):
+            run(s.tmux_signals(targets=[name], ack=True))       # drain
+            run(s.tmux_send(target=name, keys=task, by_registry_name=True, settle=0.6))
+            if "PROGRESS" not in kinds(run(s.tmux_wait(targets=[name], until="signal", timeout=12))):
+                time.sleep(2)
+                continue                                        # dropped during boot → resend
+            return "IDLE" in kinds(run(s.tmux_wait(targets=[name], until="signal", timeout=idle_timeout)))
+        return False
+
+    ok = False
+    try:
+        run(s.tmux_spawn(name=name, gui=True,
+                         command=f"cd {d} && claude --dangerously-skip-permissions"))
+        time.sleep(8)                 # give the boot screen a head start; dispatch() retries anyway
+        i1 = dispatch("Remember this secret number for later: 42. Acknowledge briefly.")
+        i2 = dispatch("What was the secret number I told you earlier? Reply with exactly one line: recalled=<the number>")
+        scr = subprocess.run(["tmux", "capture-pane", "-t", name, "-p", "-S", "-40"],
+                             capture_output=True, text=True).stdout
+        recalled = "recalled=42" in scr or bool(re.search(r"\b42\b", scr.split("secret number")[-1]))
+        ok = i1 and i2 and recalled
+    finally:
+        s._run_tmux(["kill-session", "-t", name])
+        shutil.rmtree(d, ignore_errors=True)
+    sys.exit(0 if ok else 1)
+
+
 if __name__ == "__main__":
     {"happy": happy_search_running, "ended": search_finds_ended,
      "ghost": adopt_ghost_not_live, "refusal": drive_dead_refuses,
      "greenmark": manager_worker_greenmark,
      "visible": visible_manager_worker,
      "signal": signal_up_channel,
-     "warm": warm_worker_loop}[sys.argv[1]]()
+     "warm": warm_worker_loop,
+     "claude-warm": claude_warm_worker}[sys.argv[1]]()

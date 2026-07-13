@@ -2,6 +2,10 @@
 
 All notable changes to Emux are documented here.
 
+## v0.10.0 - 2026-07-12
+
+- Added `claude_warm_worker` — a **real Claude Code** ctc case (dim `real-llm`), the end-to-end proof of the warm-worker loop. Spawns a real `claude` worker whose hooks fire deterministically at boundaries — `UserPromptSubmit` → `emux signal PROGRESS` (prompt landed), `Stop` → `emux signal IDLE` (turn done) — dispatches two tasks down the same warm session, and proves it kept context: task 2 recalls task 1's secret. Coordination is **zero-scraping**: PROGRESS confirms the prompt beat Claude's boot/paste timing (retry-until-landed), IDLE confirms completion. Falsifiable — GREEN when warm (recalls 42), RED when cold (a fresh worker never told the number cannot recall). Opt-in (`EMUX_CTC_LIVE=1` on macOS with `claude`); SKIPs otherwise so routine runs stay fast and CI-safe.
+
 ## v0.9.0 - 2026-07-12
 
 The robust up-channel + the real down-channel — both proven live against Claude Code.
