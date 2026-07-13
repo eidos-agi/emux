@@ -1811,24 +1811,26 @@ body{
 #modaldigest.loading .dgtext{color:var(--text-dim);font-style:italic}
 #modaldigest .dgsugg{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
 #modaldigest .dgsugg:empty{display:none}
-.sgg{background:var(--bg-raise);border:1.5px solid var(--amber);color:var(--amber-dim);font-weight:600;
-  font-family:inherit;font-size:12.5px;padding:6px 12px;border-radius:15px;cursor:pointer;
-  transition:background .12s,border-color .12s,color .12s;text-align:left;box-shadow:0 1px 2px rgba(0,0,0,.12)}
-.sgg:hover{background:var(--amber);color:var(--on-accent);border-color:var(--amber)}
-.sgg:disabled{opacity:.5;cursor:default}
+.sgg{background:var(--amber);border:1.5px solid var(--amber);color:var(--on-accent);font-weight:650;
+  font-family:inherit;font-size:12.5px;padding:7px 13px;border-radius:15px;cursor:pointer;
+  transition:filter .12s,transform .08s;text-align:left;box-shadow:0 2px 6px rgba(0,0,0,.22)}
+.sgg:hover{filter:brightness(1.12);transform:translateY(-1px)}
+.sgg:active{transform:translateY(0)}
+.sgg:disabled{opacity:.45;cursor:default;box-shadow:none}
 /* clickable answer bubbles — overlay the chat when the agent shows a menu */
 #modalopts{display:none}
 #modalopts.on{display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px 2px;
   border-top:1px solid var(--amber-faint);background:var(--bg-raise)}
 #modalopts .ohint{flex-basis:100%;font-size:10px;letter-spacing:1px;text-transform:uppercase;
   color:var(--amber-dim);margin-bottom:2px}
-.obub{background:var(--bg-raise);border:1.5px solid var(--amber);color:var(--amber-dim);font-weight:600;
-  font-family:inherit;font-size:13px;padding:7px 13px;border-radius:16px;cursor:pointer;
-  transition:background .12s,border-color .12s,color .12s;max-width:100%;text-align:left;box-shadow:0 1px 2px rgba(0,0,0,.12)}
-.obub:hover{background:var(--amber);color:var(--on-accent);border-color:var(--amber)}
-.obub b{color:var(--amber);margin-right:5px}
-.obub:hover b{color:var(--on-accent)}
-.obub.sel{border-color:var(--amber);box-shadow:0 0 0 2px var(--amber)}
+.obub{background:var(--amber);border:1.5px solid var(--amber);color:var(--on-accent);font-weight:650;
+  font-family:inherit;font-size:13px;padding:8px 14px;border-radius:16px;cursor:pointer;
+  transition:filter .12s,transform .08s;max-width:100%;text-align:left;box-shadow:0 2px 6px rgba(0,0,0,.22)}
+.obub:hover{filter:brightness(1.12);transform:translateY(-1px)}
+.obub:active{transform:translateY(0)}
+.obub b{color:var(--on-accent);opacity:.75;margin-right:6px;font-weight:800}
+.obub.sel{box-shadow:0 0 0 3px var(--bg),0 0 0 5px var(--amber)}
+.obub:disabled{opacity:.45;cursor:default;box-shadow:none}
 .obub:disabled{opacity:.5;cursor:default}
 #modalchips{display:flex;gap:8px;padding:10px 16px 0}
 #modalrow{display:flex;gap:10px;padding:10px 16px 14px}

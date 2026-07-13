@@ -2,6 +2,11 @@
 
 All notable changes to Emux are documented here.
 
+## v0.46.0 - 2026-07-13
+
+- **Choice buttons are now solid-filled, not just bordered.** The bordered version still blended in some skins; the suggested-reply and menu-answer bubbles are now filled with the skin accent (on-accent text, drop shadow, hover-lift). Luminance offset against the page background is large in every skin by construction.
+
+
 ## v0.45.0 - 2026-07-13
 
 - **Choice buttons stand out in every skin.** The suggested-reply and menu-answer bubbles used a faded accent border that blended into some company skins. They now carry the full accent-color border, accent text, weight, and a soft shadow — keyed to each skin's `--amber`, so they contrast against that skin's own background by construction. The Hancock deny button got a visible border too.
