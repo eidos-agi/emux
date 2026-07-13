@@ -72,6 +72,19 @@ def test_spawn_passes_manages_edge_to_registry(tmp_path, monkeypatch):
     assert entry["manages"] == ["sub"], entry
 
 
+def test_a_tool_call_is_audited(tmp_path, monkeypatch):
+    """Every emux tool call appends one line to the audit trail: op, salient
+    args, outcome — the per-call record for rebooting/understanding old jobs."""
+    from emux import server
+    monkeypatch.setattr(server, "_AUDIT_PATH", tmp_path / "audit.jsonl")
+    monkeypatch.setattr(server, "REGISTRY_PATH", tmp_path / "reg.json")
+    asyncio.run(server.tmux_search(query="zzz"))
+    lines = (tmp_path / "audit.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["op"] == "tmux_search" and rec["query"] == "zzz" and rec["ok"] is True
+
+
 def test_load_registry_returns_empty_when_missing(tmp_path, monkeypatch):
     from emux import server
     monkeypatch.setattr(server, "REGISTRY_PATH", tmp_path / "does-not-exist.json")

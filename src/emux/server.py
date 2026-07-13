@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import functools
 import json
 import os
 import re
@@ -52,6 +53,40 @@ REGISTRY_PATH = Path(
 
 _STATE_DIR = Path(os.environ.get("EMUX_STATE") or (Path.home() / ".local" / "state" / "emux"))
 _LOG_DIR = _STATE_DIR / "logs"
+_AUDIT_PATH = _STATE_DIR / "audit.jsonl"
+
+
+def _audit(op: str, args: dict[str, Any], result: Any = None) -> None:
+    """Append one line to the operation audit trail — every emux tool call, in
+    order, with its salient args and outcome. Complements the session index
+    (which jobs exist) and stream logs (what a job printed) with a per-CALL record
+    (what emux was asked to do, when). Append-only; best-effort, never raises."""
+    try:
+        rec: dict[str, Any] = {"t": int(time.time()), "op": op}
+        for k, v in args.items():
+            if k == "self" or v is None:
+                continue
+            rec[k] = v if not isinstance(v, str) else v[:200]  # cap, never unbounded
+        if isinstance(result, dict):
+            rec["ok"] = result.get("ok")
+            if result.get("ok") is False and result.get("error"):
+                rec["error"] = result["error"]
+        _AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_AUDIT_PATH, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception:
+        pass  # an audit failure must never break a tool
+
+
+def audited(fn):
+    """Wrap an MCP tool so every call is recorded to the audit trail. Put it
+    UNDER @mcp.tool() so FastMCP still introspects the real signature."""
+    @functools.wraps(fn)
+    async def wrap(*a, **k):
+        result = await fn(*a, **k)
+        _audit(fn.__name__, k, result)
+        return result
+    return wrap
 
 
 def _log_path(name: str) -> Path:
@@ -315,6 +350,7 @@ def _track(sessions: list[dict[str, Any]], host: str | None) -> None:
 
 
 @mcp.tool()
+@audited
 async def tmux_sessions(
     host: str | None = None,
     sort_by: str = "activity",
@@ -389,6 +425,7 @@ async def tmux_sessions(
 
 
 @mcp.tool()
+@audited
 async def tmux_search(
     query: str | None = None,
     host: str | None = None,
@@ -464,6 +501,7 @@ async def tmux_search(
 
 
 @mcp.tool()
+@audited
 async def tmux_spawn(
     name: str,
     command: str | None = None,
@@ -562,6 +600,7 @@ async def tmux_spawn(
 
 
 @mcp.tool()
+@audited
 async def tmux_register(
     name: str,
     session: str,
@@ -617,6 +656,7 @@ async def tmux_register(
 
 
 @mcp.tool()
+@audited
 async def tmux_unregister(name: str) -> dict[str, Any]:
     """Remove a named session from the registry. Does NOT touch tmux itself."""
     registry = _load_registry()
@@ -628,6 +668,7 @@ async def tmux_unregister(name: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+@audited
 async def tmux_send(
     target: str,
     keys: str,
@@ -667,6 +708,7 @@ async def tmux_send(
 
 
 @mcp.tool()
+@audited
 async def tmux_capture(
     target: str,
     lines: int = 200,
@@ -712,6 +754,7 @@ async def tmux_capture(
 
 
 @mcp.tool()
+@audited
 async def tmux_run(
     target: str,
     command: str,
@@ -905,6 +948,7 @@ def converse(
 
 
 @mcp.tool()
+@audited
 async def tmux_ask(
     target: str,
     prompt: str,
@@ -1175,6 +1219,7 @@ def navigate(
 
 
 @mcp.tool()
+@audited
 async def tmux_navigate(
     target: str,
     goal: str,
@@ -1586,6 +1631,7 @@ def _tail(screen: str, n: int = 3) -> str:
 
 
 @mcp.tool()
+@audited
 async def tmux_goal(
     target: str,
     goal: str,

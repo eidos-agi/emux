@@ -2,6 +2,11 @@
 
 All notable changes to Emux are documented here.
 
+## v0.6.0 - 2026-07-12
+
+- Added an **operation audit trail**: every emux tool call appends one line to `~/.local/state/emux/audit.jsonl` — `{t, op, <salient args>, ok, error?}`, append-only, best-effort (an audit failure never breaks a tool). This is the per-CALL record that complements the session index (which jobs exist, running or ended) and the stream logs (what a job printed): together they let an agent reconstruct and reboot old jobs. Implemented as one `@audited` decorator under each `@mcp.tool()`, so tool signatures are unchanged.
+- Fixed a stale package description that still claimed emux "never spawns" (the invariant was scoped to the autonomous loop in v0.5.0; explicit `tmux_spawn` may).
+
 ## v0.5.0 - 2026-07-12
 
 - Added the **nested-manager** skill: a manager session spawns and drives a sub, so drive-churn stays one level down and the parent context only manages the manager. Context cost stays flat as the fleet grows, across ssh hops.
