@@ -228,6 +228,10 @@ def _thinking(content: str) -> dict[str, Any]:
 _COMPANY_TABLE = [
     ("eidos", "Eidos", "#7dd3fc", ("repos-eidos-agi", "repos-eidos-capital"), ("eidos",)),
     ("greenmark", "Greenmark Waste", "#7bd88f", ("repos-greenmark",), ("greenmark",)),
+    # Reeves — Daniel's PERSONAL ecosystem (reeves-wealth/lens/cockpit/operator/…).
+    # Lives under repos-personal/, so it must be listed BEFORE `personal` (and `aic`,
+    # for repos-aic/reeves-view) so the "reeves" match wins over the generic root.
+    ("reeves", "Reeves", "#8ea0ff", ("reeves",), ("reeves",)),
     ("aic", "AIC", "#c4a3ff", ("repos-aic", "repos-aic-holdings"), ("aic-",)),
     ("jetta", "Jetta", "#ffb27d", ("repos-jetta",), ("jetta",)),
     ("momentito", "Momentito", "#ff9ecf", ("repos-momentito",), ("momentito",)),
@@ -242,7 +246,7 @@ _COMPANY_TABLE = [
 # have to re-explain "Eidos runs on the mac-mini" per session. Defaults live here;
 # override/extend at ~/.config/emux/routing.json:
 #   {"company_host": {"eidos": "daniels-mac-mini", "greenmark": "some-host"}}
-_COMPANY_HOST_DEFAULT = {"eidos": "daniels-mac-mini"}
+_COMPANY_HOST_DEFAULT = {"eidos": "daniels-mac-mini", "reeves": "daniels-mac-mini"}
 
 
 def _routing_prefs() -> dict[str, Any]:
@@ -2386,9 +2390,15 @@ const THEMES={
     "--amber":"#2d4a3e","--amber-dim":"#3d6b56","--amber-faint":"#d7e0d3",
     "--text":"#1f2937","--text-dim":"#6b7280","--live":"#3d6b56","--stale":"#b3261e",
     "--line":"#d3ccbb","--user":"#2d4a3e","--on-accent":"#f5f0e8"},
+  // Reeves — the PERSONAL context. A cool slate/navy skin, deliberately unlike the
+  // Eidos amber and Greenmark green, so switching to Reeves signals "personal mode".
+  "reeves":{"--bg":"#eef1f6","--bg-raise":"#e6ebf2","--bg-card":"#dee4ee",
+    "--amber":"#3b5ba5","--amber-dim":"#5a76bd","--amber-faint":"#ccd6e8",
+    "--text":"#182030","--text-dim":"#5c6678","--live":"#3d7a5a","--stale":"#b3503a",
+    "--line":"#c5cddd","--user":"#3b5ba5","--on-accent":"#f4f7fc"},
 };
 // company key → skin. Anything unmapped falls back to the default light Eidos.
-const CO_THEME={"":"eidos-light","eidos":"eidos-dark","greenmark":"greenmark"};
+const CO_THEME={"":"eidos-light","eidos":"eidos-dark","greenmark":"greenmark","reeves":"reeves"};
 function applyTheme(name){
   const t=THEMES[name]||THEMES["eidos-light"];
   const r=document.documentElement;

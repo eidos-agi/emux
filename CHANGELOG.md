@@ -2,6 +2,11 @@
 
 All notable changes to Emux are documented here.
 
+## v0.51.0 - 2026-07-13
+
+- **Reeves filter — a personal context, separate from Eidos.** Added a distinct "Reeves" company for the personal ecosystem (reeves-wealth / lens / cockpit / operator / grocery, ~/.reeves*, plugins/reeves). Any `reeves` path now reads as Reeves rather than the generic Personal, with its own periwinkle pill and a cool slate/navy skin (so switching to Reeves visibly signals personal mode). Routes to the mac-mini by default (`company_host.reeves = daniels-mac-mini`). Non-reeves personal paths still read as Personal.
+
+
 ## v0.50.0 - 2026-07-13
 
 - **Confidence pies on the choices, in the app.** Each suggested reply in the floating chat now shows a green pie/wedge filled to how likely emux thinks that reply is the right move, plus the %. The Gist returns a per-suggestion confidence (0-100, comparative, best-first); the chip renders it as a `conic-gradient` green wedge + a green % — so you can see at a glance which choice to trust.
