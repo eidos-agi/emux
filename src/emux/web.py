@@ -647,6 +647,60 @@ def _spawn_session(data: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
+# which tool-calls are worth showing in the live feed — the fleet's meaningful
+# moves, not the capture/poll/classify read-noise that runs every tick.
+_FEED_OPS = {"tmux_spawn", "tmux_send", "tmux_register", "tmux_unregister",
+             "move_to_emux", "tmux_signals", "tmux_wait"}
+
+
+def _events(limit: int = 60) -> list[dict[str, Any]]:
+    """Merge the fleet's recent activity into one time-ordered feed: up-channel
+    signals (IDLE/DONE/NEED/ERROR/PROGRESS) from every session inbox, plus the
+    meaningful tool-calls from the audit trail. This is what a human watches to
+    see what the agents are doing as they do it."""
+    ev: list[dict[str, Any]] = []
+    inbox = getattr(_server, "_INBOX_DIR", None)
+    if inbox and inbox.is_dir():
+        for f in inbox.glob("*.jsonl"):
+            try:
+                lines = f.read_text(errors="replace").splitlines()[-25:]
+            except OSError:
+                continue
+            for ln in lines:
+                try:
+                    r = json.loads(ln)
+                except json.JSONDecodeError:
+                    continue
+                ev.append({
+                    "ts": r.get("t", 0), "kind": "signal",
+                    "tag": r.get("kind", "?"),
+                    "session": r.get("session") or f.stem,
+                    "text": r.get("payload") or "",
+                })
+    audit = getattr(_server, "_AUDIT_PATH", None)
+    if audit and audit.is_file():
+        try:
+            alines = audit.read_text(errors="replace").splitlines()[-400:]
+        except OSError:
+            alines = []
+        for ln in alines:
+            try:
+                r = json.loads(ln)
+            except json.JSONDecodeError:
+                continue
+            op, ok = r.get("op", ""), r.get("ok", True)
+            if op not in _FEED_OPS and ok:
+                continue          # skip read-noise; always keep errors
+            ev.append({
+                "ts": r.get("t", 0), "kind": "error" if not ok else "op",
+                "tag": op,
+                "session": r.get("target") or r.get("name") or "",
+                "text": ("" if ok else f"error: {r.get('error', '')}"),
+            })
+    ev.sort(key=lambda e: e["ts"], reverse=True)
+    return ev[:limit]
+
+
 def _iterm_run(command: str, focus: bool = False) -> tuple[bool, str | None]:
     """Open a NEW iTerm2 window running `command`, driven by AppleScript — no
     `.command` file, so macOS Gatekeeper doesn't throw a quarantine prompt.
@@ -839,9 +893,17 @@ def _capture_and_observe(session: str, lines: int, host: str | None = None) -> s
     content = cap.get("content", "") if cap.get("ok") else ""
     _observe(session, content)
     agent = _detect_agent(session, content)
-    _escalate_if_gated(session, agent.get("agent", ""), content)
+    agent_key = agent.get("agent", "")
+    _escalate_if_gated(session, agent_key, content)
+    # is this session WAITING ON THE HUMAN? A real gate on screen — an approval
+    # menu or a y/n it can't answer itself. NOT merely "there's a ❯ prompt line"
+    # (every Claude pane has those in scrollback); that over-fires on everything.
+    # The UI marches ants around a genuinely-blocked session so you can't miss it.
+    from . import adapters
+    needs_human = bool(adapters.gated(agent_key, content))
     with _LOCK:
-        _CACHE[session] = {"content": content, "ts": time.time(), "lines": lines, "agent": agent}
+        _CACHE[session] = {"content": content, "ts": time.time(), "lines": lines,
+                           "agent": agent, "needs_human": needs_human}
     return content
 
 
@@ -880,9 +942,11 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
                 ce = _CACHE.get(item["session"])
             item["content"] = content
             item["agent"] = (ce or {}).get("agent") or {"agent": "unknown", "label": "—", "glyph": "·"}
+            item["needs_human"] = bool((ce or {}).get("needs_human"))
             item.update(_meta(item["session"]))
         else:
             item["content"] = ""
+            item["needs_human"] = False
             item["changed"] = False
             item["last_change_age"] = None
             item["activity"] = []
@@ -1001,6 +1065,28 @@ body::after{
 .card .badges span{border:1px solid var(--line);color:var(--text-dim);padding:0 5px;margin-right:4px}
 #side footer{padding:10px 18px;border-top:1px solid var(--line);color:var(--text-dim);font-size:10px;letter-spacing:1px}
 #main{flex:1;height:100%;display:flex;flex-direction:column;min-width:0}
+/* live fleet feed — a collapsible right rail showing what agents do as they do it */
+#feed{width:300px;flex:none;height:100%;border-left:1px solid var(--line);
+  background:var(--bg-raise);display:flex;flex-direction:column;transition:width .18s ease}
+#feed:not(.open){width:0;border-left:none;overflow:hidden}
+#feedhead{flex:none;display:flex;align-items:center;gap:8px;padding:11px 14px;
+  border-bottom:1px solid var(--line);font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--amber-dim)}
+#feedcount{color:var(--text-dim);font-size:10px}
+#feedclose{margin-left:auto;background:transparent;border:none;color:var(--text-dim);
+  font-size:18px;cursor:pointer;line-height:1;padding:0 4px}
+#feedclose:hover{color:var(--amber)}
+#feedlist{flex:1;overflow-y:auto;padding:6px 0}
+.fev{display:flex;gap:8px;padding:5px 12px;border-bottom:1px solid rgba(255,176,0,.05);font-size:11px;align-items:baseline}
+.fev .fage{color:var(--text-dim);font-size:9px;white-space:nowrap;min-width:26px}
+.fev .ftag{font-weight:700;white-space:nowrap}
+.fev .fsess{color:var(--amber-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:90px}
+.fev .ftext{color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.fev.k-NEED .ftag,.fev.k-ERROR .ftag,.fev.k-error .ftag{color:var(--stale)}
+.fev.k-IDLE .ftag,.fev.k-DONE .ftag,.fev.k-READY .ftag{color:var(--live)}
+.fev.k-PROGRESS .ftag{color:var(--user)}
+.fev.k-op .ftag{color:var(--amber-dim)}
+.fev.fresh{animation:fevin .5s ease}
+@keyframes fevin{from{background:rgba(255,176,0,.18)}to{background:transparent}}
 #topbar{
   flex:none;display:flex;align-items:center;gap:14px;
   padding:10px 22px;border-bottom:1px solid var(--line);background:var(--bg-raise);
@@ -1024,6 +1110,19 @@ body::after{
 .tile:hover{border-color:var(--amber-dim)}
 .tile.hot{border-color:var(--amber);box-shadow:0 0 16px rgba(255,176,0,.25)}
 .tile.dead{opacity:.45}
+/* WAITING ON YOU: marching ants around the edge + a slow breathing orb glow, so a
+   session that needs your decision is impossible to miss on a wall of tiles. */
+.needy{position:relative;border-color:transparent!important;
+  animation:orb 1.8s ease-in-out infinite}
+.needy::before{content:"";position:absolute;inset:-1px;pointer-events:none;z-index:2;
+  padding:1px;border-radius:inherit;
+  background:repeating-linear-gradient(45deg,var(--amber) 0,var(--amber) 6px,transparent 6px,transparent 12px);
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;mask-composite:exclude;
+  background-position:0px 0px;animation:ants 1.4s linear infinite}
+@keyframes ants{from{background-position:0px 0px}to{background-position:34px 0px}}
+@keyframes orb{0%,100%{box-shadow:0 0 6px rgba(255,176,0,.35)}50%{box-shadow:0 0 22px 3px rgba(255,176,0,.6)}}
+.card.needy{border-left-color:var(--amber)}
 .tile header{
   display:flex;align-items:baseline;gap:8px;padding:6px 10px;
   background:var(--bg-card);border-bottom:1px solid var(--line);
@@ -1318,6 +1417,7 @@ body::after{
     <span id="status">connecting…</span>
     <button id="attachbtn" class="act" style="display:none">⧉ copy attach</button>
     <button id="newbtn" class="act">+ NEW SESSION</button>
+    <button id="feedbtn" class="act" title="live fleet activity">◫ FEED</button>
     <button id="refreshbtn" class="act">↻ refresh</button>
     <div id="tabs">
       <button class="tab" data-mode="grid">GRID</button>
@@ -1344,6 +1444,11 @@ body::after{
     </div>
   </div>
 </main>
+<aside id="feed" class="open">
+  <div id="feedhead"><span>◫ fleet</span><span id="feedcount"></span>
+    <button id="feedclose" title="hide">›</button></div>
+  <div id="feedlist"></div>
+</aside>
 <div id="modal">
   <div id="modalback"></div>
   <div id="modalpanel">
@@ -1551,7 +1656,7 @@ function renderSidebar(){
   const box=$("#sessions");box.innerHTML="";
   shown().forEach(s=>{
     const d=document.createElement("div");
-    d.className="card"+(current&&current.name===s.name?" active":"")+(s.live?"":" gone");
+    d.className="card"+(current&&current.name===s.name?" active":"")+(s.needs_human?" needy":"")+(s.live?"":" gone");
     d.dataset.name=s.name;
     const att=s.attached?'<span class="att">●attached</span>':"";
     const up=s.live?uptime(s.created_unix):"";
@@ -1576,7 +1681,7 @@ function renderSidebar(){
 
 function makeTile(s){
   const t=document.createElement("div");
-  t.className="tile"+(hot(s)?" hot":"")+(s.live?"":" dead");
+  t.className="tile"+(hot(s)?" hot":"")+(s.needs_human?" needy":"")+(s.live?"":" dead");
   const h=document.createElement("header");
   const att=s.attached?'<span class="att">●</span>':"";
   const ag=s.agent||{glyph:"",label:""};
@@ -2208,6 +2313,39 @@ document.addEventListener("visibilitychange",()=>{
   if(!document.hidden){flashOn=false;poll();if(modalSession)modalRefresh();}
 });
 
+// ---- live fleet feed ----
+let feedSeen="";   // signature of the newest event, to flash only what's new
+function fage(ts){const s=Math.max(0,Math.floor(Date.now()/1000-ts));
+  return s<60?s+"s":(s<3600?Math.floor(s/60)+"m":(s<86400?Math.floor(s/3600)+"h":Math.floor(s/86400)+"d"));}
+function esc(x){return (x||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+async function pollFeed(){
+  if(!$("#feed").classList.contains("open"))return;
+  const r=await api("/api/events?limit=60");
+  if(!r.ok)return;
+  const ev=r.events||[];
+  const newest=ev.length?(ev[0].ts+"|"+ev[0].tag+"|"+ev[0].session):"";
+  $("#feedcount").textContent=ev.length?(ev.length+" recent"):"quiet";
+  $("#feedlist").innerHTML=ev.map((e,i)=>{
+    const fresh=(i===0&&newest!==feedSeen)?" fresh":"";
+    const label=e.kind==="signal"?e.tag:(e.kind==="error"?e.tag:e.tag);
+    return '<div class="fev k-'+e.tag+(e.kind==="error"?" k-error":"")+fresh+'">'
+      +'<span class="fage">'+fage(e.ts)+'</span>'
+      +'<span class="ftag">'+esc(label)+'</span>'
+      +(e.session?'<span class="fsess">'+esc(e.session)+'</span>':'')
+      +'<span class="ftext">'+esc(e.text)+'</span></div>';
+  }).join("")||'<div class="fev"><span class="ftext">no activity yet</span></div>';
+  feedSeen=newest;
+}
+function setFeed(open){
+  $("#feed").classList.toggle("open",open);
+  localStorage.setItem("emux_feed",open?"1":"0");
+  if(open)pollFeed();
+}
+$("#feedbtn").onclick=()=>setFeed(!$("#feed").classList.contains("open"));
+$("#feedclose").onclick=()=>setFeed(false);
+setFeed(localStorage.getItem("emux_feed")!=="0");   // open by default
+setInterval(pollFeed,2000);
+
 setMode(localStorage.getItem("emux_view")||"grid");   // restore last view (#6)
 poll();gridTimer=setInterval(poll,2000);
 </script>
@@ -2309,6 +2447,14 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                 self._json({"ok": True, **judge.classify_session(name)})
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
+            return
+        if url.path == "/api/events":
+            q = parse_qs(url.query)
+            try:
+                lim = max(1, min(200, int((q.get("limit") or ["60"])[0])))
+            except ValueError:
+                lim = 60
+            self._json({"ok": True, "events": _events(lim)})
             return
         if url.path == "/api/hosts":
             self._json({"ok": True, "hosts": _known_hosts()})

@@ -2,6 +2,13 @@
 
 All notable changes to Emux are documented here.
 
+## v0.31.0 - 2026-07-13
+
+**See the fleet act, and see when it needs YOU.** Two additions that make the control room a live surface, not a static grid.
+
+- **Live fleet feed** — a collapsible right rail (◫ FEED) showing what the agents do as they do it: up-channel signals (IDLE/DONE/NEED/ERROR/PROGRESS from every session inbox) and the meaningful tool-calls (spawn / send / register / wait), newest first, colour-coded, the newest one flashing. Skips the capture/poll read-noise. New `GET /api/events` merges the signal inboxes and the audit trail into one time-ordered stream. Polls every 2s; open by default, state remembered.
+- **"Waiting on YOU" affordance** — a session sitting on a real gate (an approval menu, a y/n it can't answer itself) gets **marching ants** around its tile plus a slow breathing **orb** glow, so on a wall of tiles the one that needs your decision is impossible to miss. Driven by `needs_human` in the grid payload (from `adapters.gated()` on the live pane — precise: a genuine gate, not merely "there's a ❯ prompt", which over-fired on every Claude pane).
+
 ## v0.30.0 - 2026-07-13
 
 **New-vs-resume: the wording now lifts the decision without overpowering it.** "I want to create an Eidos manager. He manages Kai…" was resolving to RESUME the existing `ggo-manager` — a name-match beating an explicit "create". Fixed two ways:
