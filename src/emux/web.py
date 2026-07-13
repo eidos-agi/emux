@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 import threading
 import time
@@ -250,6 +251,92 @@ def _candidate_dirs(host: str | None = None, limit: int = 200) -> list[str]:
     return dirs
 
 
+def _running_sessions(host: str | None = None) -> list[dict[str, Any]]:
+    """tmux sessions ALREADY RUNNING on `host` — the things you can RESUME.
+
+    The other half of "what exists on that machine": you either start fresh in a
+    directory, or you pick up something that's already there."""
+    fmt = "#{session_name}|#{session_created}|#{session_attached}|#{session_windows}|#{session_path}"
+    try:
+        code, out, _ = _server._run_tmux(["ls", "-F", fmt], host=host, timeout=20)
+    except (FileNotFoundError, Exception):  # noqa: BLE001
+        return []
+    if code != 0:
+        return []
+    known = {e.get("session") for e in _server._load_registry().values()}
+    rows: list[dict[str, Any]] = []
+    now = time.time()
+    for ln in (out or "").splitlines():
+        p = ln.strip().split("|")
+        if len(p) < 5:
+            continue
+        try:
+            created = int(p[1])
+        except ValueError:
+            continue
+        rows.append({
+            "name": p[0],
+            "created_unix": created,
+            "age_sec": max(0, int(now - created)),
+            "attached": p[2] == "1",
+            "windows": p[3],
+            "path": p[4],
+            "adopted": p[0] in known,   # already in the emux registry
+        })
+    rows.sort(key=lambda r: r["created_unix"], reverse=True)   # most recent first
+    return rows
+
+
+_UNSENT_RE = re.compile(r"^[❯>]\s+\S", re.MULTILINE)
+
+
+def _peek_session(session: str, host: str | None = None, lines: int = 12) -> dict[str, Any]:
+    """Look INSIDE a running session before you touch it.
+
+    Resuming is not creating: the thing already has state. You need to see which
+    one it is, whether it is holding an unsent prompt someone typed, and whether
+    a terminal is already attached — all of which attaching could disturb."""
+    try:
+        code, out, err = _server._run_tmux(
+            ["capture-pane", "-t", session, "-p", "-S", f"-{lines}"],
+            host=host, timeout=20)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+    if code != 0:
+        return {"ok": False, "error": (err or "capture failed").strip()}
+    text = out or ""
+    body = [ln for ln in text.splitlines() if ln.strip()]
+    return {
+        "ok": True, "session": session, "host": host,
+        "content": "\n".join(body[-lines:]),
+        # a line like "❯ do the thing" is a prompt typed but never submitted
+        "unsent": bool(_UNSENT_RE.search(text)),
+    }
+
+
+def _adopt_session(data: dict[str, Any]) -> dict[str, Any]:
+    """Bring an ALREADY-RUNNING session (local or remote) into emux."""
+    import asyncio
+    session = (data.get("session") or "").strip()
+    if not session:
+        return {"ok": False, "error": "missing_session"}
+    host = (data.get("host") or "").strip()
+    if host in ("", "local"):
+        host = None
+    name = (data.get("name") or "").strip() or session
+    try:
+        r = asyncio.run(_server.tmux_register(
+            name=name, session=session, host=host,
+            description=(data.get("description") or "").strip() or None,
+            tags=(data.get("tags") or ["adopted"]),
+        ))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+    if data.get("gui"):
+        _iterm_attach(session, host)   # a real terminal on it — over ssh when remote
+    return {"ok": True, "name": name, "session": session, "host": host, **(r or {})}
+
+
 def _claude_json(prompt: str, timeout: int = 90) -> dict[str, Any]:
     """One fixed-cost `claude -p` call that must answer with a JSON object.
     Never the API — the CLI only."""
@@ -309,44 +396,74 @@ def _suggest_session(intent: str, host: str | None = None) -> dict[str, Any]:
         if chosen_host not in hosts:          # constrain to a real machine
             chosen_host = "local"
 
-    # --- step 2: what actually exists ON that machine ---
-    dirs = _candidate_dirs(None if chosen_host == "local" else chosen_host)
-    if not dirs:
-        return {"host": chosen_host, "name": "", "cwd": "", "command": "",
-                "whyHost": host_why,
-                "why": f"could not list directories on {chosen_host}",
-                "dirs": [], "verified": False}
+    # --- step 2: what actually exists ON that machine — BOTH kinds ---
+    rhost = None if chosen_host == "local" else chosen_host
+    dirs = _candidate_dirs(rhost)
+    running = _running_sessions(rhost)      # things you could RESUME instead
+    base = {"host": chosen_host, "whyHost": host_why,
+            "dirs": dirs, "running": running}
+    if not dirs and not running:
+        return {**base, "action": "new", "name": "", "cwd": "", "command": "",
+                "why": f"could not list anything on {chosen_host}", "verified": False}
 
-    # --- step 3: choose among THOSE directories (a constrained choice, by index) ---
-    listing = "\n".join(f"  [{i}] {d}" for i, d in enumerate(dirs))
+    # --- step 3: resume something already there, or start fresh in a directory? ---
+    sess_list = "\n".join(
+        f"  [{i}] {s['name']} — {_ago(s['age_sec'])} old, {s['path']}"
+        f"{' (attached)' if s['attached'] else ''}"
+        for i, s in enumerate(running)) or "  (none running)"
+    dir_list = "\n".join(f"  [{i}] {d}" for i, d in enumerate(dirs)) or "  (none)"
     r2 = _claude_json(
-        f"Place a terminal session on machine '{chosen_host}'.\n\n"
-        f"WHAT THE USER WANTS TO DO: {intent}\n\n"
-        "DIRECTORIES THAT EXIST ON THIS MACHINE — choose ONE by its index:\n"
-        f"{listing}\n\n"
-        'Reply with ONE line of JSON: {"dir_index": <int>, '
-        '"name": "<short-kebab-session-name>", '
-        '"command": "<command to run, e.g. claude; empty string for a plain shell>", '
-        '"why": "<one short sentence: why this directory>"}\n'
-        "Prefer a cockpit directory for planning/strategy work and the relevant "
-        "repo for code work. dir_index MUST be one of the indices listed above."
+        f"A developer wants a terminal session on machine '{chosen_host}'.\n\n"
+        f"WHAT THEY SAID: {intent}\n\n"
+        "They can either RESUME a session already running on that machine, or "
+        "start a NEW one in a directory. Choose the one that matches what they said.\n\n"
+        f"ALREADY RUNNING ON {chosen_host} (resume one of these):\n{sess_list}\n\n"
+        f"DIRECTORIES ON {chosen_host} (start a new session in one of these):\n{dir_list}\n\n"
+        'Reply with ONE line of JSON, nothing else:\n'
+        '{"action": "resume" | "new", "session_index": <int, only if resume>, '
+        '"dir_index": <int, only if new>, "name": "<short-kebab-session-name>", '
+        '"command": "<command for a NEW session; empty string for a plain shell>", '
+        '"why": "<one short sentence>"}\n'
+        'Use action "resume" when they refer to something already running / '
+        'existing / "pick up" / "resume" / "the one I was working on". '
+        'Use "new" when they describe fresh work. Indices MUST come from the '
+        "lists above. If they ask for the most recent, note the lists are "
+        "ordered newest-first."
     )
     if "_error" in r2:
-        return r2
-    idx = r2.get("dir_index")
+        return {**base, **r2}
+
+    action = "resume" if str(r2.get("action")) == "resume" else "new"
+    why = r2.get("why") or ""
+
+    if action == "resume":
+        si = r2.get("session_index")
+        if isinstance(si, int) and 0 <= si < len(running):
+            s = running[si]
+            return {**base, "action": "resume", "verified": True,
+                    "session": s["name"], "cwd": s["path"],
+                    "name": r2.get("name") or s["name"],
+                    "command": "", "why": why}
+        return {**base, "action": "resume", "verified": False,
+                "session": "", "cwd": "", "name": "", "command": "",
+                "why": why or "could not identify which session to resume"}
+
+    di = r2.get("dir_index")
     cwd, verified = "", False
-    if isinstance(idx, int) and 0 <= idx < len(dirs):
-        cwd, verified = dirs[idx], True   # a real dir on that machine, not invented
-    return {
-        "host": chosen_host,
-        "name": r2.get("name") or "",
-        "cwd": cwd,
-        "command": r2.get("command") or "",
-        "whyHost": host_why,             # why step 1 chose that machine
-        "why": r2.get("why") or "",      # why step 2 chose that directory
-        "dirs": dirs,          # so the UI's directory choices match the machine
-        "verified": verified,  # the path was CHOSEN from real dirs, not invented
-    }
+    if isinstance(di, int) and 0 <= di < len(dirs):
+        cwd, verified = dirs[di], True   # a real dir on that machine, not invented
+    return {**base, "action": "new", "verified": verified,
+            "session": "", "cwd": cwd,
+            "name": r2.get("name") or "",
+            "command": r2.get("command") or "", "why": why}
+
+
+def _ago(sec: int) -> str:
+    if sec < 3600:
+        return f"{sec // 60}m"
+    if sec < 86400:
+        return f"{sec // 3600}h"
+    return f"{sec // 86400}d"
 
 
 def _spawn_session(data: dict[str, Any]) -> dict[str, Any]:
@@ -371,22 +488,28 @@ def _spawn_session(data: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-def _iterm_attach(session: str) -> tuple[bool, str | None]:
-    """Open a NEW iTerm2 window attached to `session`, driven by AppleScript —
-    no `.command` file, so macOS Gatekeeper doesn't throw a quarantine prompt."""
+def _iterm_run(command: str, focus: bool = False) -> tuple[bool, str | None]:
+    """Open a NEW iTerm2 window running `command`, driven by AppleScript — no
+    `.command` file, so macOS Gatekeeper doesn't throw a quarantine prompt.
+
+    `focus` is OFF by default and MUST stay off for anything that attaches to a
+    session you did not just create. Activating steals OS keyboard focus, so a
+    window that pops up mid-keystroke swallows what you were typing straight into
+    a live agent's prompt — observed for real: adopting a 2-day-old Claude session
+    running with bypass-permissions captured stray keys into its input box.
+    """
     import platform
-    import shlex
     import subprocess
     if platform.system() != "Darwin":
         return False, "macOS/iTerm2 only"
-    attach = f"tmux attach -t {shlex.quote(session)}"
+    esc = command.replace("\\", "\\\\").replace('"', '\\"')
     script = (
         'tell application "iTerm2"\n'
         " create window with default profile\n"
         " tell current session of current window to write text "
-        f'"{attach}"\n'
-        " activate\n"
-        "end tell"
+        f'"{esc}"\n'
+        + (" activate\n" if focus else "")
+        + "end tell"
     )
     try:
         g = subprocess.run(["osascript", "-e", script],
@@ -396,6 +519,19 @@ def _iterm_attach(session: str) -> tuple[bool, str | None]:
     if g.returncode != 0:
         return False, (g.stderr or g.stdout or "osascript failed").strip()
     return True, None
+
+
+def _iterm_attach(session: str, host: str | None = None) -> tuple[bool, str | None]:
+    """Open an iTerm2 window attached to `session` — over ssh when it's remote.
+
+    Never takes focus: you are attaching to something that is ALREADY RUNNING and
+    may hold an unsent prompt. The window appears; you click into it when you mean
+    to type there."""
+    if host:
+        inner = (f"PATH=/opt/homebrew/bin:/usr/local/bin:$PATH "
+                 f"tmux attach -t {shlex.quote(session)}")
+        return _iterm_run(f"ssh -t {shlex.quote(host)} {shlex.quote(inner)}", focus=False)
+    return _iterm_run(f"tmux attach -t {shlex.quote(session)}", focus=False)
 
 
 _SHELLS = {"zsh", "-zsh", "bash", "-bash", "fish", "sh", "-sh"}
@@ -850,7 +986,26 @@ body::after{
 .hchip:hover{border-color:var(--amber-faint);color:var(--amber-dim)}
 .hchip.on{background:var(--amber);border-color:var(--amber);color:#151005;font-weight:700}
 .hchip.ai::after{content:" ✦";opacity:.8}
+.lanes{display:flex;gap:6px;margin-bottom:5px}
+.lane{font-size:10px;letter-spacing:.5px;padding:3px 10px;border:1px solid var(--line);
+  color:var(--text-dim);cursor:pointer;user-select:none;border-radius:3px}
+.lane:hover{border-color:var(--amber-faint);color:var(--amber-dim)}
+.lane.on{border-color:var(--amber);color:var(--amber);background:rgba(255,176,0,.09)}
+.lane b{font-weight:700;opacity:.7;margin-left:5px}
 .dirchoices{max-height:150px;overflow-y:auto;border:1px solid var(--line);margin-top:5px}
+.dirrow .meta{opacity:.55;margin-left:8px;font-size:10px}
+.dirrow.on .meta{opacity:.8}
+/* resuming is not creating — you're touching something that already has state, so look at it */
+#peekwrap{display:none;margin-top:7px;border:1px solid var(--line);background:var(--bg)}
+#peekwrap.show{display:block}
+#peekhead{font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-dim);
+  padding:4px 8px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center}
+#peekflags .flag{font-size:9px;padding:1px 6px;border-radius:8px;margin-left:4px;
+  background:rgba(255,95,86,.16);color:#ff8a80;border:1px solid rgba(255,95,86,.4)}
+#peek{margin:0;padding:7px 9px;font-size:10.5px;line-height:1.35;color:var(--amber-dim);
+  max-height:112px;overflow:auto;white-space:pre;opacity:.85}
+#guinote{font-size:10px;color:#ffb27d;margin-top:4px}
+#guinote:empty{display:none}
 .dirrow{padding:5px 9px;font-size:12px;color:var(--text-dim);cursor:pointer;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid rgba(255,176,0,.06)}
 .dirrow:hover{background:rgba(255,176,0,.07);color:var(--amber-dim)}
@@ -994,23 +1149,35 @@ body::after{
       </div>
 
       <div class="step locked" id="s-dir">
-        <div class="steph"><span class="num">2</span><span class="lbl">directory</span>
+        <div class="steph"><span class="num">2</span><span class="lbl">what's on it</span>
           <span class="sub" id="dirsub">pick a machine first</span>
           <span class="why" id="why-dir"></span></div>
-        <input id="dirfilter" placeholder="filter directories…" autocomplete="off">
+        <div class="lanes">
+          <span class="lane" data-lane="resume">↺ resume something running <b id="nrun">0</b></span>
+          <span class="lane" data-lane="new">+ start fresh in a directory <b id="ndir">0</b></span>
+        </div>
+        <input id="dirfilter" placeholder="filter…" autocomplete="off">
         <div class="dirchoices" id="dirchoices"></div>
+        <div id="peekwrap">
+          <div id="peekhead">what's in it right now <span id="peekflags"></span></div>
+          <pre id="peek"></pre>
+        </div>
       </div>
 
       <div class="step locked" id="s-cmd">
-        <div class="steph"><span class="num">3</span><span class="lbl">what runs there</span></div>
+        <div class="steph"><span class="num">3</span><span class="lbl">what runs there</span>
+          <span class="sub" id="cmdsub"></span></div>
         <div class="chips" id="cmdchips"></div>
         <input id="newcmd" placeholder="custom command… (empty = plain shell)" autocomplete="off">
       </div>
 
       <div class="step locked" id="s-name">
-        <div class="steph"><span class="num">4</span><span class="lbl">name it</span></div>
+        <div class="steph"><span class="num">4</span><span class="lbl" id="namelbl">name it</span>
+          <span class="sub" id="namesub"></span></div>
         <input id="newname" placeholder="session name" autocomplete="off">
-        <label class="chk"><input type="checkbox" id="newgui" checked> open an iTerm2 window attached to it</label>
+        <label class="chk"><input type="checkbox" id="newgui" checked>
+          <span id="guilbl">open an iTerm2 window attached to it</span></label>
+        <div id="guinote"></div>
       </div>
       <div id="newerr"></div>
     </div>
@@ -1551,76 +1718,142 @@ $("#modaliterm").onclick=async()=>{
 };
 // ---- new session: a CASCADE. Each choice constrains the ones below it, so
 // changing an upper choice INVALIDATES everything under it and re-derives. ----
-const NS={hosts:[],host:"",dirs:[],cwd:"",cmd:"",name:"",
-          aiHost:"",aiCwd:"",whyHost:"",whyDir:"",loading:false};
+// The tree: machine → (resume a running session | start new in a dir) → command → name.
+// Its nodes are enumerated from REALITY; the LLM only classifies your sentence into
+// a path through it and pre-fills the picks (marked ✦), which you can override.
+const NS={hosts:[],host:"",dirs:[],running:[],lane:"new",session:"",cwd:"",cmd:"",name:"",
+          aiHost:"",aiPick:"",whyHost:"",whyDir:"",loading:false};
 
-function nsReset(level){        // wipe every choice BELOW `level` (1=host,2=dir,3=cmd)
-  if(level<2){NS.dirs=[];NS.cwd="";NS.whyDir="";NS.aiCwd="";}
+function nsReset(level){        // wipe every choice BELOW `level` (1=machine, 2=target)
+  if(level<2){NS.dirs=[];NS.running=[];NS.session="";NS.cwd="";NS.whyDir="";NS.aiPick="";}
   if(level<3){NS.cmd="";}
   if(level<4){NS.name="";}
 }
+const isResume=()=>NS.lane==="resume";
+const hasTarget=()=>isResume()?!!NS.session:!!NS.cwd;
+
 function nsRender(){
-  // step 1 — machines
+  // ── node 1: machine
   $("#hostchips").innerHTML=NS.hosts.map(h=>
     '<span class="hchip'+(h===NS.host?" on":"")+(h===NS.aiHost&&h!==NS.host?" ai":"")+'" data-h="'+h+'">'+h+'</span>').join("");
   $("#hostchips").querySelectorAll(".hchip").forEach(el=>el.onclick=()=>pickHost(el.dataset.h));
   $("#why-host").textContent=NS.whyHost?("✦ "+NS.whyHost):"";
   $("#s-host").classList.toggle("done",!!NS.host);
 
-  // step 2 — directories THAT EXIST ON THE CHOSEN MACHINE
+  // ── node 2: what's ON that machine — resume something running, or start fresh
   const dl=$("#s-dir");
   dl.classList.toggle("locked",!NS.host);
-  dl.classList.toggle("done",!!NS.cwd);
+  dl.classList.toggle("done",hasTarget());
+  $("#nrun").textContent=NS.running.length;
+  $("#ndir").textContent=NS.dirs.length;
   $("#dirsub").textContent=!NS.host?"pick a machine first"
-    :NS.loading?("listing "+NS.host+"…")
-    :(NS.dirs.length?(NS.dirs.length+" on "+NS.host):("nothing found on "+NS.host));
+    :NS.loading?("looking at "+NS.host+"…"):("on "+NS.host);
+  $("#s-dir").querySelectorAll(".lane").forEach(el=>{
+    el.classList.toggle("on",el.dataset.lane===NS.lane);
+    el.onclick=()=>{NS.lane=el.dataset.lane;NS.session="";NS.cwd="";nsReset(2);
+                    $("#dirfilter").value="";$("#newname").value="";nsRender();};
+  });
   const f=($("#dirfilter").value||"").toLowerCase();
-  const rows=NS.dirs.filter(d=>!f||d.toLowerCase().includes(f));
-  $("#dirchoices").innerHTML=rows.map(d=>
-    '<div class="dirrow'+(d===NS.cwd?" on":"")+'" data-d="'+d+'">'+d
-    +(d===NS.aiCwd?'<span class="ai">✦</span>':"")+'</div>').join("")
-    ||'<div class="dirrow" style="cursor:default;opacity:.5">—</div>';
+  let html="";
+  if(isResume()){
+    const rows=NS.running.filter(s=>!f||(s.name+" "+s.path).toLowerCase().includes(f));
+    html=rows.map(s=>
+      '<div class="dirrow'+(s.name===NS.session?" on":"")+'" data-s="'+s.name+'">'+s.name
+      +'<span class="meta">'+ago(s.age_sec)+' · '+s.path+(s.attached?' · attached':'')
+      +(s.adopted?' · in emux':'')+'</span>'
+      +(s.name===NS.aiPick?'<span class="ai">✦</span>':'')+'</div>').join("");
+  }else{
+    const rows=NS.dirs.filter(d=>!f||d.toLowerCase().includes(f));
+    html=rows.map(d=>
+      '<div class="dirrow'+(d===NS.cwd?" on":"")+'" data-d="'+d+'">'+d
+      +(d===NS.aiPick?'<span class="ai">✦</span>':"")+'</div>').join("");
+  }
+  $("#dirchoices").innerHTML=html||'<div class="dirrow" style="cursor:default;opacity:.5">— nothing here —</div>';
   $("#dirchoices").querySelectorAll(".dirrow[data-d]").forEach(el=>el.onclick=()=>pickDir(el.dataset.d));
-  $("#why-dir").textContent=NS.whyDir?((NS.aiCwd?"✦ ":"")+NS.whyDir):"";
+  $("#dirchoices").querySelectorAll(".dirrow[data-s]").forEach(el=>el.onclick=()=>pickSession(el.dataset.s));
+  $("#why-dir").textContent=NS.whyDir?((NS.aiPick?"✦ ":"")+NS.whyDir):"";
 
-  // step 3 — what runs there
+  // ── node 3: what runs there — only a NEW session needs one; a resumed one is already running
   const cs=$("#s-cmd");
-  cs.classList.toggle("locked",!NS.cwd);
-  cs.classList.toggle("done",!!NS.cwd);
+  cs.classList.toggle("locked",!hasTarget());
+  cs.classList.toggle("done",hasTarget());
+  cs.style.display=isResume()?"none":"";
   const presets=[["","plain shell"],["claude","claude"],["claude --dangerously-skip-permissions","claude (skip perms)"]];
   $("#cmdchips").innerHTML=presets.map(([v,l])=>
     '<span class="hchip'+(NS.cmd===v?" on":"")+'" data-c="'+v+'">'+l+'</span>').join("");
   $("#cmdchips").querySelectorAll(".hchip").forEach(el=>el.onclick=()=>{NS.cmd=el.dataset.c;$("#newcmd").value=NS.cmd;nsRender();});
 
-  // step 4 — name
+  // ── the preview: only meaningful when RESUMING (a new session has no state yet)
+  $("#peekwrap").classList.toggle("show",isResume()&&!!NS.session);
+
+  // ── node 4: naming means different things. New: christen a thing that doesn't
+  //    exist. Resume: it already HAS a name — you're choosing its emux alias.
   const ns=$("#s-name");
-  ns.classList.toggle("locked",!NS.cwd);
+  ns.classList.toggle("locked",!hasTarget());
   ns.classList.toggle("done",!!NS.name);
+  $("#namelbl").textContent=isResume()?"adopt into emux as":"name it";
+  $("#namesub").textContent=isResume()
+    ? ("it is already called “"+NS.session+"” on "+NS.host)
+    : "";
+  $("#guilbl").textContent=isResume()
+    ? "also open a terminal attached to it"
+    : "open an iTerm2 window attached to it";
+  // attaching to a LIVE session is not free — say so
+  $("#guinote").textContent=(isResume()&&$("#newgui").checked)
+    ? "⚠ it is already running; the window opens WITHOUT taking focus so it can't swallow your keystrokes"
+    : "";
 
   // footer
-  const ready=!!(NS.host&&NS.cwd&&NS.name);
-  $("#newcreate").disabled=!ready;
+  const ready=!!(NS.host&&hasTarget()&&NS.name);
+  const b=$("#newcreate");
+  b.disabled=!ready;
+  b.textContent=isResume()?"RESUME SESSION":"CREATE SESSION";
   $("#newsummary").textContent=ready
-    ? (NS.name+" → "+NS.host+":"+NS.cwd+(NS.cmd?"  $ "+NS.cmd:"  $ shell"))
-    : (!NS.host?"choose a machine":(!NS.cwd?"choose a directory on "+NS.host:"name it"));
+    ? (isResume()
+        ? ("resume "+NS.host+":"+NS.session+"  ("+NS.cwd+")")
+        : (NS.name+" → "+NS.host+":"+NS.cwd+(NS.cmd?"  $ "+NS.cmd:"  $ shell")))
+    : (!NS.host?"choose a machine"
+        :(!hasTarget()?(isResume()?"choose a session to resume":"choose a directory"):"name it"));
 }
-async function pickHost(h){       // step 1 changed ⇒ steps 2+ are no longer valid
+function ago(s){return s<3600?Math.floor(s/60)+"m":(s<86400?Math.floor(s/3600)+"h":Math.floor(s/86400)+"d");}
+
+async function pickHost(h){       // node 1 changed ⇒ everything under it is invalid
   NS.host=h;NS.whyHost="";nsReset(1);
   $("#newcmd").value="";$("#newname").value="";$("#dirfilter").value="";
   NS.loading=true;nsRender();
   const r=await api("/api/dirs?host="+encodeURIComponent(h));
   NS.loading=false;
   NS.dirs=(r.ok&&r.dirs)?r.dirs:[];
+  NS.running=(r.ok&&r.running)?r.running:[];
   nsRender();
 }
-function pickDir(d){NS.cwd=d;if(!NS.name)NS.name=autoName(d);$("#newname").value=NS.name;nsRender();}
+function pickDir(d){NS.cwd=d;NS.session="";if(!NS.name)NS.name=autoName(d);
+  $("#newname").value=NS.name;nsRender();}
+async function pickSession(s){
+  const row=NS.running.find(x=>x.name===s)||{};
+  NS.session=s;NS.cwd=row.path||"";NS.name=s;   // it already has a name — default to it
+  $("#newname").value=NS.name;
+  $("#peek").textContent="reading "+s+"…";$("#peekflags").innerHTML="";
+  nsRender();
+  // LOOK INSIDE before touching it: which one is this, and does it hold unsent input?
+  const r=await api("/api/peek?session="+encodeURIComponent(s)
+                    +"&host="+encodeURIComponent(NS.host));
+  if(NS.session!==s)return;                     // selection moved on while we read
+  $("#peek").textContent=r.ok?(r.content||"(blank)"):("could not read: "+(r.error||""));
+  let flags="";
+  if(r.ok&&r.unsent)flags+='<span class="flag">holds an unsent prompt</span>';
+  if(row.attached)flags+='<span class="flag">already attached elsewhere</span>';
+  $("#peekflags").innerHTML=flags;
+  nsRender();
+}
 function autoName(d){const base=(d||"").split("/").filter(Boolean).pop()||"session";
   return base.toLowerCase().replace(/[^a-z0-9]+/g,"-").slice(0,28);}
 
 async function openNew(){
   $("#newmodal").classList.add("open");
   $("#newerr").textContent="";$("#newstatus").textContent="";
-  Object.assign(NS,{host:"",dirs:[],cwd:"",cmd:"",name:"",aiHost:"",aiCwd:"",whyHost:"",whyDir:""});
+  Object.assign(NS,{host:"",dirs:[],running:[],lane:"new",session:"",cwd:"",cmd:"",name:"",
+                    aiHost:"",aiPick:"",whyHost:"",whyDir:""});
   $("#newintent").value="";$("#newcmd").value="";$("#newname").value="";$("#dirfilter").value="";
   if(!NS.hosts.length){const r=await api("/api/hosts");if(r.ok)NS.hosts=r.hosts||[];}
   nsRender();
@@ -1628,34 +1861,50 @@ async function openNew(){
 }
 function closeNew(){$("#newmodal").classList.remove("open");}
 
-// plain English → classified DOWN the cascade, each pick shown as a choice you can override
+// Plain English → the LLM CLASSIFIES it into a path through the tree and PRE-FILLS
+// the nodes. Every pick is marked ✦ and stays overridable.
 async function doSuggest(){
   const intent=$("#newintent").value.trim();
   if(!intent){$("#newerr").textContent="say what you want to do first";return;}
   const b=$("#newsuggest");b.disabled=true;b.textContent="thinking…";$("#newerr").textContent="";
-  $("#newstatus").textContent=NS.host?("choosing a directory on "+NS.host):"machine → directory";
+  $("#newstatus").textContent=NS.host?("reading "+NS.host):"machine → what's on it";
   const r=await api("/api/suggest",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({intent,host:NS.host||""})});   // an already-picked machine pins step 1
+    body:JSON.stringify({intent,host:NS.host||""})});   // a machine you already picked pins node 1
   b.disabled=false;b.textContent="✦ figure it out";$("#newstatus").textContent="";
   if(!r.ok){$("#newerr").textContent=r.error||"suggest failed";return;}
   NS.host=r.host||NS.host;NS.aiHost=r.host||"";
-  NS.dirs=r.dirs||[];
-  NS.cwd=r.cwd||"";NS.aiCwd=r.cwd||"";
-  NS.whyHost=r.whyHost||"";
-  NS.whyDir=r.why||"";
-  if(!r.verified&&r.cwd)NS.whyDir="⚠ unverified path — "+NS.whyDir;
-  NS.cmd=r.command||"";$("#newcmd").value=NS.cmd;
-  NS.name=r.name||(r.cwd?autoName(r.cwd):"");$("#newname").value=NS.name;
+  NS.dirs=r.dirs||[];NS.running=r.running||[];
+  NS.whyHost=r.whyHost||"";NS.whyDir=r.why||"";
+  NS.lane=(r.action==="resume")?"resume":"new";
+  if(NS.lane==="resume"){
+    NS.aiPick=r.session||"";NS.cmd="";
+    nsRender();
+    if(r.session){await pickSession(r.session);return;}   // selects it AND peeks inside
+    NS.session="";NS.cwd="";
+  }else{
+    NS.cwd=r.cwd||"";NS.aiPick=r.cwd||"";NS.session="";
+    NS.cmd=r.command||"";$("#newcmd").value=NS.cmd;
+    if(!r.verified&&r.cwd)NS.whyDir="⚠ unverified — "+NS.whyDir;
+  }
+  NS.name=r.name||(NS.session||(r.cwd?autoName(r.cwd):""));
+  $("#newname").value=NS.name;
   nsRender();
 }
 async function doCreate(){
   if(!NS.name){$("#newerr").textContent="a session needs a name";return;}
-  const b=$("#newcreate");b.disabled=true;b.textContent="CREATING…";$("#newerr").textContent="";
-  const r=await api("/api/spawn",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({name:NS.name,host:NS.host,cwd:NS.cwd,command:NS.cmd,
-      gui:$("#newgui").checked,description:$("#newintent").value.trim()||null})});
-  b.disabled=false;b.textContent="CREATE SESSION";
-  if(!r.ok){$("#newerr").textContent=r.error||"spawn failed";return;}
+  const b=$("#newcreate");const was=b.textContent;
+  b.disabled=true;b.textContent=isResume()?"RESUMING…":"CREATING…";$("#newerr").textContent="";
+  const resume=isResume();
+  const r=await api(resume?"/api/adopt":"/api/spawn",
+    {method:"POST",headers:{"Content-Type":"application/json"},
+     body:JSON.stringify(resume
+       ? {session:NS.session,host:NS.host,name:NS.name,gui:$("#newgui").checked,
+          description:$("#newintent").value.trim()||("resumed on "+NS.host),
+          tags:["adopted",NS.host]}
+       : {name:NS.name,host:NS.host,cwd:NS.cwd,command:NS.cmd,
+          gui:$("#newgui").checked,description:$("#newintent").value.trim()||null})});
+  b.disabled=false;b.textContent=was;
+  if(!r.ok){$("#newerr").textContent=r.error||(resume?"resume failed":"spawn failed");return;}
   closeNew();refresh();
 }
 $("#newbtn").onclick=openNew;
@@ -1664,6 +1913,7 @@ $("#newback").onclick=closeNew;
 $("#newsuggest").onclick=doSuggest;
 $("#newcreate").onclick=doCreate;
 $("#dirfilter").addEventListener("input",nsRender);
+$("#newgui").addEventListener("change",nsRender);
 $("#newcmd").addEventListener("input",()=>{NS.cmd=$("#newcmd").value;nsRender();});
 $("#newname").addEventListener("input",()=>{NS.name=$("#newname").value.trim();nsRender();});
 $("#newintent").addEventListener("keydown",e=>{if(e.key==="Enter")doSuggest();});
@@ -1790,17 +2040,30 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         if url.path == "/api/hosts":
             self._json({"ok": True, "hosts": _known_hosts()})
             return
+        if url.path == "/api/peek":
+            q = parse_qs(url.query)
+            sess = (q.get("session") or [""])[0]
+            h = (q.get("host") or ["local"])[0]
+            if not sess:
+                self._json({"ok": False, "error": "missing_session"}, 400)
+                return
+            self._json(_peek_session(sess, None if h in ("", "local") else h))
+            return
         if url.path == "/api/dirs":
-            # directories that exist ON the chosen machine — the cascade's 2nd level
+            # what exists ON the chosen machine — the cascade's 2nd level.
+            # Two kinds: sessions you can RESUME, and dirs you can start NEW in.
             h = (parse_qs(url.query).get("host") or ["local"])[0]
-            dirs = _candidate_dirs(None if h in ("", "local") else h)
-            self._json({"ok": True, "host": h, "dirs": dirs})
+            rh = None if h in ("", "local") else h
+            self._json({"ok": True, "host": h,
+                        "dirs": _candidate_dirs(rh),
+                        "running": _running_sessions(rh)})
             return
         self._json({"ok": False, "error": "not_found"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802
         url = urlparse(self.path)
-        if url.path not in ("/api/send", "/api/head", "/api/spawn", "/api/suggest"):
+        if url.path not in ("/api/send", "/api/head", "/api/spawn", "/api/suggest",
+                            "/api/adopt"):
             self._json({"ok": False, "error": "not_found"}, 404)
             return
         if not self._host_allowed():
@@ -1831,12 +2094,18 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         if url.path == "/api/spawn":
             self._json(_spawn_session(data))
             return
+        if url.path == "/api/adopt":
+            self._json(_adopt_session(data))
+            return
         session = data.get("session")
         if not isinstance(session, str) or not session:
             self._json({"ok": False, "error": "missing_session"}, 400)
             return
         if url.path == "/api/head":
-            ok, err = _iterm_attach(session)
+            # a registered session may live on a remote box — attach over ssh
+            reg = _server._load_registry()
+            entry = next((e for e in reg.values() if e.get("session") == session), {})
+            ok, err = _iterm_attach(session, entry.get("host"))
             self._json({"ok": ok, "error": err} if not ok else {"ok": True, "session": session})
             return
         keys = data.get("keys")

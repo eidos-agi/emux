@@ -2,6 +2,15 @@
 
 All notable changes to Emux are documented here.
 
+## v0.21.0 - 2026-07-12
+
+**Resume is not Create.** The tree now branches on what actually exists on a machine: sessions already RUNNING there (resume) or directories to start fresh in (new). The LLM classifies your sentence into a path through that tree and pre-fills it; every node stays an overridable choice.
+
+- **Resume a running session from plain English.** "resume one of the more recent tmuxes on rentamac" -> machine `rentamac`, then `ggo-build` picked by index from the 29 sessions actually running there. "pick up the greenmark reconcile work I had going on rentamac" -> `cerebro-claude`. `POST /api/adopt` registers it (with its `host`) so a remote session becomes a first-class emux citizen.
+- **Look inside before you touch it.** Resuming means grabbing something that already has state, so selecting a session shows a live preview of its pane (`GET /api/peek`) and flags when it **holds an unsent prompt** or is **already attached elsewhere**.
+- **The two paths diverge where they genuinely differ.** Resume hides the command step (it's already running) and renames step 4 to "adopt into emux as" (it already has a name); New keeps command + naming.
+- **SECURITY/SAFETY FIX: attaching no longer steals keyboard focus.** The AppleScript `activate` meant an auto-opened attach window grabbed OS focus and swallowed whatever you were typing straight into a live agent's prompt — observed for real against a 2-day-old Claude session running with bypass-permissions, where stray keys landed in its input box. Attach windows now open WITHOUT focus; you click into them when you mean to type there.
+
 ## v0.20.0 - 2026-07-12
 
 **The new-session UX is the cascade now, not a form with an AI bolted on.** v0.19 fixed the data dependency but still presented four independent-looking fields; the dependency was invisible.
