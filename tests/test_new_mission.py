@@ -1,6 +1,25 @@
 """New-mission ('n' / `emux new`) plan parsing + prompt wiring."""
 
-from emux.cli import _mission_path, _parse_plan, _plan_prompt
+from emux.cli import _apply_permission_mode, _mission_path, _parse_plan, _plan_prompt
+
+
+def test_permission_mode_appended_to_claude():
+    cmd = _apply_permission_mode({"command": "claude 'check dally'",
+                                  "permission_mode": "bypassPermissions"})
+    assert cmd == "claude 'check dally' --permission-mode bypassPermissions"
+
+
+def test_permission_mode_default_and_nonclaude_untouched():
+    assert _apply_permission_mode({"command": "claude 'x'", "permission_mode": "default"}) == "claude 'x'"
+    assert _apply_permission_mode({"command": "htop", "permission_mode": "bypassPermissions"}) == "htop"
+    assert _apply_permission_mode({"command": "claude 'x'"}) == "claude 'x'"
+
+
+def test_permission_mode_never_doubled_or_invented():
+    already = "claude 'x' --permission-mode acceptEdits"
+    assert _apply_permission_mode({"command": already, "permission_mode": "bypassPermissions"}) == already
+    # unknown mode from the model → pass through untouched, no invented flag
+    assert _apply_permission_mode({"command": "claude 'x'", "permission_mode": "yolo"}) == "claude 'x'"
 
 
 def test_mission_path_local():

@@ -2,6 +2,13 @@
 
 All notable changes to Emux are documented here.
 
+## v0.61.0 - 2026-07-14
+
+- **Missions can actually run unattended.** The planner now picks a `permission_mode` (default / acceptEdits / bypassPermissions — most autonomous that's safe for the mission); emux appends `--permission-mode` to claude commands deterministically (never trusts model-written flags, never doubles an existing flag). The confirm screen shows a `perms` line with what the mode means.
+- **Liftoff proof.** "tmux accepted the keys" is not "the mission is running": after spawn, emux captures the pane at 2.5s and prints it ("first light"), flagging command-not-found / not-logged-in launches. Already caught a real one in testing: Claude Code's folder-trust dialog silently stalling a fresh cwd.
+- **Name-collision guard.** `tmux_spawn` kills any same-name session, and a live agent session is unrecoverable state. If the mission name is already live (host-aware), the flow now offers unique-name (default, auto-suffixes -2/-3…), replace, or abort — never a silent kill.
+
+
 ## v0.60.2 - 2026-07-14
 
 - **Mission plan shows the path and the attach command.** Two new lines in the confirm screen: `path` — the hop chain the mission takes (`this terminal → ssh Daniels-Mac-mini.local → tmux new-session 'check-dally' → claude`), derived deterministically from the plan fields, never from the model; and `attach` — the exact command a head will use (`ssh -t … tmux attach …` for remote).

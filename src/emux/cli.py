@@ -130,7 +130,15 @@ def _plan_prompt(transcript: list[str]) -> str:
         ' "host": <"ssh-dest" or null>,\n'
         ' "cwd": <"absolute working dir" or null>,\n'
         ' "command": "<the exact shell command to launch in the session, usually '
-        "claude '<mission prompt>' — single-quote the prompt>\"}\n"
+        "claude '<mission prompt>' — single-quote the prompt>\",\n"
+        ' "permission_mode": "<default|acceptEdits|bypassPermissions>"}\n'
+        "permission_mode governs how unattended a claude mission can run: "
+        '"bypassPermissions" for read-only/investigate/report missions (it can '
+        'work with no human attached); "acceptEdits" for missions that edit files '
+        'but where shell commands should still gate; "default" only when the '
+        "mission is risky enough that the user should attach and approve each "
+        "step. Missions run detached, so prefer the most autonomous mode that is "
+        "safe for the mission.\n"
         "Ask at most one question per turn, and only when the answer changes the "
         "spec. Prefer sensible defaults over questions."
     )
@@ -161,6 +169,23 @@ def _run_with_spinner(label: str, argv: list[str], timeout: float = 120) -> subp
     finally:
         stop.set()
         t.join()
+
+
+_PERMISSION_MODES = {"default", "acceptEdits", "bypassPermissions"}
+
+
+def _apply_permission_mode(plan: dict[str, Any]) -> str:
+    """The final launch command: deterministically append --permission-mode to a
+    claude invocation (never trust the model to write its own flags). Non-claude
+    commands and commands that already carry a permission flag pass through."""
+    command = str(plan.get("command", "")).strip()
+    mode = plan.get("permission_mode")
+    if mode not in _PERMISSION_MODES or mode == "default":
+        return command
+    first = (command.split() or [""])[0]
+    if first != "claude" or "--permission-mode" in command or "skip-permissions" in command:
+        return command
+    return f"{command} --permission-mode {mode}"
 
 
 def _mission_path(plan: dict[str, Any]) -> str:
@@ -224,7 +249,17 @@ def _new_mission_chat() -> dict[str, Any] | None:
         print(f"  name      {plan.get('name', '?')}")
         print(f"  host      {plan.get('host') or 'local'}")
         print(f"  cwd       {plan.get('cwd') or '(default)'}")
-        print(f"  command   {plan.get('command', '?')}")
+        plan["command"] = _apply_permission_mode(plan)
+        mode = str(plan.get("permission_mode") or "default")
+        if mode not in _PERMISSION_MODES:
+            mode = "default"
+        perms_note = {
+            "default": "gated — attach to approve each step",
+            "acceptEdits": "edits auto-approved; shell commands still gate",
+            "bypassPermissions": "fully unattended — no approval prompts",
+        }[mode]
+        print(f"  command   {plan['command']}")
+        print(f"  perms     {mode} ({perms_note})")
         print(f"  path      {_mission_path(plan)}")
         print(f"  attach    {_head_attach_command(str(plan.get('name', '?')), plan.get('host') or None)}")
         answer = input("\n  start it? [Y/n, or type changes]: ").strip()
@@ -246,12 +281,30 @@ def cmd_new_mission() -> int:
         print("emux: plan is missing a name or command; not starting.", file=sys.stderr)
         return 1
 
-    from .server import tmux_spawn
+    from .server import _session_exists, tmux_spawn
+
+    # Name-collision guard: tmux_spawn kills any same-name session, and a live
+    # agent session is state you can't respawn. Never let that happen silently.
+    name, host = str(plan["name"]), plan.get("host") or None
+    if _session_exists(name, host=host):
+        where = f" on {host}" if host else ""
+        print(f"\n  ⚠ session '{name}' is already live{where} — starting would KILL it.")
+        choice = input(f"  [u]nique name '{name}-2' / [r]eplace it / [a]bort (default u): ").strip().lower()
+        if choice in {"a", "abort"}:
+            print("  aborted.")
+            return 0
+        if choice not in {"r", "replace"}:
+            n = 2
+            while _session_exists(f"{name}-{n}", host=host):
+                n += 1
+            name = f"{name}-{n}"
+            plan["name"] = name
+            print(f"  starting as '{name}'.")
 
     result = asyncio.run(tmux_spawn(
-        name=str(plan["name"]),
+        name=name,
         command=str(plan["command"]),
-        host=plan.get("host") or None,
+        host=host,
         cwd=plan.get("cwd") or None,
         description=plan.get("summary") or None,
         tags=["mission"],
@@ -261,6 +314,22 @@ def cmd_new_mission() -> int:
         return 1
     where = f" on {result['host']}" if result.get("host") else ""
     print(f"\n  started '{result['name']}'{where}.")
+
+    # Liftoff proof: "tmux accepted the keys" is not "the mission is running".
+    # Capture the pane after a beat so a dead command (claude not on PATH, not
+    # logged in, bad cwd) is caught HERE, not discovered on attach an hour later.
+    time.sleep(2.5)
+    code, out, _err = _run_tmux(
+        ["capture-pane", "-t", result["session"], "-p", "-S", "-15"], host=host)
+    pane = "\n".join(ln for ln in (out or "").splitlines() if ln.strip())[-600:]
+    if code == 0 and pane:
+        print("\n  ━━ first light (pane after 2.5s) ━━")
+        for ln in pane.splitlines()[-8:]:
+            print(f"  │ {ln}")
+        if re.search(r"command not found|No such file or directory|not logged in", pane, re.I):
+            print("\n  ⚠ that looks like a failed launch — attach and check.")
+    else:
+        print("\n  ⚠ could not capture the pane — the session may have died already.")
     attach = input("  attach now? [Y/n]: ").strip().lower()
     if attach in {"", "y", "yes"}:
         os.execvp("/bin/sh", ["/bin/sh", "-c",
