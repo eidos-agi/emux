@@ -2,6 +2,10 @@
 
 All notable changes to Emux are documented here.
 
+## v0.56.0 - 2026-07-13
+
+- **Fixed the tmux_wait false-idle bug.** `tmux_wait(until="idle")` reported running sessions as ready-idle instantly (empty `last_line`) when they had no armed stream log — a session registered after spawn has none, and the idle detector read the missing log as quiet-forever. Now a missing log is never read as quiet: log-less sessions fall back to live pane comparison (host-aware), quiet is judged from actual pane stillness, `last_line` comes from the pane when there is no log to quote, and a log armed mid-wait upgrades back to the cheap stat path. Regression-tested in `tests/test_wait.py` (the running-session case fails on the old behavior).
+
 ## v0.55.0 - 2026-07-13
 
 - **Plan failover facade — switch a session to another Claude account, in code.** When a session (especially the manager) runs its account out of tokens, emux can fail it over to another configured Claude account: it exits the agent, relaunches under that account's `CLAUDE_CONFIG_DIR`, and resumes the conversation (`claude -c`). Deterministic — tmux only, no LLM in the loop. Round-robins to the next available account and cools down an exhausted one (~5h) so it isn't retried too soon.

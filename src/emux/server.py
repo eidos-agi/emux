@@ -399,6 +399,21 @@ def _log_size(name: str) -> int:
     return p.stat().st_size if p.is_file() else 0
 
 
+def _pane_text_for(name: str, lines: int = 50) -> str:
+    """Live pane text for a watch target (registry name or raw session id),
+    host-aware via the registry. '' on any failure — callers treat it as
+    'nothing observable', never as proof of quiet."""
+    entry = _load_registry().get(name)
+    session = entry["session"] if entry else name
+    host = entry.get("host") if entry else None
+    try:
+        code, out, _ = _run_tmux(
+            ["capture-pane", "-t", session, "-p", "-S", f"-{lines}"], host=host)
+    except FileNotFoundError:
+        return ""
+    return _strip_ansi(out or "") if code == 0 else ""
+
+
 def _resolve_tmux() -> str | None:
     """Return path to the `tmux` binary, or None if not on PATH."""
     return shutil.which("tmux")
@@ -2336,7 +2351,10 @@ async def tmux_wait(
       "signal" — a worker emitted a new @@EMUX@@ signal (see tmux_signals). The
                  reliable path; the ready entry carries the signal. Default.
       "idle"   — a session's output went quiet for `quiet` seconds (likely done
-                 or blocked).
+                 or blocked). Quiet is judged from the armed stream log; a
+                 session with NO armed log falls back to live pane comparison —
+                 a missing log is never read as quiet (that was the false-idle
+                 bug: unarmed sessions reported ready-idle instantly).
       "exit"   — a session ended.
       "change" — any new output since the call began.
       "prompt" — the last line looks like it is waiting for input. A HEURISTIC
@@ -2354,6 +2372,15 @@ async def tmux_wait(
     timeout = max(1.0, min(float(timeout), 600.0))
     deadline = time.time() + timeout
     size = {n: _log_size(n) for n in names}
+    # A session registered after spawn may have NO armed stream log; its log
+    # silence means NOTHING. For those, quiet/change is judged by comparing the
+    # live pane instead — a missing log must never be read as quiet-forever
+    # (the false-idle bug: 8 running sessions reported ready-idle instantly).
+    has_log = {n: _log_path(n).is_file() for n in names}
+    pane_seen: dict[str, str] = {}
+    if until in ("idle", "change", "prompt"):
+        # Baseline the pane now so the first capture doesn't read as "change".
+        pane_seen = {n: _pane_text_for(n) for n in names if not has_log[n]}
     last_grow = {n: time.time() for n in names}
     while True:
         ready = []
@@ -2367,9 +2394,22 @@ async def tmux_wait(
                 if not _name_live(n):
                     why = "exit"
             else:
-                sz = _log_size(n)
-                if sz != size.get(n, 0):
-                    size[n], last_grow[n] = sz, time.time()
+                if not has_log[n]:  # a log may get armed mid-wait — upgrade
+                    has_log[n] = _log_path(n).is_file()
+                if has_log[n]:
+                    sz = _log_size(n)
+                    grew = sz != size.get(n, 0)
+                    if grew:
+                        size[n] = sz
+                else:
+                    # ponytail: pane capture per poll for log-less sessions
+                    # only; if many REMOTE log-less sessions show up, arm
+                    # their logs instead of polling ssh once a second.
+                    cur = _pane_text_for(n)
+                    grew = pane_seen.get(n) != cur
+                    pane_seen[n] = cur
+                if grew:
+                    last_grow[n] = time.time()
                     if until == "change":
                         why = "change"
                 if until == "idle" and time.time() - last_grow.get(n, 0.0) >= quiet \
@@ -2380,7 +2420,13 @@ async def tmux_wait(
                     if line and _PROMPT_RE.search(line):
                         why = "prompt"
             if why:
-                extra.setdefault("last_line", _read_log(n, lines=1).strip()[-200:])
+                line = _read_log(n, lines=1).strip()
+                if not line and not has_log.get(n, True):
+                    # no log to quote — use the live pane's last non-blank line
+                    pane = pane_seen.get(n) or _pane_text_for(n)
+                    line = next(
+                        (ln for ln in reversed(pane.splitlines()) if ln.strip()), "")
+                extra.setdefault("last_line", line.strip()[-200:])
                 ready.append({"name": n, "why": why, **extra})
         if ready or time.time() >= deadline:
             done = {r["name"] for r in ready}
