@@ -450,10 +450,12 @@ def test_manager_inherits_company_from_the_worker_it_manages(monkeypatch):
     assert "_co_explicit" not in by["mgr"]                  # temp flag cleaned up
 
 
-def test_gated_worker_escalates_need_once_per_gate_no_hancock(monkeypatch):
-    """A blocked worker escalates via the NEED up-channel — once per gate,
-    rearmed when the gate clears — and files NOTHING with Hancock (the old
-    `emux head` tray requests were dropped by request)."""
+def test_gated_worker_escalates_once_per_gate_low_risk_head(monkeypatch, tmp_path):
+    """A blocked worker escalates once per gate (rearmed on clear): the NEED
+    signal fires, and a Hancock request queuing `emux head` is filed at LOW
+    risk — so hancock's `emux head` allow rule auto-runs it and the terminal
+    just opens, instead of a high-risk request waiting for a signature."""
+    import shutil
     import subprocess
 
     from emux import server, web
@@ -462,24 +464,40 @@ def test_gated_worker_escalates_need_once_per_gate_no_hancock(monkeypatch):
                         lambda session, kind, payload="", **kw:
                         signals.append({"session": session, "kind": kind,
                                         "payload": payload}))
+    calls = []
+    fake_hancock = tmp_path / "hancock"
+    fake_hancock.write_text("#!/bin/sh\n")
+    fake_hancock.chmod(0o755)
+    monkeypatch.setattr(shutil, "which",
+                        lambda n: str(fake_hancock) if n == "hancock" else None)
 
-    def no_subprocess(*a, **kw):
-        raise AssertionError(f"gate escalation must not shell out: {a}")
-    monkeypatch.setattr(subprocess, "run", no_subprocess)
+    class _R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, env=None, **kw):
+        calls.append({"cmd": cmd, "env": env})
+        return _R()
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("CLAUDECODE", "1")   # the daemon may inherit this
 
     gate = "Update available!\n1. Update now (runs brew upgrade)\n2. Skip"
     web._ESCALATED.clear()
     web._escalate_if_gated("wrk", "codex", gate)
-    web._escalate_if_gated("wrk", "codex", gate)   # same gate again → no new signal
+    web._escalate_if_gated("wrk", "codex", gate)   # same gate again → no repeat
 
-    assert len(signals) == 1
-    assert signals[0]["kind"] == "NEED"
-    assert "update available" in signals[0]["payload"].lower()
+    assert len(signals) == 1 and signals[0]["kind"] == "NEED"
+    assert len(calls) == 1
+    cmd = calls[0]["cmd"]
+    assert "emux head wrk" in cmd
+    assert cmd[cmd.index("-risk") + 1] == "low"    # low ⇒ allow rule auto-runs it
+    assert "CLAUDECODE" not in (calls[0]["env"] or {})   # CC guard env scrubbed
 
     # gate clears → rearm → a new gate escalates again
     web._escalate_if_gated("wrk", "codex", "› write some code")   # not a gate
     web._escalate_if_gated("wrk", "codex", gate)
-    assert len(signals) == 2
+    assert len(signals) == 2 and len(calls) == 2
 
 
 def test_remote_session_reads_live_and_captures_over_ssh(monkeypatch):

@@ -2,6 +2,12 @@
 
 All notable changes to Emux are documented here.
 
+## v0.58.0 - 2026-07-13
+
+- **`emux head` escalations are auto-approved now.** v0.57.0 dropped the Hancock escalation outright; the actual intent was "stop making me sign head-openers". Restored the escalation, filed at LOW risk with a matching `^emux head \S+$` allow rule in hancock's license — so when a worker gates, its terminal head just opens (hancock auto-runs the request); nothing waits in the tray. High/critical requests still always wait for a signature.
+- Known gap: `emux head` is local-only — a gated worker on a REMOTE host auto-approves but the head command exits 1 ("not live"). Remote heads (ssh -t attach, as `tmux_spawn gui` already does) are the next step.
+
+
 ## v0.57.0 - 2026-07-13
 
 - **Dropped the Hancock `emux head` escalation.** A gated worker no longer files a Hancock tray request queuing `emux head <session>` (the tray filled with head-openers). Gates still escalate: the NEED up-channel signal fires once per gate (wakes a parent blocked in `tmux_wait`) and the control room's needs-you surfacing is unchanged. The Hancock tray tab in `emux web` (viewing/approving other Hancock requests) stays.
