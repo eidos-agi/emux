@@ -559,6 +559,24 @@ def test_gate_policy_one_attempt_then_escalates(monkeypatch, tmp_path):
     assert len(signals) == 1 and signals[0]["kind"] == "NEED"
 
 
+def test_answered_gate_in_scrollback_does_not_reescalate(monkeypatch, tmp_path):
+    """After an answer, the dialog's text lingers in the capture ABOVE fresh
+    output. Detection judges the live bottom only — an answered gate must
+    clear, not re-escalate (found live by the fraude gate test)."""
+    from emux import web
+    signals, sent = _wire_gate_policy(
+        monkeypatch, tmp_path,
+        [{"pattern": r"fraude-marker", "keys": ["Enter"]}])
+    gate_screen = "Tool use: fraude-marker\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n"
+    web._escalate_if_gated("wrk", "claude", gate_screen)
+    assert len(sent) == 1 and signals == []          # auto-answered
+    # the gate text is still in scrollback, but 10+ fresh lines follow it
+    after = gate_screen + "\n".join(f"working on step {i}" for i in range(12)) + "\n"
+    web._escalate_if_gated("wrk", "claude", after)
+    assert signals == []                              # cleared, not escalated
+    assert "wrk" not in web._ESCALATED and "wrk" not in web._AUTO_ANSWERED  # rearmed
+
+
 def test_gate_policy_never_answers_destructive(monkeypatch, tmp_path):
     """Destructive text on the gate always goes to a human, whatever the rules."""
     from emux import web

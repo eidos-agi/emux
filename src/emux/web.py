@@ -1215,8 +1215,11 @@ def _log_gate_event(session: str, agent_key: str, gate: str, action: str,
         pass
 
 
-def _gate_tail(content: str, lines: int = 15) -> str:
-    """The live bottom of the pane — where the actual menu text is."""
+def _gate_tail(content: str, lines: int = 10) -> str:
+    """The live bottom of the pane — where an actual modal gate lives. Gate
+    text higher up is scrollback (an already-answered dialog, echoed menu
+    text) and must not count. Same 10-nonblank-line window the needs-you
+    flag uses — detection and escalation must agree on what 'gated' means."""
     nonblank = [ln for ln in (content or "").splitlines() if ln.strip()]
     return "\n".join(nonblank[-lines:])
 
@@ -1262,7 +1265,10 @@ def _escalate_if_gated(session: str, agent_key: str, content: str,
     when the gate clears.
     """
     from . import adapters
-    gate = adapters.gated(agent_key, content)
+    # Judge the LIVE BOTTOM only: after an answer (auto or human) the dialog's
+    # text scrolls up but can linger in the capture — full-content matching
+    # re-escalated an already-answered gate (found by the fraude live test).
+    gate = adapters.gated(agent_key, _gate_tail(content))
     if not gate:
         _ESCALATED.pop(session, None)       # gate cleared — rearm
         _AUTO_ANSWERED.pop(session, None)

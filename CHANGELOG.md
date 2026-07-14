@@ -2,6 +2,11 @@
 
 All notable changes to Emux are documented here.
 
+## v0.59.1 - 2026-07-14
+
+- **Fix: an answered gate lingering in scrollback no longer re-escalates.** Found by the v0.59.0 live test (fraude fake claude, zero tokens): after the policy engine answered a gate, the dialog text still in the capture re-triggered detection and the one-attempt guard escalated a gate that was already resolved. Gate detection for escalation now judges the LIVE BOTTOM (last 10 non-blank lines) — the same window the needs-you flag uses — so detection and escalation agree on what "gated" means.
+
+
 ## v0.59.0 - 2026-07-13
 
 - **The determinism release — judgment moved out of the token path.** Seven fixes from a day of live fleet driving:
