@@ -136,6 +136,49 @@ def _plan_prompt(transcript: list[str]) -> str:
     )
 
 
+def _run_with_spinner(label: str, argv: list[str], timeout: float = 120) -> subprocess.CompletedProcess:
+    """Run a subprocess with a live spinner on stdout so the user can see the
+    AI is still working. Silent (no spinner) when stdout is not a tty."""
+    import itertools
+    import threading
+
+    if not sys.stdout.isatty():
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+    stop = threading.Event()
+
+    def _spin() -> None:
+        for ch in itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"):
+            print(f"\r  {ch} {label}", end="", flush=True)
+            if stop.wait(0.1):
+                break
+        print("\r" + " " * (len(label) + 5) + "\r", end="", flush=True)
+
+    t = threading.Thread(target=_spin, daemon=True)
+    t.start()
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    finally:
+        stop.set()
+        t.join()
+
+
+def _mission_path(plan: dict[str, Any]) -> str:
+    """The hop chain a mission takes, e.g.
+    this terminal → ssh mac-mini → tmux new-session 'check-dally' → claude.
+    Derived from the plan fields, never from the model."""
+    hops = ["this terminal"]
+    if plan.get("host"):
+        hops.append(f"ssh {plan['host']}")
+    tmux_hop = f"tmux new-session '{plan.get('name', '?')}'"
+    if plan.get("cwd"):
+        tmux_hop += f" (cwd {plan['cwd']})"
+    hops.append(tmux_hop)
+    prog = (str(plan.get("command", "")).split() or ["?"])[0]
+    hops.append(prog)
+    return " → ".join(hops)
+
+
 def _new_mission_chat() -> dict[str, Any] | None:
     """Chat with `claude -p` until the user confirms a session spec. Returns the
     confirmed plan dict, or None on abort. Fixed-cost CLI — never the API."""
@@ -153,9 +196,9 @@ def _new_mission_chat() -> dict[str, Any] | None:
 
     while True:
         try:
-            proc = subprocess.run(
+            proc = _run_with_spinner(
+                "planning… (the AI is drafting your session spec)",
                 [claude, "-p", _plan_prompt(transcript), "--model", _PLAN_MODEL],
-                capture_output=True, text=True, timeout=120,
             )
         except (subprocess.TimeoutExpired, OSError) as e:
             print(f"  emux: claude -p failed: {e}", file=sys.stderr)
@@ -182,6 +225,8 @@ def _new_mission_chat() -> dict[str, Any] | None:
         print(f"  host      {plan.get('host') or 'local'}")
         print(f"  cwd       {plan.get('cwd') or '(default)'}")
         print(f"  command   {plan.get('command', '?')}")
+        print(f"  path      {_mission_path(plan)}")
+        print(f"  attach    {_head_attach_command(str(plan.get('name', '?')), plan.get('host') or None)}")
         answer = input("\n  start it? [Y/n, or type changes]: ").strip()
         if answer.lower() in {"", "y", "yes"}:
             return plan

@@ -1,6 +1,20 @@
 """New-mission ('n' / `emux new`) plan parsing + prompt wiring."""
 
-from emux.cli import _parse_plan, _plan_prompt
+from emux.cli import _mission_path, _parse_plan, _plan_prompt
+
+
+def test_mission_path_local():
+    path = _mission_path({"name": "finances", "command": "claude 'dig in'"})
+    assert path == "this terminal → tmux new-session 'finances' → claude"
+
+
+def test_mission_path_remote_with_cwd():
+    path = _mission_path({
+        "name": "check-dally", "host": "Daniels-Mac-mini.local",
+        "cwd": "/Users/ds/work", "command": "claude 'check on dally'",
+    })
+    assert path == ("this terminal → ssh Daniels-Mac-mini.local → "
+                    "tmux new-session 'check-dally' (cwd /Users/ds/work) → claude")
 
 
 def test_parse_plan_clean_json():

@@ -2,6 +2,12 @@
 
 All notable changes to Emux are documented here.
 
+## v0.60.2 - 2026-07-14
+
+- **Mission plan shows the path and the attach command.** Two new lines in the confirm screen: `path` — the hop chain the mission takes (`this terminal → ssh Daniels-Mac-mini.local → tmux new-session 'check-dally' → claude`), derived deterministically from the plan fields, never from the model; and `attach` — the exact command a head will use (`ssh -t … tmux attach …` for remote).
+- **Planning spinner.** `claude -p` takes 5–15s; the chat now shows a live spinner ("planning… the AI is drafting your session spec") instead of dead air. Suppressed when stdout is not a tty.
+
+
 ## v0.60.1 - 2026-07-14
 
 - **Fix: new-mission key is Ctrl-N.** The filter input takes initial focus and eats plain letters, so pressing `n` just typed "n" into the filter and the binding never fired. `ctrl+n` is now a priority binding (works even while the filter is focused); plain `n` still works once the list has focus, and Enter on the `(new mission)` actions row works as before.
