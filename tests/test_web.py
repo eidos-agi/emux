@@ -450,47 +450,36 @@ def test_manager_inherits_company_from_the_worker_it_manages(monkeypatch):
     assert "_co_explicit" not in by["mgr"]                  # temp flag cleaned up
 
 
-def test_gated_worker_escalates_to_hancock_once_per_gate(monkeypatch, tmp_path):
-    """A blocked worker files a Hancock request carrying the SPECIFIC gate, once
-    per gate, and never inherits Claude-Code env that would trip hancock's guard."""
-    import shutil
+def test_gated_worker_escalates_need_once_per_gate_no_hancock(monkeypatch):
+    """A blocked worker escalates via the NEED up-channel — once per gate,
+    rearmed when the gate clears — and files NOTHING with Hancock (the old
+    `emux head` tray requests were dropped by request)."""
     import subprocess
 
-    from emux import web
-    calls = []
-    fake_hancock = tmp_path / "hancock"
-    fake_hancock.write_text("#!/bin/sh\n")
-    fake_hancock.chmod(0o755)
-    monkeypatch.setattr(shutil, "which", lambda n: str(fake_hancock) if n == "hancock" else None)
+    from emux import server, web
+    signals = []
+    monkeypatch.setattr(server, "inject_signal",
+                        lambda session, kind, payload="", **kw:
+                        signals.append({"session": session, "kind": kind,
+                                        "payload": payload}))
 
-    class _R:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
-    def fake_run(cmd, env=None, **kw):
-        calls.append({"cmd": cmd, "env": env})
-        return _R()
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setenv("CLAUDECODE", "1")   # the daemon may inherit this
+    def no_subprocess(*a, **kw):
+        raise AssertionError(f"gate escalation must not shell out: {a}")
+    monkeypatch.setattr(subprocess, "run", no_subprocess)
 
     gate = "Update available!\n1. Update now (runs brew upgrade)\n2. Skip"
     web._ESCALATED.clear()
     web._escalate_if_gated("wrk", "codex", gate)
-    web._escalate_if_gated("wrk", "codex", gate)   # same gate again → no new request
+    web._escalate_if_gated("wrk", "codex", gate)   # same gate again → no new signal
 
-    # exactly one hancock request, and it names the gate
-    hancock_calls = [c for c in calls if "add" in c["cmd"]]
-    assert len(hancock_calls) == 1
-    joined = " ".join(hancock_calls[0]["cmd"])
-    assert "update available" in joined.lower() and "-risk" in hancock_calls[0]["cmd"]
-    # the CC guard env was scrubbed
-    assert "CLAUDECODE" not in (hancock_calls[0]["env"] or {})
+    assert len(signals) == 1
+    assert signals[0]["kind"] == "NEED"
+    assert "update available" in signals[0]["payload"].lower()
 
     # gate clears → rearm → a new gate escalates again
     web._escalate_if_gated("wrk", "codex", "› write some code")   # not a gate
     web._escalate_if_gated("wrk", "codex", gate)
-    assert len([c for c in calls if "add" in c["cmd"]]) == 2
+    assert len(signals) == 2
 
 
 def test_remote_session_reads_live_and_captures_over_ssh(monkeypatch):

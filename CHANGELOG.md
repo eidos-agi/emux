@@ -2,6 +2,11 @@
 
 All notable changes to Emux are documented here.
 
+## v0.57.0 - 2026-07-13
+
+- **Dropped the Hancock `emux head` escalation.** A gated worker no longer files a Hancock tray request queuing `emux head <session>` (the tray filled with head-openers). Gates still escalate: the NEED up-channel signal fires once per gate (wakes a parent blocked in `tmux_wait`) and the control room's needs-you surfacing is unchanged. The Hancock tray tab in `emux web` (viewing/approving other Hancock requests) stays.
+
+
 ## v0.56.0 - 2026-07-13
 
 - **Fixed the tmux_wait false-idle bug.** `tmux_wait(until="idle")` reported running sessions as ready-idle instantly (empty `last_line`) when they had no armed stream log — a session registered after spawn has none, and the idle detector read the missing log as quiet-forever. Now a missing log is never read as quiet: log-less sessions fall back to live pane comparison (host-aware), quiet is judged from actual pane stillness, `last_line` comes from the pane when there is no log to quote, and a log armed mid-wait upgrades back to the cheap stat path. Regression-tested in `tests/test_wait.py` (the running-session case fails on the old behavior).
