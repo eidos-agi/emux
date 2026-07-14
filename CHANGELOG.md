@@ -2,6 +2,11 @@
 
 All notable changes to Emux are documented here.
 
+## v0.60.1 - 2026-07-14
+
+- **Fix: new-mission key is Ctrl-N.** The filter input takes initial focus and eats plain letters, so pressing `n` just typed "n" into the filter and the binding never fired. `ctrl+n` is now a priority binding (works even while the filter is focused); plain `n` still works once the list has focus, and Enter on the `(new mission)` actions row works as before.
+
+
 ## v0.60.0 - 2026-07-14
 
 - **New mission: `n` in the TUI / `emux new`.** Describe what you want in plain English ("look into my finances on mac-mini"); a planner (`claude -p`, fixed-cost, model via `$EMUX_PLAN_MODEL`, default sonnet) turns it into a session spec — name, host (it knows the registry's remote hosts), cwd, exact launch command — and asks at most one clarifying question per turn. Nothing runs until you confirm the exact plan; free-text feedback refines it. On confirm it spawns via the existing `tmux_spawn` (local or remote), registers under the mission name with the summary as description, and offers to attach.

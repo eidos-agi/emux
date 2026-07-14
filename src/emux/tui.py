@@ -112,7 +112,7 @@ def _build_groups() -> dict[str, list[dict[str, Any]]]:
     groups["actions"].append({
         "kind": "new_mission",
         "label": "(new mission)",
-        "detail": "press n — describe what you want; an AI specs the session, you confirm, it starts",
+        "detail": "press ^n — describe what you want; an AI specs the session, you confirm, it starts",
     })
     groups["actions"].append({
         "kind": "register_new",
@@ -186,7 +186,7 @@ def _build_preview_for(item: dict[str, Any] | None) -> str:
         lines.append("[bold cyan]New mission[/bold cyan]")
         lines.append("[dim]tell an AI what you want; it specs the session, you confirm, it starts[/dim]")
         lines.append("")
-        lines.append("[bold]Press enter (or n)[/bold] to describe a mission, e.g.:")
+        lines.append("[bold]Press ^n (or enter here)[/bold] to describe a mission, e.g.:")
         lines.append("  • look into my finances on mac-mini")
         lines.append("  • fix the failing tests in ~/repos-eidos-agi/helios")
         lines.append("")
@@ -349,7 +349,11 @@ def run_tui() -> dict[str, Any] | None:
 
         BINDINGS = [
             Binding("enter", "primary", "Attach"),
-            Binding("n", "new_mission", "New mission"),
+            # The filter Input takes initial focus and eats plain letters, so the
+            # canonical chord is ctrl+n (priority = fires even inside the Input);
+            # plain "n" still works once the list has focus.
+            Binding("ctrl+n", "new_mission", "New mission", priority=True),
+            Binding("n", "new_mission", "New mission", show=False),
             Binding("r", "register", "Register"),
             Binding("u", "unregister", "Unregister"),
             Binding("R", "rescan", "Rescan"),
