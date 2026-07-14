@@ -2,6 +2,18 @@
 
 All notable changes to Emux are documented here.
 
+## v0.59.0 - 2026-07-13
+
+- **The determinism release — judgment moved out of the token path.** Seven fixes from a day of live fleet driving:
+  - **Gate policy engine.** The web daemon answers known modal gates itself from `~/.config/emux/gatepolicy.json` (regex over the pane's live bottom → exact keystrokes, host-aware). Destructive text never auto-answers; one attempt per gate, then it escalates to a human as before. Zero model calls for the recurring 90%.
+  - **Gate ledger + `emux gates`.** Every gate sighting is logged (`~/.local/share/emux/gates.jsonl`) with how it was handled; escalated gates are joined against the audit trail to find the keystroke a human actually sent. `emux gates` reports recurring gates with their usual answers and prints ready-to-paste policy rules — the ledger is the labeled dataset, no ML infra needed.
+  - **`tmux_wait` returns the decision.** Ready entries now carry the Tier-0 classification (state/flags/summary) and any modal gate text — act from one call instead of the wait→classify→capture triple.
+  - **`tmux_send` reliability.** Accepts a LIST of named keys (`["BSpace","BSpace"]` — a multi-key string was silently typed as literal text), and verifies literal sends into AI panes actually submitted: if the paste-guarded composer still holds the text it retries Enter once and reports `submitted`/`resubmitted`.
+  - **`tmux_classify` reads the live pane first.** The stream-log tail kept long-cleared gates classifying as `waiting_human`; the pane is current state, the log is the fallback.
+  - **Remote heads.** `emux head` now works for sessions on other machines (`ssh -t` attach, host-aware liveness check) — a gated remote worker's auto-approved head opens instead of erroring "not live".
+  - **`emux doctor` / `tmux_doctor`.** Environment diagnosis: liveness, pane, capture, stream log, gate, and the probe that found today's invisible failure — tmux-server vs fresh-process filesystem access (a stale macOS TCC grant EPERMs every pane while the disk is healthy; doctor names the desk-side fix).
+
+
 ## v0.58.0 - 2026-07-13
 
 - **`emux head` escalations are auto-approved now.** v0.57.0 dropped the Hancock escalation outright; the actual intent was "stop making me sign head-openers". Restored the escalation, filed at LOW risk with a matching `^emux head \S+$` allow rule in hancock's license — so when a worker gates, its terminal head just opens (hancock auto-runs the request); nothing waits in the tray. High/critical requests still always wait for a signature.

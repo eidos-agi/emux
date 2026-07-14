@@ -641,31 +641,50 @@ def test_cmd_run_prints_content_and_supports_raw_session(monkeypatch, capsys):
 
 
 def test_resolve_session_target_registry_live(monkeypatch):
-    from emux import cli
+    from emux import cli, server
 
     monkeypatch.setattr(cli, "_load_registry", lambda: {
         "alpha": {"session": "real-session", "description": None, "tags": []}
     })
-    monkeypatch.setattr(cli, "_live_sessions", lambda: [
-        {"name": "real-session", "windows": 1, "created_unix": 1, "attached": False}
-    ])
+    monkeypatch.setattr(server, "_session_exists",
+                        lambda session, host=None: session == "real-session")
 
-    ok, session, err = cli._resolve_session_target("alpha", by_registry_name=True)
+    ok, session, host, err = cli._resolve_session_target("alpha", by_registry_name=True)
 
     assert ok is True
     assert session == "real-session"
+    assert host is None
     assert err is None
 
 
+def test_resolve_session_target_resolves_remote_host(monkeypatch):
+    from emux import cli, server
+
+    seen = {}
+    monkeypatch.setattr(cli, "_load_registry", lambda: {
+        "alpha": {"session": "real-session", "host": "box-1"}
+    })
+
+    def fake_exists(session, host=None):
+        seen["host"] = host
+        return True
+    monkeypatch.setattr(server, "_session_exists", fake_exists)
+
+    ok, session, host, err = cli._resolve_session_target("alpha", by_registry_name=True)
+
+    assert ok and session == "real-session" and host == "box-1" and err is None
+    assert seen["host"] == "box-1"   # liveness checked ON the remote
+
+
 def test_resolve_session_target_rejects_stale_registry(monkeypatch):
-    from emux import cli
+    from emux import cli, server
 
     monkeypatch.setattr(cli, "_load_registry", lambda: {
         "alpha": {"session": "gone-session", "description": None, "tags": []}
     })
-    monkeypatch.setattr(cli, "_live_sessions", lambda: [])
+    monkeypatch.setattr(server, "_session_exists", lambda session, host=None: False)
 
-    ok, session, err = cli._resolve_session_target("alpha", by_registry_name=True)
+    ok, session, host, err = cli._resolve_session_target("alpha", by_registry_name=True)
 
     assert ok is False
     assert session == "gone-session"
@@ -675,14 +694,12 @@ def test_resolve_session_target_rejects_stale_registry(monkeypatch):
 def test_cmd_head_print_command_resolves_registry(monkeypatch, capsys):
     import argparse
 
-    from emux import cli
+    from emux import cli, server
 
     monkeypatch.setattr(cli, "_load_registry", lambda: {
         "alpha": {"session": "real-session", "description": None, "tags": []}
     })
-    monkeypatch.setattr(cli, "_live_sessions", lambda: [
-        {"name": "real-session", "windows": 1, "created_unix": 1, "attached": False}
-    ])
+    monkeypatch.setattr(server, "_session_exists", lambda session, host=None: True)
 
     rc = cli.cmd_head(argparse.Namespace(
         target="alpha",
@@ -696,6 +713,27 @@ def test_cmd_head_print_command_resolves_registry(monkeypatch, capsys):
     assert capsys.readouterr().out == "tmux attach -t real-session\n"
 
 
+def test_cmd_head_print_command_remote_uses_ssh(monkeypatch, capsys):
+    import argparse
+
+    from emux import cli, server
+
+    monkeypatch.setattr(cli, "_load_registry", lambda: {
+        "alpha": {"session": "real-session", "host": "box-1"}
+    })
+    monkeypatch.setattr(server, "_session_exists", lambda session, host=None: True)
+
+    rc = cli.cmd_head(argparse.Namespace(
+        target="alpha", session=False, terminal="auto",
+        window=False, print_command=True,
+    ))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.startswith("ssh -t box-1 ")
+    assert "tmux attach -t real-session" in out
+
+
 def test_cmd_head_opens_iterm_for_raw_session(monkeypatch, capsys):
     import argparse
 
@@ -703,11 +741,10 @@ def test_cmd_head_opens_iterm_for_raw_session(monkeypatch, capsys):
 
     calls = []
 
-    monkeypatch.setattr(cli, "_live_sessions", lambda: [
-        {"name": "raw-session", "windows": 1, "created_unix": 1, "attached": False}
-    ])
+    from emux import server
+    monkeypatch.setattr(server, "_session_exists", lambda session, host=None: True)
 
-    def fake_open(session, terminal="auto", new_window=False):
+    def fake_open(session, terminal="auto", new_window=False, host=None):
         calls.append((session, terminal, new_window))
         return True, "iTerm", None
 
@@ -766,11 +803,11 @@ def test_open_terminal_head_auto_falls_back_to_terminal(monkeypatch):
 
     calls = []
 
-    def fake_iterm(session, new_window=False):
+    def fake_iterm(session, new_window=False, host=None):
         calls.append(("iterm", session, new_window))
         return False, "iTerm timeout"
 
-    def fake_terminal(session):
+    def fake_terminal(session, host=None):
         calls.append(("terminal", session))
         return True, None
 

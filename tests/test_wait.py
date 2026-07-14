@@ -51,6 +51,24 @@ def test_no_log_stable_pane_is_idle_with_pane_last_line(monkeypatch, tmp_path):
     assert r["ready"][0]["last_line"] == "All tests passed"
 
 
+def test_ready_entry_carries_classification_and_gate(monkeypatch, tmp_path):
+    # A ready session's entry answers "what now?" by itself: Tier-0 state,
+    # flags, and the modal gate text — no follow-up classify/capture calls.
+    from emux import judge
+    _wire(monkeypatch, tmp_path, ["Do you want to proceed?\n❯ 1. Yes\n  2. No\n"])
+    monkeypatch.setattr(
+        judge, "classify_session",
+        lambda n, host=None: {"state": "waiting_human", "flags": ["hidden_wait"],
+                              "summary": "Waiting on a human."})
+    monkeypatch.setattr(server, "_pane_agent", lambda s, h=None: "claude")
+    r = asyncio.run(tmux_wait(targets=["w1"], until="idle", timeout=10, quiet=0.5))
+    entry = r["ready"][0]
+    assert entry["state"] == "waiting_human"
+    assert entry["flags"] == ["hidden_wait"]
+    assert entry["summary"] == "Waiting on a human."
+    assert entry["gate"]  # adapters recognised the approval menu on the pane
+
+
 def test_armed_log_idle_path_unchanged(monkeypatch, tmp_path):
     # A session WITH an armed log that stops growing still reads idle from the
     # log (the cheap stat path — no pane capture at all).

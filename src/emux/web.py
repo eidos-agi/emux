@@ -1173,10 +1173,81 @@ def _meta(session: str) -> dict[str, Any]:
         return _meta_locked(st, time.time())
 
 
-_ESCALATED: dict[str, str] = {}   # session -> the gate we've already escalated
+_ESCALATED: dict[str, str] = {}      # session -> the gate we've already escalated
+_AUTO_ANSWERED: dict[str, str] = {}  # session -> the gate we already auto-answered once
+
+_GATE_POLICY_PATH = Path(os.environ.get("EMUX_GATE_POLICY")
+                         or Path.home() / ".config" / "emux" / "gatepolicy.json")
+_GATE_LOG_PATH = Path.home() / ".local" / "share" / "emux" / "gates.jsonl"
+
+# Never auto-answer a gate guarding something destructive, whatever the rules
+# say. Mirrors judge._DESTRUCTIVE_RE — a policy typo must not confirm an rm -rf.
+_GATE_NEVER_RE = re.compile(
+    r"rm\s+-rf|DROP\s+(?:TABLE|DATABASE)|force[- ]push|--force"
+    r"|This will (?:delete|remove|overwrite|destroy)|permanently delete", re.I)
 
 
-def _escalate_if_gated(session: str, agent_key: str, content: str) -> None:
+def _gate_policy_rules() -> list[dict[str, Any]]:
+    """Operator-authored auto-answer rules. `{"rules": [{"pattern": <regex over
+    the pane's live bottom>, "keys": ["Enter"], "note": "..."}]}`. Missing or
+    malformed file = no rules; gates escalate to a human as before."""
+    try:
+        raw = json.loads(_GATE_POLICY_PATH.read_text())
+        return [r for r in raw.get("rules", [])
+                if isinstance(r, dict) and r.get("pattern") and r.get("keys")]
+    except (OSError, ValueError):
+        return []
+
+
+def _log_gate_event(session: str, agent_key: str, gate: str, action: str,
+                    keys: list[str] | None = None) -> None:
+    """Append one line to the gate ledger — every gate sighting and how it was
+    handled. This is the labeled dataset `emux gates` mines for policy rules."""
+    try:
+        _GATE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        rec = {"t": int(time.time()), "session": session, "agent": agent_key,
+               "gate": gate, "action": action}
+        if keys:
+            rec["keys"] = keys
+        with open(_GATE_LOG_PATH, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception:  # noqa: BLE001, S110 — the ledger must never break the poll
+        pass
+
+
+def _gate_tail(content: str, lines: int = 15) -> str:
+    """The live bottom of the pane — where the actual menu text is."""
+    nonblank = [ln for ln in (content or "").splitlines() if ln.strip()]
+    return "\n".join(nonblank[-lines:])
+
+
+def _try_gate_policy(session: str, agent_key: str, gate: str, content: str,
+                     host: str | None) -> bool:
+    """Answer a gate from the operator's policy rules. Returns True iff the
+    gate was auto-answered (keystrokes sent). One attempt per gate — if the
+    same gate is still up next poll, it escalates to a human instead."""
+    tail = _gate_tail(content)
+    if _GATE_NEVER_RE.search(tail):
+        return False   # destructive guard — never auto-answer, whatever the rules
+    for rule in _gate_policy_rules():
+        try:
+            if not re.search(rule["pattern"], tail, re.I):
+                continue
+        except re.error:
+            continue
+        keys = [str(k) for k in rule["keys"]][:4]
+        try:
+            _server._run_tmux(["send-keys", "-t", session, *keys], host=host)
+        except Exception:  # noqa: BLE001
+            return False
+        _AUTO_ANSWERED[session] = gate
+        _log_gate_event(session, agent_key, gate, "auto", keys)
+        return True
+    return False
+
+
+def _escalate_if_gated(session: str, agent_key: str, content: str,
+                       host: str | None = None) -> None:
     """A blocked worker must never be SILENT.
 
     An agent sitting on an approval gate is the fleet's worst failure mode: it
@@ -1193,11 +1264,19 @@ def _escalate_if_gated(session: str, agent_key: str, content: str) -> None:
     from . import adapters
     gate = adapters.gated(agent_key, content)
     if not gate:
-        _ESCALATED.pop(session, None)      # gate cleared — rearm
+        _ESCALATED.pop(session, None)       # gate cleared — rearm
+        _AUTO_ANSWERED.pop(session, None)
         return
     if _ESCALATED.get(session) == gate:
-        return                             # already escalated THIS gate
+        return                              # already escalated THIS gate
+    # (0) the policy engine: a rule the operator wrote answers this gate with
+    # deterministic keystrokes — no model, no human, no token. ONE attempt per
+    # gate: if the same gate is still up next poll, fall through and escalate.
+    if _AUTO_ANSWERED.get(session) != gate and \
+            _try_gate_policy(session, agent_key, gate, content, host):
+        return
     _ESCALATED[session] = gate
+    _log_gate_event(session, agent_key, gate, "escalated")
     # (1) the up-channel: a parent blocked in tmux_wait wakes immediately.
     try:
         _server.inject_signal(
@@ -1316,7 +1395,7 @@ def _capture_and_observe(session: str, lines: int, host: str | None = None) -> s
     meta = _observe(session, content)
     agent = _detect_agent(session, content)
     agent_key = agent.get("agent", "")
-    _escalate_if_gated(session, agent_key, content)
+    _escalate_if_gated(session, agent_key, content, host=host)
     # is this session WAITING ON THE HUMAN? A real gate on screen — an approval
     # menu or a y/n it can't answer itself. NOT merely "there's a ❯ prompt line"
     # (every Claude pane has those in scrollback); that over-fires on everything.

@@ -987,7 +987,7 @@ def _pane_settle(session: str, host: str | None = None) -> float:
 @audited
 async def tmux_send(
     target: str,
-    keys: str,
+    keys: str | list[str],
     enter: bool = True,
     by_registry_name: bool = False,
     settle: float | None = None,
@@ -1003,8 +1003,11 @@ async def tmux_send(
         target: The tmux session to target. By default this is a tmux session
             name as shown by `tmux list-sessions`. If `by_registry_name=True`,
             it's looked up in the registry first.
-        keys: The keystrokes to send. Use tmux key syntax: literal text, or
-            named keys like "C-c", "Escape", "Enter".
+        keys: The keystrokes to send. A string is ONE unit: literal text, or a
+            single named key like "C-c", "Escape", "Enter". To send SEVERAL
+            named keys pass a LIST — ["BSpace", "BSpace", "Enter"] — each
+            element is its own key/literal ("BSpace BSpace" as one string is
+            typed as literal text, not two backspaces).
         enter: If True (default), append "Enter" to submit the command.
         by_registry_name: If True, resolve `target` via the registry.
         settle: Seconds to wait AFTER typing the text and BEFORE pressing Enter,
@@ -1021,7 +1024,9 @@ async def tmux_send(
             Use force=True only to answer a gate with the exact key you intend.
 
     Returns:
-        {ok, target, resolved_session, sent} on success.
+        {ok, target, resolved_session, sent, submitted?, resubmitted?} on
+        success — `submitted: false` means the text is still sitting in the
+        pane's composer even after a retry Enter (look before sending more).
         {ok: False, error: "blocked_on_gate", gate, hint} when a gate is up.
     """
     session, host, err = _resolve_target(target, by_registry_name)
@@ -1050,23 +1055,65 @@ async def tmux_send(
                         "and persist it. Resolve the gate deliberately (tmux_send "
                         "with force=True and the exact key), then send your text.",
             }
+    key_args = keys if isinstance(keys, list) else [keys]
     if enter and settle and settle > 0:
         # Type the text, let the TUI leave paste-mode, THEN submit with a
         # separate Enter — otherwise a paste-detecting TUI swallows the newline.
-        c1 = _run_tmux(["send-keys", "-t", session, keys], host=host)
+        c1 = _run_tmux(["send-keys", "-t", session, *key_args], host=host)
         if c1[0] != 0:
             return {"ok": False, "error": "tmux_send_failed", "stderr": c1[2],
                     "session": session, "host": host}
         time.sleep(settle)
         result = _run_tmux(["send-keys", "-t", session, "Enter"], host=host)
     else:
-        args = ["send-keys", "-t", session, keys]
+        args = ["send-keys", "-t", session, *key_args]
         if enter:
             args.append("Enter")
         result = _run_tmux(args, host=host)
     if result[0] != 0:
         return {"ok": False, "error": "tmux_send_failed", "stderr": result[2], "session": session, "host": host}
-    return {"ok": True, "target": target, "resolved_session": session, "host": host, "sent": keys, "enter": enter}
+    out: dict[str, Any] = {"ok": True, "target": target, "resolved_session": session,
+                           "host": host, "sent": keys, "enter": enter}
+    # Verify submission: a paste-guarded composer sometimes eats the Enter and
+    # the text just SITS there (observed live — the send reports ok, nothing
+    # runs). When we submitted literal text into a known AI's composer, look
+    # once; if the composer box still holds the tail of what we typed, press
+    # Enter again and re-check. Skipped for shells/unknown panes (no composer).
+    literal = (enter and agent is not None and len(key_args) == 1
+               and " " in key_args[0] and len(key_args[0]) > 3)
+    if literal:
+        needle = key_args[0][-24:]
+        def _composing() -> bool | None:
+            code, screen, _ = _run_tmux(
+                ["capture-pane", "-t", session, "-p", "-S", "-12"], host=host)
+            if code != 0:
+                return None
+            box = _composer_text(_strip_ansi(screen or ""))
+            return None if box is None else needle in box
+        time.sleep(max(0.6, settle or 0.0))
+        c = _composing()
+        if c:
+            _run_tmux(["send-keys", "-t", session, "Enter"], host=host)
+            out["resubmitted"] = True
+            time.sleep(0.6)
+            out["submitted"] = _composing() is False
+        elif c is False:
+            out["submitted"] = True
+        # c is None → composer box not parseable; report nothing rather than guess
+    return out
+
+
+def _composer_text(screen: str) -> str | None:
+    """The text inside a TUI's composer box — the region between the LAST two
+    full-width horizontal rules (Claude Code drops the composer there; the
+    transcript echo of a submitted message lives ABOVE it). None if the screen
+    doesn't have two rules to parse."""
+    lines = screen.splitlines()
+    rules = [i for i, ln in enumerate(lines)
+             if len(ln.strip()) >= 8 and set(ln.strip()) == {"─"}]
+    if len(rules) < 2:
+        return None
+    return "\n".join(lines[rules[-2] + 1:rules[-1]])
 
 
 @mcp.tool()
@@ -2293,6 +2340,100 @@ async def tmux_login(
     return result
 
 
+# ---- doctor: diagnose a session's ENVIRONMENT, not its output ---------------
+#
+# Born from a real hour lost: a long-running tmux server silently lost macOS
+# TCC access to a volume, every pane got EPERM on file ops, and the sessions
+# looked "broken" while the disk was fine. The tell was comparing the tmux
+# server's own access (run-shell) against a fresh process's (direct/ssh) —
+# doctor automates exactly that comparison plus the basic health probes.
+
+def doctor(target: str, by_registry_name: bool = False) -> dict[str, Any]:
+    """Environment health for one session: liveness, pane, capture, stream log,
+    gate, and a tmux-server-vs-fresh-process filesystem probe of the pane's cwd."""
+    session, host, err = _resolve_target(target, by_registry_name)
+    if err is not None or session is None:
+        return {"ok": False, "error": err or "unresolved_target", "name": target}
+    checks: list[dict[str, Any]] = []
+
+    def check(name: str, ok: bool | None, detail: str) -> None:
+        checks.append({"check": name, "ok": ok, "detail": detail})
+
+    live = _session_exists(session, host=host)
+    check("session_live", live, f"tmux has-session {session}"
+          + (f" on {host}" if host else " locally"))
+    if not live:
+        return {"ok": False, "target": target, "session": session, "host": host,
+                "checks": checks, "diagnosis": "session is gone — clean up or respawn"}
+
+    code, out, _ = _run_tmux(
+        ["display-message", "-p", "-t", session, "#{pane_current_command}|#{pane_current_path}"],
+        host=host)
+    pane_cmd, _, pane_cwd = (out.strip().partition("|") if code == 0 else ("", "", ""))
+    check("pane", code == 0, f"command={pane_cmd or '?'} cwd={pane_cwd or '?'}")
+
+    cap = _pane_text_for(target if by_registry_name else session, lines=30)
+    check("capture", bool(cap.strip()), f"{len(cap.splitlines())} lines captured")
+
+    log_sz = _log_size(target if by_registry_name else session)
+    check("stream_log", log_sz > 0,
+          f"{log_sz} bytes" if log_sz else "no armed stream log — idle-wait falls back to pane polling")
+
+    from . import adapters
+    gate = adapters.gated(_pane_agent(session, host), cap)
+    check("gate", None, f"modal gate up: {gate!r}" if gate else "no modal gate")
+
+    diagnosis = "healthy"
+    if pane_cwd:
+        # THE probe: can the tmux server's process tree read the pane's cwd,
+        # and can a FRESH process (this one, or a fresh sshd child) read it?
+        q = shlex.quote(pane_cwd)
+        code_srv, out_srv, err_srv = _run_tmux(
+            ["run-shell", f"ls {q} >/dev/null 2>&1 && echo OK || echo DENIED"], host=host)
+        server_ok = code_srv == 0 and "OK" in out_srv
+        if host:
+            fresh = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, f"ls {q}"],
+                capture_output=True, text=True, timeout=20, check=False)
+            fresh_ok = fresh.returncode == 0
+        else:
+            fresh_ok = os.access(pane_cwd, os.R_OK | os.X_OK)
+        check("fs_tmux_server", server_ok, f"tmux server reads {pane_cwd}"
+              if server_ok else f"tmux server CANNOT read {pane_cwd} ({(out_srv or err_srv).strip()[:80]})")
+        check("fs_fresh_process", fresh_ok, f"fresh process reads {pane_cwd}"
+              if fresh_ok else f"fresh process cannot read {pane_cwd}")
+        if fresh_ok and not server_ok:
+            diagnosis = ("tmux server lost filesystem access to the pane's cwd while the "
+                         "disk is fine (macOS TCC grants don't reach running processes). "
+                         "Fix: grant Full Disk Access to the tmux binary and RESTART the "
+                         "tmux server at the desk — this kills its sessions, so time it.")
+        elif not fresh_ok and not server_ok:
+            diagnosis = "the path is unreadable from everywhere — check the volume/mount itself"
+    if gate and diagnosis == "healthy":
+        diagnosis = "healthy, but a modal gate is up — answer it (tmux_send force with the exact key)"
+    return {"ok": True, "target": target, "session": session, "host": host,
+            "checks": checks, "diagnosis": diagnosis}
+
+
+@mcp.tool()
+@audited
+async def tmux_doctor(target: str, by_registry_name: bool = False) -> dict[str, Any]:
+    """Diagnose a session's ENVIRONMENT — the failures classify can't see.
+
+    Probes: liveness, pane command/cwd, capture, armed stream log, modal gate,
+    and — the one that finds the invisible failure — whether the tmux SERVER's
+    process tree can read the pane's cwd vs a FRESH process (run-shell vs
+    direct/ssh). A mismatch means the long-running tmux server lost a macOS
+    TCC/Full-Disk-Access grant (grants don't reach running processes) and the
+    whole session tree gets EPERM while the disk is healthy; the fix is a
+    desk-side tmux-server restart, and doctor says so instead of leaving the
+    session to look mysteriously broken.
+
+    Returns {ok, checks: [{check, ok, detail}], diagnosis}.
+    """
+    return await asyncio.to_thread(doctor, target, by_registry_name)
+
+
 @mcp.tool()
 @audited
 async def tmux_signals(
@@ -2365,8 +2506,10 @@ async def tmux_wait(
         until: event type above. timeout: seconds to wait (clamped 1..600).
         quiet: seconds of no output that count as idle (for until="idle").
 
-    Returns {ok, ready:[{name, why, signal?, last_line}], still_working:[names],
-    timed_out}. Returns the moment ANY target is ready, or at timeout.
+    Returns {ok, ready:[{name, why, signal?, last_line, state, flags, summary,
+    gate?}], still_working:[names], timed_out}. Each ready entry carries the
+    Tier-0 classification and any modal gate text, so you can usually act from
+    this one call. Returns the moment ANY target is ready, or at timeout.
     """
     names = _resolve_watch_targets(targets, under)
     timeout = max(1.0, min(float(timeout), 600.0))
@@ -2427,6 +2570,24 @@ async def tmux_wait(
                     line = next(
                         (ln for ln in reversed(pane.splitlines()) if ln.strip()), "")
                 extra.setdefault("last_line", line.strip()[-200:])
+                # Carry the DECISION, not an invitation to poll: classify the
+                # ready session and extract any modal gate text, so the caller
+                # can act from this one call (no wait→classify→capture triple).
+                try:
+                    from . import adapters
+                    from .judge import classify_session
+                    verdict = classify_session(n)
+                    extra["state"] = verdict.get("state")
+                    extra["flags"] = verdict.get("flags", [])
+                    extra["summary"] = verdict.get("summary")
+                    entry = _load_registry().get(n) or {}
+                    sess, hst = entry.get("session", n), entry.get("host")
+                    gate = adapters.gated(_pane_agent(sess, hst),
+                                          _pane_text_for(n, lines=15))
+                    if gate:
+                        extra["gate"] = gate
+                except Exception:  # noqa: BLE001, S110 — enrichment must never break the wait
+                    pass
                 ready.append({"name": n, "why": why, **extra})
         if ready or time.time() >= deadline:
             done = {r["name"] for r in ready}

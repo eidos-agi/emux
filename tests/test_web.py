@@ -481,9 +481,12 @@ def test_gated_worker_escalates_once_per_gate_low_risk_head(monkeypatch, tmp_pat
         return _R()
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setenv("CLAUDECODE", "1")   # the daemon may inherit this
+    monkeypatch.setattr(web, "_GATE_LOG_PATH", tmp_path / "gates.jsonl")
+    monkeypatch.setattr(web, "_GATE_POLICY_PATH", tmp_path / "gatepolicy.json")
 
     gate = "Update available!\n1. Update now (runs brew upgrade)\n2. Skip"
     web._ESCALATED.clear()
+    web._AUTO_ANSWERED.clear()
     web._escalate_if_gated("wrk", "codex", gate)
     web._escalate_if_gated("wrk", "codex", gate)   # same gate again → no repeat
 
@@ -498,6 +501,75 @@ def test_gated_worker_escalates_once_per_gate_low_risk_head(monkeypatch, tmp_pat
     web._escalate_if_gated("wrk", "codex", "› write some code")   # not a gate
     web._escalate_if_gated("wrk", "codex", gate)
     assert len(signals) == 2 and len(calls) == 2
+
+
+def _wire_gate_policy(monkeypatch, tmp_path, rules):
+    import json as _json
+
+    from emux import server, web
+    policy = tmp_path / "gatepolicy.json"
+    policy.write_text(_json.dumps({"rules": rules}))
+    monkeypatch.setattr(web, "_GATE_POLICY_PATH", policy)
+    monkeypatch.setattr(web, "_GATE_LOG_PATH", tmp_path / "gates.jsonl")
+    signals = []
+    monkeypatch.setattr(server, "inject_signal",
+                        lambda session, kind, payload="", **kw:
+                        signals.append({"kind": kind, "payload": payload}))
+    sent = []
+    monkeypatch.setattr(server, "_run_tmux",
+                        lambda args, timeout=10, host=None:
+                        (sent.append({"args": list(args), "host": host}), (0, "", ""))[1])
+    monkeypatch.setattr(web, "_file_hancock_escalation", lambda *a, **k: None)
+    web._ESCALATED.clear()
+    web._AUTO_ANSWERED.clear()
+    return signals, sent
+
+
+def test_gate_policy_auto_answers_matching_gate(monkeypatch, tmp_path):
+    """A policy rule answers a known gate with deterministic keystrokes — no
+    NEED signal, no hancock, no model, no human."""
+    from emux import web
+    signals, sent = _wire_gate_policy(
+        monkeypatch, tmp_path,
+        [{"pattern": r"trust this folder", "keys": ["Enter"], "note": "trust gate"}])
+    gate_screen = ("Quick safety check: Is this a project you created?\n"
+                   "❯ 1. Yes, I trust this folder\n  2. No, exit\n"
+                   "Do you want to proceed?\n")
+    web._escalate_if_gated("wrk", "claude", gate_screen, host="box-1")
+    assert sent and sent[0]["args"][:3] == ["send-keys", "-t", "wrk"]
+    assert sent[0]["args"][3:] == ["Enter"]
+    assert sent[0]["host"] == "box-1"      # host-aware answering
+    assert signals == []                    # answered, not escalated
+    ledger = (tmp_path / "gates.jsonl").read_text()
+    assert '"action": "auto"' in ledger
+
+
+def test_gate_policy_one_attempt_then_escalates(monkeypatch, tmp_path):
+    """If the auto-answer didn't clear the gate, the SAME gate next poll goes
+    to a human — no answer-retry loops."""
+    from emux import web
+    signals, sent = _wire_gate_policy(
+        monkeypatch, tmp_path,
+        [{"pattern": r"trust this folder", "keys": ["Enter"]}])
+    gate_screen = "❯ 1. Yes, I trust this folder\nDo you want to proceed?\n"
+    web._escalate_if_gated("wrk", "claude", gate_screen)
+    assert len(sent) == 1 and signals == []
+    web._escalate_if_gated("wrk", "claude", gate_screen)   # gate still up
+    assert len([s for s in sent if s["args"][0] == "send-keys"]) == 1  # no re-answer
+    assert len(signals) == 1 and signals[0]["kind"] == "NEED"
+
+
+def test_gate_policy_never_answers_destructive(monkeypatch, tmp_path):
+    """Destructive text on the gate always goes to a human, whatever the rules."""
+    from emux import web
+    signals, sent = _wire_gate_policy(
+        monkeypatch, tmp_path,
+        [{"pattern": r"do you want to proceed", "keys": ["Enter"]}])
+    gate_screen = ("About to run: rm -rf /var/lib/data\n"
+                   "Do you want to proceed?\n❯ 1. Yes\n")
+    web._escalate_if_gated("wrk", "claude", gate_screen)
+    assert not [s for s in sent if s["args"][0] == "send-keys"]
+    assert len(signals) == 1 and signals[0]["kind"] == "NEED"
 
 
 def test_remote_session_reads_live_and_captures_over_ssh(monkeypatch):

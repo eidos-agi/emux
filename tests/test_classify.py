@@ -266,6 +266,28 @@ def test_extract_features_returns_classify_triple(monkeypatch):
     }
 
 
+def test_live_pane_beats_stale_log_tail(monkeypatch):
+    # The log tail keeps a gate that cleared minutes ago; the LIVE pane shows
+    # the agent running again. Current state must come from the pane.
+    from emux import judge, server
+    monkeypatch.setattr(server, "_load_registry", lambda: {})
+    monkeypatch.setattr(server, "_read_log",
+                        lambda name, lines=None: "Do you want to proceed?\n❯ 1. Yes\n")
+    monkeypatch.setattr(server, "_new_signals", lambda name, ack: [])
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_session_exists", lambda s, host=None: True)
+
+    def fake_tmux(args, timeout=10, host=None):
+        if args[0] == "capture-pane":
+            return 0, "Compiling step 3 of 9... (12s · esc to interrupt)\n", ""
+        if args[0] == "display-message":
+            return 0, "claude\n", ""
+        return 0, "", ""
+    monkeypatch.setattr(server, "_run_tmux", fake_tmux)
+    r = judge.classify_session("worker-live")
+    assert r["state"] != "waiting_human"   # the stale log gate must not win
+
+
 def test_classify_session_maps_error_from_log(monkeypatch):
     from emux import judge, server
     monkeypatch.setattr(server, "_load_registry", lambda: {})

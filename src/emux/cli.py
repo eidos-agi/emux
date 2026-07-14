@@ -26,6 +26,7 @@ import datetime as _dt
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -524,19 +525,23 @@ def cmd_run(args: argparse.Namespace) -> int:
     return _print_result(result, as_json=args.json, content_key="content")
 
 
-def _resolve_session_target(target: str, by_registry_name: bool) -> tuple[bool, str, str | None]:
-    """Resolve a CLI target to a live tmux session."""
-    session = target
+def _resolve_session_target(
+    target: str, by_registry_name: bool
+) -> tuple[bool, str, str | None, str | None]:
+    """Resolve a CLI target to a live tmux session: (ok, session, host, err).
+    Host-aware — a registry entry on another machine checks liveness THERE."""
+    from .server import _session_exists
+    session, host = target, None
     if by_registry_name:
         registry = _load_registry()
         if target not in registry:
-            return False, "", f"'{target}' is not registered with Emux"
+            return False, "", None, f"'{target}' is not registered with Emux"
         session = registry[target]["session"]
-
-    live_names = {s["name"] for s in _live_sessions()}
-    if session not in live_names:
-        return False, session, f"tmux session '{session}' is not live"
-    return True, session, None
+        host = registry[target].get("host")
+    if not _session_exists(session, host=host):
+        where = f" on {host}" if host else ""
+        return False, session, host, f"tmux session '{session}' is not live{where}"
+    return True, session, host, None
 
 
 def _find_iterm_bundle_id() -> str | None:
@@ -552,8 +557,19 @@ def _find_iterm_bundle_id() -> str | None:
     return None
 
 
-def _write_head_command_file(session: str) -> Path:
-    command = f"tmux attach -t {shlex.quote(session)}"
+def _head_attach_command(session: str, host: str | None = None) -> str:
+    """The shell command a head runs: local attach, or `ssh -t` for a remote
+    session (same PATH shim as server._run_tmux — non-interactive ssh misses
+    Homebrew's bin)."""
+    if host:
+        remote = ("PATH=/opt/homebrew/bin:/usr/local/bin:$PATH "
+                  f"tmux attach -t {shlex.quote(session)}")
+        return f"ssh -t {shlex.quote(host)} {shlex.quote(remote)}"
+    return f"tmux attach -t {shlex.quote(session)}"
+
+
+def _write_head_command_file(session: str, host: str | None = None) -> Path:
+    command = _head_attach_command(session, host)
     safe_session = "".join(ch if ch.isalnum() or ch in ".-_" else "-" for ch in session)
     script_path = Path(tempfile.gettempdir()) / f"emux-head-{os.getpid()}-{safe_session}.command"
     script_path.write_text(f"#!/bin/zsh\nrm -f \"$0\"\nexec {command}\n")
@@ -561,11 +577,12 @@ def _write_head_command_file(session: str) -> Path:
     return script_path
 
 
-def _open_iterm_head(session: str, new_window: bool = False) -> tuple[bool, str | None]:
-    """Open iTerm2/iTerm attached to an existing tmux session."""
+def _open_iterm_head(session: str, new_window: bool = False,
+                     host: str | None = None) -> tuple[bool, str | None]:
+    """Open iTerm2/iTerm attached to an existing tmux session (ssh -t if remote)."""
     if platform.system() != "Darwin":
         return False, "emux head currently supports macOS iTerm2/iTerm only"
-    if _resolve_tmux() is None:
+    if host is None and _resolve_tmux() is None:
         return False, "tmux not found on PATH"
     if shutil.which("osascript") is None:
         return False, "osascript not found on PATH"
@@ -576,7 +593,7 @@ def _open_iterm_head(session: str, new_window: bool = False) -> tuple[bool, str 
     if bundle_id is None:
         return False, "iTerm2/iTerm is not installed or not visible to AppleScript"
 
-    script_path = _write_head_command_file(session)
+    script_path = _write_head_command_file(session, host)
 
     open_args = ["open"]
     if new_window:
@@ -592,16 +609,17 @@ def _open_iterm_head(session: str, new_window: bool = False) -> tuple[bool, str 
     return True, None
 
 
-def _open_terminal_app_head(session: str) -> tuple[bool, str | None]:
+def _open_terminal_app_head(session: str,
+                            host: str | None = None) -> tuple[bool, str | None]:
     """Open macOS Terminal.app attached to an existing tmux session."""
     if platform.system() != "Darwin":
         return False, "Terminal.app head currently supports macOS only"
-    if _resolve_tmux() is None:
+    if host is None and _resolve_tmux() is None:
         return False, "tmux not found on PATH"
     if shutil.which("open") is None:
         return False, "macOS open command not found on PATH"
 
-    script_path = _write_head_command_file(session)
+    script_path = _write_head_command_file(session, host)
     result = subprocess.run(
         ["open", "-a", "Terminal", str(script_path)],
         capture_output=True,
@@ -617,18 +635,19 @@ def _open_terminal_head(
     session: str,
     terminal: str = "auto",
     new_window: bool = False,
+    host: str | None = None,
 ) -> tuple[bool, str | None, str | None]:
     if terminal == "iterm":
-        ok, err = _open_iterm_head(session, new_window=new_window)
+        ok, err = _open_iterm_head(session, new_window=new_window, host=host)
         return ok, "iTerm", err
     if terminal == "terminal":
-        ok, err = _open_terminal_app_head(session)
+        ok, err = _open_terminal_app_head(session, host=host)
         return ok, "Terminal", err
 
-    iterm_ok, iterm_err = _open_iterm_head(session, new_window=new_window)
+    iterm_ok, iterm_err = _open_iterm_head(session, new_window=new_window, host=host)
     if iterm_ok:
         return True, "iTerm", None
-    terminal_ok, terminal_err = _open_terminal_app_head(session)
+    terminal_ok, terminal_err = _open_terminal_app_head(session, host=host)
     if terminal_ok:
         return True, "Terminal", None
     return False, None, f"iTerm failed: {iterm_err}; Terminal failed: {terminal_err}"
@@ -681,22 +700,110 @@ def cmd_signal(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gates(args: argparse.Namespace) -> int:
+    """Mine the gate ledger into policy-rule suggestions.
+
+    Every gate the web daemon sees is logged to ~/.local/share/emux/gates.jsonl
+    with how it was handled (auto-answered by a policy rule, or escalated to a
+    human). For escalated gates, the emux audit trail tells us what keystroke a
+    human/manager actually sent next — so the ledger IS the labeled dataset,
+    and this report turns 'this gate appeared 14x, always answered Enter' into
+    a ready-to-paste gatepolicy.json rule. No model calls; pure counting."""
+    gates_path = Path.home() / ".local" / "share" / "emux" / "gates.jsonl"
+    audit_path = Path.home() / ".local" / "share" / "emux" / "audit.jsonl"
+    if not gates_path.is_file():
+        print("no gate ledger yet — gates are recorded as the web daemon sees them")
+        return 0
+    events = []
+    for line in gates_path.read_text().splitlines():
+        try:
+            events.append(json.loads(line))
+        except ValueError:
+            continue
+    sends = []
+    if audit_path.is_file():
+        for line in audit_path.read_text().splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("op") in ("tmux_send", "tmux_login") and rec.get("t"):
+                sends.append(rec)
+    # group by (agent, gate); for escalated sightings, the ANSWER is the first
+    # audited send to that session within 120s — the human's actual keystroke.
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for ev in events:
+        g = groups.setdefault((ev.get("agent", ""), ev.get("gate", "")),
+                              {"auto": 0, "escalated": 0, "keys": {}, "last": 0})
+        g[ev.get("action", "escalated")] = g.get(ev.get("action", "escalated"), 0) + 1
+        g["last"] = max(g["last"], ev.get("t", 0))
+        if ev.get("action") == "auto":
+            k = " ".join(ev.get("keys") or [])
+            g["keys"][k] = g["keys"].get(k, 0) + 1
+        else:
+            for s in sends:
+                if s.get("target") == ev.get("session") and \
+                        0 <= s["t"] - ev.get("t", 0) <= 120:
+                    k = str(s.get("keys", ""))[:40]
+                    g["keys"][k] = g["keys"].get(k, 0) + 1
+                    break
+    if not groups:
+        print("gate ledger is empty")
+        return 0
+    order = sorted(groups.items(), key=lambda kv: -(kv[1]["auto"] + kv[1]["escalated"]))
+    print(f"{len(events)} gate sightings, {len(groups)} distinct gates\n")
+    for (agent, gate), g in order[:args.limit]:
+        total = g["auto"] + g["escalated"]
+        top = max(g["keys"].items(), key=lambda kv: kv[1]) if g["keys"] else None
+        print(f"{total:4d}x  [{agent or '?'}] {gate[:70]!r}")
+        print(f"       auto:{g['auto']} escalated:{g['escalated']}"
+              + (f"  usual answer: {top[0]!r} ({top[1]}x)" if top else "  no recorded answer"))
+        if g["escalated"] and top and top[1] >= max(3, total // 2):
+            rule = {"pattern": re.escape(gate)[:80], "keys": top[0].split() or ["Enter"],
+                    "note": f"mined from {total} sightings"}
+            print(f"       suggested rule: {json.dumps(rule)}")
+    print("\nadd rules to ~/.config/emux/gatepolicy.json as "
+          '{"rules": [{"pattern": "...", "keys": ["Enter"], "note": "..."}]} '
+          "— the daemon answers matching gates itself (destructive text never auto-answers)")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Diagnose a session's environment (liveness, capture, log, gate, fs access)."""
+    from .server import doctor
+    result = doctor(args.target, by_registry_name=not args.session)
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("ok") else 1
+    if not result.get("ok") and result.get("error"):
+        print(f"emux doctor: {result['error']}", file=sys.stderr)
+        return 1
+    for c in result.get("checks", []):
+        mark = {True: "ok  ", False: "FAIL", None: "info"}[c["ok"]]
+        print(f"  [{mark}] {c['check']}: {c['detail']}")
+    print(f"diagnosis: {result.get('diagnosis', '?')}")
+    return 0 if result.get("ok") else 1
+
+
 def cmd_head(args: argparse.Namespace) -> int:
-    """Open a real terminal head for a registered name by default."""
-    ok, session, err = _resolve_session_target(args.target, by_registry_name=not args.session)
+    """Open a real terminal head for a registered name by default. Remote
+    sessions attach via `ssh -t` — same one-command feel as local."""
+    ok, session, host, err = _resolve_session_target(args.target, by_registry_name=not args.session)
     if not ok:
         print(f"emux: {err}", file=sys.stderr)
         return 1
 
     if args.print_command:
-        print(f"tmux attach -t {shlex.quote(session)}")
+        print(_head_attach_command(session, host))
         return 0
 
-    ok, app_name, err = _open_terminal_head(session, terminal=args.terminal, new_window=args.window)
+    ok, app_name, err = _open_terminal_head(session, terminal=args.terminal,
+                                            new_window=args.window, host=host)
     if not ok:
         print(f"emux: {err}", file=sys.stderr)
         return 1
-    print(f"opened {app_name} head for {args.target} -> {session}")
+    where = f" on {host}" if host else ""
+    print(f"opened {app_name} head for {args.target} -> {session}{where}")
     return 0
 
 
@@ -809,6 +916,14 @@ def main(argv: list[str] | None = None) -> int:
     p_signal.add_argument("--session", help="target session name (default: the current tmux session)")
     p_signal.add_argument("--push", metavar="HOST", help="also PUSH this signal to HOST's inbox over ssh (the parent); the parent dedups push vs pull by id")
 
+    p_gates = sub.add_parser("gates", help="mine the gate ledger into auto-answer policy suggestions (counts, usual answers, ready-to-paste rules)")
+    p_gates.add_argument("--limit", type=int, default=20, help="show top N distinct gates (default 20)")
+
+    p_doctor = sub.add_parser("doctor", help="diagnose a session's environment: liveness, capture, log, gate, and tmux-server vs fresh-process filesystem access")
+    p_doctor.add_argument("target", help="registered name by default, or tmux session with --session")
+    p_doctor.add_argument("--session", action="store_true", help="target a raw tmux session instead of a registry name")
+    p_doctor.add_argument("--json", action="store_true", help="print structured result JSON")
+
     p_head = sub.add_parser("head", help="open a real terminal head for a registered session")
     p_head.add_argument("target", help="registered name by default, or tmux session with --session")
     p_head.add_argument("--session", action="store_true", help="target a raw tmux session instead of a registry name")
@@ -859,6 +974,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_run(args)
     if args.cmd == "head":
         return cmd_head(args)
+    if args.cmd == "doctor":
+        return cmd_doctor(args)
+    if args.cmd == "gates":
+        return cmd_gates(args)
     if args.cmd == "signal":
         return cmd_signal(args)
 

@@ -17,11 +17,12 @@ Two public entry points:
   the web daemon calls with its own capture + activity samples.
 
 - ``extract_features(name, host=None)`` + ``classify_session(name, host=None)``
-  — the LIVE path. Stateless: reads the session's durable stream log
-  (``_read_log``) and its pending up-channel signals (``_new_signals``, read
-  WITHOUT acking) plus the live pane command, assembles the (capture, activity,
-  meta) triple, and runs ``classify``. The ``tmux_classify`` MCP tool wraps
-  ``classify_session``.
+  — the LIVE path. Stateless: captures the live pane (falling back to the
+  durable stream log when the pane can't be read — the pane is CURRENT state,
+  the log keeps long-cleared gates in its tail) and reads pending up-channel
+  signals (``_new_signals``, WITHOUT acking) plus the live pane command,
+  assembles the (capture, activity, meta) triple, and runs ``classify``. The
+  ``tmux_classify`` MCP tool wraps ``classify_session``.
 
 States (taxonomy from the design doc):
     running          — output actively changing; the agent is working.
@@ -558,10 +559,12 @@ def extract_features(name: str, host: str | None = None) -> dict[str, Any]:
         except Exception:
             live = True
 
-    # Capture: prefer the durable stream log (stateless); fall back to a live
-    # pane capture if no log has been recorded for this session.
-    capture_text = _server._read_log(name, lines=_LOG_TAIL)
-    if not capture_text and live:
+    # Capture: prefer the LIVE pane — the log tail keeps text that has already
+    # scrolled into history (a gate that cleared minutes ago still classified
+    # as waiting_human, observed live). The durable log is the fallback when
+    # the pane can't be captured, and stays the source for last_change_age.
+    capture_text = ""
+    if live:
         try:
             _s, _h, rerr = _server._resolve_target(name, by_registry_name=entry is not None)
             if rerr is None and _s is not None:
@@ -572,6 +575,8 @@ def extract_features(name: str, host: str | None = None) -> dict[str, Any]:
                     capture_text = out or ""
         except Exception:
             pass
+    if not capture_text.strip():
+        capture_text = _server._read_log(name, lines=_LOG_TAIL)
 
     pane_cmd = _pane_command(session, host) if live else ""
 

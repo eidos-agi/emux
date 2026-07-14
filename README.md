@@ -37,7 +37,13 @@ emux send         → Send keys or text to a registered/live session.
 emux interrupt    → Send C-c to a registered/live session.
 emux capture      → Capture pane output from a registered/live session.
 emux run          → Send a command, wait, and capture output.
-emux head         → Open a real terminal head attached to a session.
+emux head         → Open a real terminal head attached to a session
+                    (remote sessions attach via ssh -t).
+emux doctor       → Diagnose a session's ENVIRONMENT: liveness, capture,
+                    stream log, gate, and tmux-server vs fresh-process
+                    filesystem access (finds the macOS TCC lockout).
+emux gates        → Mine the gate ledger: which gates recur, how they were
+                    answered, ready-to-paste auto-answer policy rules.
 emux register     → Register a session under a friendly name.
 emux unregister   → Drop a registered name. Doesn't touch tmux.
 ```
@@ -124,6 +130,7 @@ Tools exposed via `emux mcp`:
 | `tmux_navigate(target, goal, until?, ...)` | Model-driven: reach a target screen through a TUI |
 | `tmux_goal(target, goal, ...)` | Autonomous: pursue a whole task through a TUI |
 | `tmux_login(target, code?, switch?, ...)` | Drive a Claude Code login sequence; surfaces the OAuth URL |
+| `tmux_doctor(target, ...)` | Diagnose a session's environment (incl. tmux-server vs fresh-process fs access) |
 
 ### Driving another AI through its TUI
 
@@ -210,6 +217,26 @@ Details: `docs/emux-login.md`.
 emux web                  # http://127.0.0.1:8689
 emux web --port 9000 --open
 ```
+
+### Gate policy — answer known gates without a human or a model
+
+When the daemon sees a worker blocked on a modal gate, it first consults
+`~/.config/emux/gatepolicy.json` (override via `$EMUX_GATE_POLICY`):
+
+```json
+{"rules": [
+  {"pattern": "trust this folder", "keys": ["Enter"], "note": "folder-trust gate"}
+]}
+```
+
+A rule whose regex matches the pane's live bottom answers the gate with those
+exact keystrokes — deterministic, host-aware, zero tokens. Guardrails: gates
+showing destructive text (`rm -rf`, force-push, "permanently delete", …) are
+NEVER auto-answered regardless of rules, and each gate gets ONE attempt — if
+the same gate is still up next poll it escalates to a human (NEED signal +
+auto-opened terminal head) as before. Every sighting lands in
+`~/.local/share/emux/gates.jsonl`; run `emux gates` to see which gates recur,
+how they were answered, and copy-paste-ready rules for them.
 
 Five views over the same registry:
 
