@@ -779,6 +779,7 @@ def test_plan_failover_facade(monkeypatch):
     """Round-robin to the next account, skip cooling-down ones, dry-run yields the
     exact relaunch command, and a single account can't fail over."""
     import time
+
     from emux import web
 
     PLANS = [{"name": "acct-1", "config_dir": "/x/.claude"},
