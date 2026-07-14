@@ -330,7 +330,7 @@ def test_build_groups_orders_registered_live_stale_unregistered(monkeypatch):
     assert [item["name"] for item in groups["registered_stale"]] == ["gone"]
     assert groups["registered_stale"][0]["is_stale"] is True
     assert [item["session"] for item in groups["unregistered_live"]] == ["scratch"]
-    assert groups["actions"][0]["kind"] == "register_new"
+    assert [item["kind"] for item in groups["actions"]] == ["new_mission", "register_new"]
 
 
 def test_tmux_sessions_marks_registered_stale(tmp_path, monkeypatch):

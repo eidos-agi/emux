@@ -1,6 +1,7 @@
 """emux CLI dispatcher.
 
   emux              → TUI picker (registered + live tmux sessions)
+  emux new          → new mission: chat → confirm spec → spawn (same as 'n' in the TUI)
   emux mcp          → start the MCP server
   emux web          → start the web daemon (chat-style session monitor)
   emux register …   → CLI register
@@ -95,6 +96,133 @@ def _interactive_register(default_name: str | None = None) -> tuple[str, str] | 
     return name, session
 
 
+_PLAN_MODEL = os.environ.get("EMUX_PLAN_MODEL", "claude-sonnet-5")
+
+
+def _parse_plan(reply: str) -> dict[str, Any] | None:
+    """Extract the plan JSON from a model reply (tolerates stray prose)."""
+    m = re.search(r"\{.*\}", reply, re.DOTALL)
+    if not m:
+        return None
+    try:
+        plan = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return None
+    return plan if isinstance(plan, dict) else None
+
+
+def _plan_prompt(transcript: list[str]) -> str:
+    registry = _load_registry()
+    hosts = sorted({str(e["host"]) for e in registry.values() if e.get("host")})
+    convo = "\n".join(transcript)
+    return (
+        "You are emux's mission planner. The user describes what they want; you "
+        "turn it into a tmux session spec they will confirm before anything runs.\n\n"
+        f"KNOWN REMOTE HOSTS (ssh destinations already used by this registry): {hosts or '(none)'}\n"
+        "host must be null for the local machine, or one of the known hosts, or an "
+        "ssh destination the user explicitly named.\n\n"
+        f"CONVERSATION SO FAR:\n{convo}\n\n"
+        "Reply with ONE JSON object, nothing else:\n"
+        '{"question": "<ONE clarifying question if you genuinely cannot spec the '
+        'mission yet, else empty string>",\n'
+        ' "summary": "<one sentence: what this session will do>",\n'
+        ' "name": "<short kebab-case registry/session name>",\n'
+        ' "host": <"ssh-dest" or null>,\n'
+        ' "cwd": <"absolute working dir" or null>,\n'
+        ' "command": "<the exact shell command to launch in the session, usually '
+        "claude '<mission prompt>' — single-quote the prompt>\"}\n"
+        "Ask at most one question per turn, and only when the answer changes the "
+        "spec. Prefer sensible defaults over questions."
+    )
+
+
+def _new_mission_chat() -> dict[str, Any] | None:
+    """Chat with `claude -p` until the user confirms a session spec. Returns the
+    confirmed plan dict, or None on abort. Fixed-cost CLI — never the API."""
+    claude = shutil.which("claude")
+    if claude is None:
+        print("emux: claude CLI not on PATH (needed for new-mission planning).", file=sys.stderr)
+        return None
+
+    print()
+    want = input("  what do you want to do? ").strip()
+    if not want:
+        print("  aborted.")
+        return None
+    transcript = [f"user: {want}"]
+
+    while True:
+        try:
+            proc = subprocess.run(
+                [claude, "-p", _plan_prompt(transcript), "--model", _PLAN_MODEL],
+                capture_output=True, text=True, timeout=120,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            print(f"  emux: claude -p failed: {e}", file=sys.stderr)
+            return None
+        plan = _parse_plan(proc.stdout or "")
+        if plan is None:
+            print(f"  emux: no usable plan in model reply: {(proc.stdout or proc.stderr or '')[:300]}",
+                  file=sys.stderr)
+            return None
+
+        if plan.get("question"):
+            print(f"\n  {plan['question']}")
+            answer = input("  > ").strip()
+            if not answer:
+                print("  aborted.")
+                return None
+            transcript.append(f"planner asked: {plan['question']}")
+            transcript.append(f"user: {answer}")
+            continue
+
+        print("\n  ━━ mission plan ━━")
+        print(f"  summary   {plan.get('summary', '?')}")
+        print(f"  name      {plan.get('name', '?')}")
+        print(f"  host      {plan.get('host') or 'local'}")
+        print(f"  cwd       {plan.get('cwd') or '(default)'}")
+        print(f"  command   {plan.get('command', '?')}")
+        answer = input("\n  start it? [Y/n, or type changes]: ").strip()
+        if answer.lower() in {"", "y", "yes"}:
+            return plan
+        if answer.lower() in {"n", "no", "q"}:
+            print("  aborted.")
+            return None
+        transcript.append(f"planner proposed: {json.dumps(plan)}")
+        transcript.append(f"user feedback: {answer}")
+
+
+def cmd_new_mission() -> int:
+    """`n` in the TUI: describe a mission, confirm the AI's spec, spawn it."""
+    plan = _new_mission_chat()
+    if plan is None:
+        return 0
+    if not plan.get("name") or not plan.get("command"):
+        print("emux: plan is missing a name or command; not starting.", file=sys.stderr)
+        return 1
+
+    from .server import tmux_spawn
+
+    result = asyncio.run(tmux_spawn(
+        name=str(plan["name"]),
+        command=str(plan["command"]),
+        host=plan.get("host") or None,
+        cwd=plan.get("cwd") or None,
+        description=plan.get("summary") or None,
+        tags=["mission"],
+    ))
+    if not result.get("ok"):
+        print(f"emux: spawn failed: {result.get('stderr') or result.get('error')}", file=sys.stderr)
+        return 1
+    where = f" on {result['host']}" if result.get("host") else ""
+    print(f"\n  started '{result['name']}'{where}.")
+    attach = input("  attach now? [Y/n]: ").strip().lower()
+    if attach in {"", "y", "yes"}:
+        os.execvp("/bin/sh", ["/bin/sh", "-c",
+                              _head_attach_command(result["session"], result.get("host"))])
+    return 0
+
+
 def cmd_picker() -> int:
     """Run the textual TUI picker, then dispatch the user's selection."""
     if _resolve_tmux() is None:
@@ -128,6 +256,8 @@ def cmd_picker() -> int:
         if attach in {"", "y"}:
             _attach_to_session(reg[1])
         return 0
+    if action == "new_mission":
+        return cmd_new_mission()
     if action == "unregister":
         registry = _load_registry()
         if result["name"] in registry:
@@ -816,6 +946,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd")
 
     sub.add_parser("mcp", help="start the emux MCP server (stdio)")
+    sub.add_parser("new", help="new mission: describe what you want, confirm the AI's session spec, start it (same as 'n' in the TUI)")
     sub.add_parser("ls", help="print registered + live sessions (non-interactive)")
 
     p_ask = sub.add_parser("ask", help="send a prompt to an AI in a tmux session, wait for it to settle, print the reply")
@@ -946,6 +1077,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         from .web import run_web
         return run_web(host=args.host, port=args.port, open_browser=args.open)
+    if args.cmd == "new":
+        return cmd_new_mission()
     if args.cmd == "ls":
         return cmd_ls()
     if args.cmd == "ask":

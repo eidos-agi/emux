@@ -2,6 +2,11 @@
 
 All notable changes to Emux are documented here.
 
+## v0.60.0 - 2026-07-14
+
+- **New mission: `n` in the TUI / `emux new`.** Describe what you want in plain English ("look into my finances on mac-mini"); a planner (`claude -p`, fixed-cost, model via `$EMUX_PLAN_MODEL`, default sonnet) turns it into a session spec — name, host (it knows the registry's remote hosts), cwd, exact launch command — and asks at most one clarifying question per turn. Nothing runs until you confirm the exact plan; free-text feedback refines it. On confirm it spawns via the existing `tmux_spawn` (local or remote), registers under the mission name with the summary as description, and offers to attach.
+
+
 ## v0.59.1 - 2026-07-14
 
 - **Fix: an answered gate lingering in scrollback no longer re-escalates.** Found by the v0.59.0 live test (fraude fake claude, zero tokens): after the policy engine answered a gate, the dialog text still in the capture re-triggered detection and the one-attempt guard escalated a gate that was already resolved. Gate detection for escalation now judges the LIVE BOTTOM (last 10 non-blank lines) — the same window the needs-you flag uses — so detection and escalation agree on what "gated" means.

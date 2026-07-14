@@ -110,6 +110,11 @@ def _build_groups() -> dict[str, list[dict[str, Any]]]:
             })
 
     groups["actions"].append({
+        "kind": "new_mission",
+        "label": "(new mission)",
+        "detail": "press n — describe what you want; an AI specs the session, you confirm, it starts",
+    })
+    groups["actions"].append({
         "kind": "register_new",
         "label": "(register new)",
         "detail": "press enter to register a new session by name + tmux id",
@@ -177,6 +182,17 @@ def _build_preview_for(item: dict[str, Any] | None) -> str:
         lines.append("  [bold]enter[/bold]   attach (you'll be in tmux until you detach)")
         lines.append("  [bold]r[/bold]       register this session under a friendly name")
 
+    elif kind == "new_mission":
+        lines.append("[bold cyan]New mission[/bold cyan]")
+        lines.append("[dim]tell an AI what you want; it specs the session, you confirm, it starts[/dim]")
+        lines.append("")
+        lines.append("[bold]Press enter (or n)[/bold] to describe a mission, e.g.:")
+        lines.append("  • look into my finances on mac-mini")
+        lines.append("  • fix the failing tests in ~/repos-eidos-agi/helios")
+        lines.append("")
+        lines.append("The AI proposes name / host / directory / command;")
+        lines.append("nothing runs until you confirm the exact plan.")
+
     elif kind == "register_new":
         lines.append("[bold cyan]Register a new session[/bold cyan]")
         lines.append("[dim]name an existing tmux session for future emux invocations[/dim]")
@@ -204,6 +220,7 @@ def run_tui() -> dict[str, Any] | None:
       {"action": "attach", "session": "..."}
       {"action": "register_then_attach", "default_session": "..."}
       {"action": "register_new"}
+      {"action": "new_mission"}
       {"action": "unregister", "name": "..."}
 
     The caller is responsible for actually performing the side effect.
@@ -305,9 +322,10 @@ def run_tui() -> dict[str, Any] | None:
                     f"   {num}  [cyan]○[/cyan]  [bold]{_esc(item['session'])}[/bold]  [dim]unregistered[/dim]",
                     markup=True,
                 )
-            elif kind == "register_new":
+            elif kind in ("register_new", "new_mission"):
+                glyph = "✦" if kind == "new_mission" else "⊕"
                 yield Static(
-                    f"   {num}  [cyan]⊕[/cyan]  [bold]{_esc(item['label'])}[/bold]  [dim]{_esc(item['detail'])}[/dim]",
+                    f"   {num}  [cyan]{glyph}[/cyan]  [bold]{_esc(item['label'])}[/bold]  [dim]{_esc(item['detail'])}[/dim]",
                     markup=True,
                 )
 
@@ -331,6 +349,7 @@ def run_tui() -> dict[str, Any] | None:
 
         BINDINGS = [
             Binding("enter", "primary", "Attach"),
+            Binding("n", "new_mission", "New mission"),
             Binding("r", "register", "Register"),
             Binding("u", "unregister", "Unregister"),
             Binding("R", "rescan", "Rescan"),
@@ -479,6 +498,13 @@ def run_tui() -> dict[str, Any] | None:
             elif kind == "register_new":
                 result_holder["result"] = {"action": "register_new"}
                 self.exit()
+            elif kind == "new_mission":
+                result_holder["result"] = {"action": "new_mission"}
+                self.exit()
+
+        def action_new_mission(self) -> None:
+            result_holder["result"] = {"action": "new_mission"}
+            self.exit()
 
         def action_register(self) -> None:
             payload = self._selected_payload()
