@@ -102,7 +102,8 @@ Unregistered live tmux
    3  ○  experiments  unregistered
 
 Actions
-   4  ⊕  (register new)
+   4  ✦  (new mission)
+   5  ⊕  (register new)
 ```
 
 - **Registered + live** entries attach immediately on selection (`tmux attach -t <session>`).
@@ -113,6 +114,45 @@ Actions
 The picker is a terminal UI, not a terminal owner. Sessions are registered with
 Emux for discovery and attached via Emux when selected. tmux still owns the
 session lifecycle.
+
+## New mission (`Ctrl-N` / `emux new`)
+
+Describe what you want in plain English; an AI turns it into a session spec
+you confirm before anything runs:
+
+```
+  what do you want to do? check on dally on my mac-mini
+
+  ━━ mission plan ━━
+  summary   Check the status of "dally" on the Mac mini and report back.
+  name      check-dally
+  host      Daniels-Mac-mini.local
+  cwd       (default)
+  command   claude 'Check on "dally" …' --permission-mode bypassPermissions
+  perms     bypassPermissions (fully unattended — no approval prompts)
+  path      this terminal → ssh Daniels-Mac-mini.local → tmux new-session 'check-dally' → claude
+  attach    ssh -t Daniels-Mac-mini.local 'tmux attach -t check-dally'
+
+  start it? [Y/n, or type changes]:
+```
+
+- The planner runs on `claude -p` (fixed-cost; model via `$EMUX_PLAN_MODEL`,
+  default sonnet) and knows the registry's remote hosts, so "on my mac-mini"
+  resolves to a real ssh destination. It asks at most one clarifying question
+  per turn; free-text at the confirm prompt refines the plan instead of
+  starting it.
+- The `path` line is the hop chain, derived from the plan fields — never model
+  prose. `perms` is picked by the planner (default / acceptEdits /
+  bypassPermissions) and appended to claude commands by emux itself.
+- On confirm, the mission spawns via `tmux_spawn` (local or remote), registers
+  under the mission name, prints **first light** — the pane after 2.5s, so a
+  dead launch (claude not on PATH, not logged in, folder-trust dialog) is
+  caught immediately — and offers to attach.
+- If the mission name is already a live session, emux never silently kills it:
+  unique-suffix by default (`check-dally-2`), replace only on request.
+
+Same flow from the shell: `emux new`. In the TUI, `Ctrl-N` works from anywhere
+(plain `n` too, once the session list has focus).
 
 ## MCP server
 
