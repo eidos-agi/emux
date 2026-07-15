@@ -802,3 +802,17 @@ def test_plan_failover_facade(monkeypatch):
     # a single configured account can't fail over
     monkeypatch.setattr(web, "_plans", lambda: [{"name": "d", "config_dir": "/x/.claude"}])
     assert web._switch_plan("s", dry_run=True)["ok"] is False
+
+
+def test_machines_view_is_wired_into_the_page():
+    """The MACHINES browse view: a tab, a key, a renderer, and the adopt call —
+    all present in the served page, all pointing at endpoints that exist."""
+    from emux import web
+    page = web.PAGE
+    assert 'data-mode="machines"' in page          # the tab
+    assert '"5":"machines"' in page                # the keyboard shortcut
+    assert "function renderMachines()" in page     # the renderer
+    assert "mvAdopt" in page and '"/api/adopt"' in page   # attach goes through adopt
+    # every endpoint the view calls is a real route
+    for ep in ("/api/hosts", "/api/dirs?host=", "/api/peek?session=", "/api/adopt"):
+        assert ep in page

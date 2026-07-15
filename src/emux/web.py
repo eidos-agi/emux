@@ -2170,6 +2170,17 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .dirrow:hover{background:rgba(255,176,0,.07);color:var(--amber-dim)}
 .dirrow.on{background:var(--amber);color:var(--on-accent);font-weight:700}
 .dirrow .ai{opacity:.75;margin-left:6px}
+/* machines view */
+#mvhosts{display:flex;gap:6px;flex-wrap:wrap;padding:10px 2px}
+#mverr{color:var(--red,#f66);font-size:11px;min-height:14px;padding:0 2px}
+#mvlist{max-width:900px}
+#mvlist .dirrow{display:flex;align-items:center;padding:8px 10px}
+#mvlist .dirrow .meta{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mvadopt{margin-left:10px;flex-shrink:0}
+.mvin{margin-left:10px;flex-shrink:0;font-size:10px;opacity:.6;border:1px solid var(--line);border-radius:9px;padding:2px 8px}
+.mvpeek{white-space:pre-wrap;font-size:10px;line-height:1.5;color:var(--text-dim);
+  border:1px solid var(--line);border-top:none;margin:0 0 6px;padding:8px 10px;
+  max-height:220px;overflow:auto;background:rgba(0,0,0,.25)}
 #newbody .chk{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--amber-dim);margin-top:8px}
 #newbody .chk input{width:auto}
 #newsummary{margin-right:auto;font-size:11px;color:var(--text-dim);
@@ -2426,6 +2437,7 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
       <button class="tab" data-mode="groups">GROUPS</button>
       <button class="tab" data-mode="activity">ACTIVITY</button>
       <button class="tab" data-mode="flow">FLOW</button>
+      <button class="tab" data-mode="machines">MACHINES</button>
     </div>
   </div>
   <div id="views"></div>
@@ -2579,7 +2591,7 @@ function lastSummary(s){return s.summary||(metaCache[s.name]&&metaCache[s.name].
 function goneAge(s){const m=metaCache[s.name];if(!m)return"";const sec=Math.round((Date.now()-m.ts)/1000);return sec<60?sec+"s":Math.round(sec/60)+"m";}
 let activeCompany=localStorage.getItem("emux_company")||"";   // restore the skin you were in
 let flowSig=null, flowPre={}, flowBox={};   // flow view: rebuild only on topology change, else update panes in place
-const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW"};
+const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW",machines:"MACHINES"};
 
 // ---- deep links: the view, filters, and open session live in the URL, so any
 // state is bookmarkable/shareable and survives reload/back-forward. ----
@@ -3094,11 +3106,71 @@ function renderFlow(){
   v.appendChild(hint);
 }
 
+// ---- MACHINES view: every reachable box → its live tmuxes → one-click adopt.
+// The modal's cascade answers "start/resume ONE thing"; this answers "what is
+// running out there, and pull it in". Same endpoints, browse-first shape.
+const MV={host:"",hosts:[],rows:[],loading:false,peek:"",peekText:""};
+async function mvPickHost(h){
+  MV.host=h;MV.rows=[];MV.peek="";MV.loading=true;renderMachines();
+  const r=await api("/api/dirs?host="+encodeURIComponent(h));
+  if(MV.host!==h)return;                    // clicked away while ssh probed
+  MV.loading=false;MV.rows=(r.ok&&r.running)?r.running:[];renderMachines();
+}
+async function mvPeek(s){
+  if(MV.peek===s){MV.peek="";renderMachines();return;}   // toggle off
+  MV.peek=s;MV.peekText="reading "+s+"…";renderMachines();
+  const r=await api("/api/peek?session="+encodeURIComponent(s)
+                    +"&host="+encodeURIComponent(MV.host));
+  if(MV.peek!==s)return;
+  MV.peekText=r.ok?(r.content||"(blank)"):("could not read: "+(r.error||""));
+  renderMachines();
+}
+async function mvAdopt(s,btn){
+  btn.disabled=true;btn.textContent="ATTACHING…";
+  const r=await api("/api/adopt",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session:s,host:MV.host,name:s,
+                         description:"adopted from "+MV.host+" via machines view",
+                         tags:["adopted",MV.host]})});
+  if(!r.ok){btn.disabled=false;btn.textContent="⇤ ATTACH";
+    $("#mverr").textContent=r.error||"adopt failed";return;}
+  const row=MV.rows.find(x=>x.name===s);if(row)row.adopted=true;
+  renderMachines();refresh();               // it's in emux now — sidebar/grid pick it up
+}
+function renderMachines(){
+  const v=$("#views");
+  if(mode!=="machines")return;
+  const chips='<div id="mvhosts">'+MV.hosts.map(h=>
+    '<span class="hchip'+(h===MV.host?" on":"")+'" data-h="'+esc(h)+'">'+esc(h)+'</span>').join("")
+    +'</div><div id="mverr"></div>';
+  let body="";
+  if(!MV.host)body='<div id="empty"><div class="glyph">▚▞</div><div>pick a machine</div></div>';
+  else if(MV.loading)body='<div id="empty"><div class="glyph">▚▞</div><div>looking at '+esc(MV.host)+'…</div></div>';
+  else if(!MV.rows.length)body='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions on '+esc(MV.host)+'</div></div>';
+  else body='<div id="mvlist">'+MV.rows.map(s=>
+    '<div class="dirrow'+(s.name===MV.peek?" on":"")+'" data-s="'+esc(s.name)+'">'+esc(s.name)
+    +'<span class="meta">'+ago(s.age_sec)+' · '+s.windows+'w · '+esc(s.path)
+    +(s.attached?' · attached':'')+'</span>'
+    +(s.adopted?'<span class="mvin">in emux</span>'
+               :'<button class="act mvadopt" data-a="'+esc(s.name)+'">⇤ ATTACH</button>')
+    +'</div>'
+    +(s.name===MV.peek?'<pre class="mvpeek">'+esc(MV.peekText)+'</pre>':"")).join("")+'</div>';
+  v.innerHTML=chips+body;
+  v.querySelectorAll("#mvhosts .hchip").forEach(el=>el.onclick=()=>mvPickHost(el.dataset.h));
+  v.querySelectorAll(".dirrow[data-s]").forEach(el=>el.onclick=()=>mvPeek(el.dataset.s));
+  v.querySelectorAll(".mvadopt").forEach(el=>el.onclick=e=>{
+    e.stopPropagation();mvAdopt(el.dataset.a,el);});
+}
+async function openMachines(){
+  if(!MV.hosts.length){const r=await api("/api/hosts");if(r.ok)MV.hosts=r.hosts||[];}
+  renderMachines();
+}
+
 function render(){
   if(mode==="grid")renderGrid();
   else if(mode==="groups")renderGroups();
   else if(mode==="activity")renderActivity();
   else if(mode==="flow")renderFlow();
+  else if(mode==="machines")openMachines();
 }
 
 function pinned(){const c=$("#chat");return c.scrollHeight-c.scrollTop-c.clientHeight<60;}
@@ -3613,7 +3685,7 @@ document.addEventListener("keydown",e=>{
   if($("#modal").classList.contains("open")){if(e.key==="Escape")closeModal();return;}
   if(e.target.id==="filter"||e.target.id==="input"||e.target.id==="modalinput")return;
   if(e.target.closest&&e.target.closest("#newmodal"))return;
-  const map={"1":"grid","2":"groups","3":"activity","4":"flow"};
+  const map={"1":"grid","2":"groups","3":"activity","4":"flow","5":"machines"};
   if(map[e.key])setMode(map[e.key]);
 });
 // resume + clear title flash when tab refocuses (#13 #20)

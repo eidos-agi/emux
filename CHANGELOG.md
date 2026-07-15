@@ -2,6 +2,11 @@
 
 All notable changes to Emux are documented here.
 
+## v0.62.0 - 2026-07-15
+
+- **MACHINES view.** A fifth tab (key `5`) in the web daemon: every reachable machine (local + ssh-config aliases + hosts already in the registry) as a chip; click one to list its live tmux sessions (age, windows, cwd, attached), click a row to peek inside without touching it, and one-click **⇤ ATTACH** to adopt any session into emux. Same endpoints the new-session cascade uses (`/api/hosts`, `/api/dirs`, `/api/peek`, `/api/adopt`) — browse-first instead of intent-first.
+
+
 ## v0.61.0 - 2026-07-14
 
 - **Missions can actually run unattended.** The planner now picks a `permission_mode` (default / acceptEdits / bypassPermissions — most autonomous that's safe for the mission); emux appends `--permission-mode` to claude commands deterministically (never trusts model-written flags, never doubles an existing flag). The confirm screen shows a `perms` line with what the mode means.
