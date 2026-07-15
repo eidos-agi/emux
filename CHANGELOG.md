@@ -2,6 +2,14 @@
 
 All notable changes to Emux are documented here.
 
+## v0.63.0 - 2026-07-15
+
+- **MACHINES view becomes ORPHANS — the un-f'ing tool.** Key `5` now hunts orphans: tmux sessions emux cannot see yet, per machine, rendered in the grid look (live pane preview, age, cwd, unsent-prompt warning) with one-click **⇤ ATTACH**. Adopted sessions never appear; an empty machine says "every tmux is in emux ✓".
+- **Machines are a filter facet.** The sidebar filter bar grows ⌨ machine chips (local / rentamac / …, with counts) that filter every view, and each grid tile of a remote session carries its ⌨ host tag.
+- `/api/peek` accepts `lines=` (1–50).
+- Fixed: a removed view name saved in localStorage (e.g. `machines`) produced a blank screen; unknown modes now fall back to grid. The 2s poll no longer rebuilds the orphans view mid-click.
+
+
 ## v0.62.1 - 2026-07-15
 
 - **Hancock approvals show their age.** Every pending request in the tray now carries "Nm ago" (hover for the exact timestamp); anything older than an hour is flagged red as `stale?`. An approval with no time element is undecidable — fresh ask or leftover?

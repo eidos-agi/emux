@@ -804,15 +804,19 @@ def test_plan_failover_facade(monkeypatch):
     assert web._switch_plan("s", dry_run=True)["ok"] is False
 
 
-def test_machines_view_is_wired_into_the_page():
-    """The MACHINES browse view: a tab, a key, a renderer, and the adopt call —
-    all present in the served page, all pointing at endpoints that exist."""
+def test_orphans_view_is_wired_into_the_page():
+    """The ORPHANS view (un-f'ing tool): a tab, a key, a grid-look renderer that
+    shows only UNADOPTED tmuxes, and one-click adopt — plus the machine facet
+    in the filter bar and on tiles."""
     from emux import web
     page = web.PAGE
-    assert 'data-mode="machines"' in page          # the tab
-    assert '"5":"machines"' in page                # the keyboard shortcut
-    assert "function renderMachines()" in page     # the renderer
+    assert 'data-mode="orphans"' in page           # the tab
+    assert '"5":"orphans"' in page                 # the keyboard shortcut
+    assert "function renderOrphans()" in page and "orphanTile" in page
+    assert "filter(s=>!s.adopted)" in page         # orphans = NOT yet in emux
     assert "mvAdopt" in page and '"/api/adopt"' in page   # attach goes through adopt
+    # machines are a filter facet (⌨ chips) and a tag on tiles
+    assert "hostchip" in page and "activeHost" in page and "hosttag" in page
     # every endpoint the view calls is a real route
     for ep in ("/api/hosts", "/api/dirs?host=", "/api/peek?session=", "/api/adopt"):
         assert ep in page

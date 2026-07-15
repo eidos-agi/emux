@@ -2170,17 +2170,15 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .dirrow:hover{background:rgba(255,176,0,.07);color:var(--amber-dim)}
 .dirrow.on{background:var(--amber);color:var(--on-accent);font-weight:700}
 .dirrow .ai{opacity:.75;margin-left:6px}
-/* machines view */
+/* orphans view + machine facet */
 #mvhosts{display:flex;gap:6px;flex-wrap:wrap;padding:10px 2px}
-#mverr{color:var(--red,#f66);font-size:11px;min-height:14px;padding:0 2px}
-#mvlist{max-width:900px}
-#mvlist .dirrow{display:flex;align-items:center;padding:8px 10px}
-#mvlist .dirrow .meta{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.mvadopt{margin-left:10px;flex-shrink:0}
-.mvin{margin-left:10px;flex-shrink:0;font-size:10px;opacity:.6;border:1px solid var(--line);border-radius:9px;padding:2px 8px}
-.mvpeek{white-space:pre-wrap;font-size:10px;line-height:1.5;color:var(--text-dim);
-  border:1px solid var(--line);border-top:none;margin:0 0 6px;padding:8px 10px;
-  max-height:220px;overflow:auto;background:rgba(0,0,0,.25)}
+#mverr{color:var(--stale);font-size:11px;min-height:14px;padding:0 2px}
+.hosttag{font-size:9px;color:var(--text-dim);border:1px solid var(--line);
+  border-radius:8px;padding:1px 6px;margin-left:6px;white-space:nowrap;flex-shrink:0}
+.tile.orph header{gap:6px}
+.oattach{margin-left:auto;flex-shrink:0}
+.owhy{font-size:9px;color:var(--text-dim);padding:4px 10px 8px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #newbody .chk{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--amber-dim);margin-top:8px}
 #newbody .chk input{width:auto}
 #newsummary{margin-right:auto;font-size:11px;color:var(--text-dim);
@@ -2439,7 +2437,7 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
       <button class="tab" data-mode="groups">GROUPS</button>
       <button class="tab" data-mode="activity">ACTIVITY</button>
       <button class="tab" data-mode="flow">FLOW</button>
-      <button class="tab" data-mode="machines">MACHINES</button>
+      <button class="tab" data-mode="orphans">ORPHANS</button>
     </div>
   </div>
   <div id="views"></div>
@@ -2586,14 +2584,14 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
 const $=s=>document.querySelector(s);
 const SVGNS="http://www.w3.org/2000/svg";
 let mode="grid", current=null, grid=[], chatTimer=null, gridTimer=null, screenEl=null;
-let filterStr="", flashOn=false, activeTag="";
+let filterStr="", flashOn=false, activeTag="", activeHost="";
 const metaCache={};   // last-live summary/agent per session name, so a GONE session still shows what it last was
 function cacheMeta(){grid.forEach(s=>{if(s.live&&s.summary)metaCache[s.name]={summary:s.summary,agent:s.agent,state:s.state,ts:Date.now()};});}
 function lastSummary(s){return s.summary||(metaCache[s.name]&&metaCache[s.name].summary)||"";}
 function goneAge(s){const m=metaCache[s.name];if(!m)return"";const sec=Math.round((Date.now()-m.ts)/1000);return sec<60?sec+"s":Math.round(sec/60)+"m";}
 let activeCompany=localStorage.getItem("emux_company")||"";   // restore the skin you were in
 let flowSig=null, flowPre={}, flowBox={};   // flow view: rebuild only on topology change, else update panes in place
-const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW",machines:"MACHINES"};
+const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW",orphans:"ORPHANS"};
 
 // ---- deep links: the view, filters, and open session live in the URL, so any
 // state is bookmarkable/shareable and survives reload/back-forward. ----
@@ -2660,6 +2658,7 @@ function baseMatch(s){
     +lastSummary(s)+" "+(s.path||s.cwd||"")+" "+(s.tags||[]).join(" ")).toLowerCase():"";
   return (!filterStr||hay.includes(filterStr))
   &&(!activeTag||(s.tags||[]).includes(activeTag))
+  &&(!activeHost||(s.host||"local")===activeHost)
   &&(!activeCompany||(s.company||{}).company===activeCompany);}
 
 // TERMINALS grouped into connected components by the `manages` edges (undirected).
@@ -2677,7 +2676,7 @@ function components(){
 // the WHOLE group shows — even members that aren't in the filtered set — so a
 // manager and everything it manages stay together on screen.
 function shown(){
-  if(!(filterStr||activeTag||activeCompany))return grid.slice();
+  if(!(filterStr||activeTag||activeCompany||activeHost))return grid.slice();
   const comp=components(),hot=new Set();
   grid.forEach(s=>{if(baseMatch(s))hot.add(comp[s.name]);});
   return grid.filter(s=>baseMatch(s)||hot.has(comp[s.name]));
@@ -2730,9 +2729,16 @@ function renderTagbar(){
     const e=comp.get(c.company)||{label:c.label,color:c.color,n:0};e.n++;comp.set(c.company,e);}});
   const counts=new Map();
   grid.forEach(s=>(s.tags||[]).forEach(t=>counts.set(t,(counts.get(t)||0)+1)));
-  if(!comp.size&&!counts.size&&!activeTag&&!activeCompany){box.innerHTML="";return;}
+  // machines are a facet too — every session runs SOMEWHERE
+  const hosts=new Map();
+  grid.forEach(s=>{const h=s.host||"local";hosts.set(h,(hosts.get(h)||0)+1);});
+  if(!comp.size&&!counts.size&&!activeTag&&!activeCompany&&!activeHost){box.innerHTML="";return;}
   let html="";
-  if(activeTag||activeCompany)html+='<span class="tagchip clr" data-clear="1">✕ all</span>';
+  if(activeTag||activeCompany||activeHost)html+='<span class="tagchip clr" data-clear="1">✕ all</span>';
+  if(hosts.size>1||activeHost)[...hosts.keys()].sort().forEach(h=>{
+    html+='<span class="tagchip hostchip'+(h===activeHost?" on":"")+'" data-host="'+esc(h)+'">⌨ '+esc(h)
+      +'<span class="cnt">'+hosts.get(h)+'</span></span>';
+  });
   [...comp.keys()].sort().forEach(k=>{const e=comp.get(k);
     const on=k===activeCompany;
     html+='<span class="cochip'+(on?" on":"")+'" data-co="'+k+'" '
@@ -2744,7 +2750,9 @@ function renderTagbar(){
       +'<span class="cnt">'+counts.get(t)+'</span></span>';
   });
   box.innerHTML=html;
-  box.querySelectorAll("[data-clear]").forEach(el=>el.onclick=()=>{activeTag="";activeCompany="";applyFilters();});
+  box.querySelectorAll("[data-clear]").forEach(el=>el.onclick=()=>{activeTag="";activeCompany="";activeHost="";applyFilters();});
+  box.querySelectorAll(".hostchip").forEach(el=>el.onclick=()=>{
+    activeHost=el.dataset.host===activeHost?"":el.dataset.host;applyFilters();});
   box.querySelectorAll(".cochip").forEach(el=>el.onclick=()=>{
     activeCompany=el.dataset.co===activeCompany?"":el.dataset.co;applyFilters();});
   box.querySelectorAll(".tagchip[data-tag]").forEach(el=>el.onclick=()=>{
@@ -2752,6 +2760,7 @@ function renderTagbar(){
 }
 
 function setMode(m){
+  if(m!=="chat"&&!BASE_TAB[m])m="grid";   // a renamed/removed view saved in localStorage → blank screen
   mode=m;current=(m==="chat")?current:null;
   if(m!=="chat")localStorage.setItem("emux_view",m);   // remember last view (#6)
   $("#chat").style.display=(m==="chat")?"flex":"none";
@@ -2887,6 +2896,7 @@ function makeTile(s){
   const ag=s.agent||{glyph:"",label:""};
   const agbadge=(s.live&&ag.label&&ag.label!=="—")?'<span class="agentbadge">'+agentHTML(s)+'</span>':"";
   h.innerHTML='<span class="lind">'+liveDot(s)+'</span><span class="nm">'+s.name+att+'</span>'
+    +(s.host?'<span class="hosttag">⌨ '+esc(s.host)+'</span>':"")   // remote: say where it lives
     +companyHTML(s)+agbadge
     +'<span class="age '+(s.live?ageClass(s.last_change_age):"t-old")+'">'+(s.live?ageLabel(s.last_change_age):"gone")+'</span>'
     +statePip(s);
@@ -3108,63 +3118,76 @@ function renderFlow(){
   v.appendChild(hint);
 }
 
-// ---- MACHINES view: every reachable box → its live tmuxes → one-click adopt.
-// The modal's cascade answers "start/resume ONE thing"; this answers "what is
-// running out there, and pull it in". Same endpoints, browse-first shape.
-const MV={host:"",hosts:[],rows:[],loading:false,peek:"",peekText:""};
+// ---- ORPHANS view: tmux sessions emux does NOT know about yet, per machine,
+// in the grid look — pane preview + one-click ⇤ ATTACH. This is the un-f'ing
+// tool: when sessions exist that the control room can't see, they show up here.
+const MV={host:"",hosts:[],rows:[],loading:false,gen:0};
 async function mvPickHost(h){
-  MV.host=h;MV.rows=[];MV.peek="";MV.loading=true;renderMachines();
+  MV.host=h;MV.rows=[];MV.loading=true;const gen=++MV.gen;renderOrphans();
   const r=await api("/api/dirs?host="+encodeURIComponent(h));
-  if(MV.host!==h)return;                    // clicked away while ssh probed
-  MV.loading=false;MV.rows=(r.ok&&r.running)?r.running:[];renderMachines();
-}
-async function mvPeek(s){
-  if(MV.peek===s){MV.peek="";renderMachines();return;}   // toggle off
-  MV.peek=s;MV.peekText="reading "+s+"…";renderMachines();
-  const r=await api("/api/peek?session="+encodeURIComponent(s)
-                    +"&host="+encodeURIComponent(MV.host));
-  if(MV.peek!==s)return;
-  MV.peekText=r.ok?(r.content||"(blank)"):("could not read: "+(r.error||""));
-  renderMachines();
+  if(gen!==MV.gen)return;                   // clicked away while ssh probed
+  MV.rows=(r.ok&&r.running?r.running:[]).filter(s=>!s.adopted);   // orphans only
+  MV.loading=false;renderOrphans();
+  // fill in the pane previews (parallel; remotes are ssh hops)
+  await Promise.all(MV.rows.slice(0,24).map(async s=>{
+    const p=await api("/api/peek?session="+encodeURIComponent(s.name)
+                      +"&host="+encodeURIComponent(h)+"&lines=14");
+    if(gen!==MV.gen)return;
+    s.content=p.ok?(p.content||""):("could not read: "+(p.error||""));
+    s.unsent=!!p.unsent;
+  }));
+  if(gen===MV.gen)renderOrphans();
 }
 async function mvAdopt(s,btn){
   btn.disabled=true;btn.textContent="ATTACHING…";
   const r=await api("/api/adopt",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({session:s,host:MV.host,name:s,
-                         description:"adopted from "+MV.host+" via machines view",
+                         description:"orphan adopted from "+MV.host,
                          tags:["adopted",MV.host]})});
   if(!r.ok){btn.disabled=false;btn.textContent="⇤ ATTACH";
     $("#mverr").textContent=r.error||"adopt failed";return;}
-  const row=MV.rows.find(x=>x.name===s);if(row)row.adopted=true;
-  renderMachines();refresh();               // it's in emux now — sidebar/grid pick it up
+  MV.rows=MV.rows.filter(x=>x.name!==s);    // no longer an orphan
+  renderOrphans();refresh();                // grid/sidebar pick it up
 }
-function renderMachines(){
+function orphanTile(s){
+  const t=document.createElement("div");t.className="tile orph";
+  const h=document.createElement("header");
+  h.innerHTML='<span class="lind"><span class="dot live"></span></span>'
+    +'<span class="nm">'+esc(s.name)+(s.attached?'<span class="att">●</span>':"")+'</span>'
+    +'<span class="hosttag">⌨ '+esc(MV.host)+'</span>'
+    +'<span class="age t-old">'+ago(s.age_sec)+'</span>';
+  const b=document.createElement("button");b.className="act oattach";b.textContent="⇤ ATTACH";
+  b.onclick=e=>{e.stopPropagation();mvAdopt(s.name,b);};
+  h.appendChild(b);
+  const p=document.createElement("pre");
+  if(s.content===undefined){p.className="empty";p.textContent="reading…";}
+  else if(s.content.trim()){p.textContent=s.content.replace(/\s+$/,"").split("\n").slice(-14).join("\n");}
+  else{p.className="empty";p.textContent="(blank pane)";}
+  const w=document.createElement("div");w.className="owhy";
+  w.textContent=(s.path||"")+(s.unsent?"  ·  ⚠ holds an unsent prompt":"");
+  t.appendChild(h);t.appendChild(p);t.appendChild(w);
+  return t;
+}
+function renderOrphans(){
   const v=$("#views");
-  if(mode!=="machines")return;
-  const chips='<div id="mvhosts">'+MV.hosts.map(h=>
-    '<span class="hchip'+(h===MV.host?" on":"")+'" data-h="'+esc(h)+'">'+esc(h)+'</span>').join("")
+  if(mode!=="orphans")return;
+  v.innerHTML='<div id="mvhosts">'+MV.hosts.map(h=>
+    '<span class="hchip'+(h===MV.host?" on":"")+'" data-h="'+esc(h)+'">⌨ '+esc(h)+'</span>').join("")
     +'</div><div id="mverr"></div>';
-  let body="";
-  if(!MV.host)body='<div id="empty"><div class="glyph">▚▞</div><div>pick a machine</div></div>';
-  else if(MV.loading)body='<div id="empty"><div class="glyph">▚▞</div><div>looking at '+esc(MV.host)+'…</div></div>';
-  else if(!MV.rows.length)body='<div id="empty"><div class="glyph">▚▞</div><div>no tmux sessions on '+esc(MV.host)+'</div></div>';
-  else body='<div id="mvlist">'+MV.rows.map(s=>
-    '<div class="dirrow'+(s.name===MV.peek?" on":"")+'" data-s="'+esc(s.name)+'">'+esc(s.name)
-    +'<span class="meta">'+ago(s.age_sec)+' · '+s.windows+'w · '+esc(s.path)
-    +(s.attached?' · attached':'')+'</span>'
-    +(s.adopted?'<span class="mvin">in emux</span>'
-               :'<button class="act mvadopt" data-a="'+esc(s.name)+'">⇤ ATTACH</button>')
-    +'</div>'
-    +(s.name===MV.peek?'<pre class="mvpeek">'+esc(MV.peekText)+'</pre>':"")).join("")+'</div>';
-  v.innerHTML=chips+body;
   v.querySelectorAll("#mvhosts .hchip").forEach(el=>el.onclick=()=>mvPickHost(el.dataset.h));
-  v.querySelectorAll(".dirrow[data-s]").forEach(el=>el.onclick=()=>mvPeek(el.dataset.s));
-  v.querySelectorAll(".mvadopt").forEach(el=>el.onclick=e=>{
-    e.stopPropagation();mvAdopt(el.dataset.a,el);});
+  if(!MV.host){v.insertAdjacentHTML("beforeend",
+    '<div id="empty"><div class="glyph">▚▞</div><div>pick a machine to hunt for orphans</div></div>');return;}
+  if(MV.loading){v.insertAdjacentHTML("beforeend",
+    '<div id="empty"><div class="glyph">▚▞</div><div>looking at '+esc(MV.host)+'…</div></div>');return;}
+  if(!MV.rows.length){v.insertAdjacentHTML("beforeend",
+    '<div id="empty"><div class="glyph">▚▞</div><div>no orphans on '+esc(MV.host)+' — every tmux is in emux ✓</div></div>');return;}
+  const g=document.createElement("div");g.className="tilegrid";
+  MV.rows.forEach(s=>g.appendChild(orphanTile(s)));
+  v.appendChild(g);
 }
-async function openMachines(){
+async function openOrphans(){
   if(!MV.hosts.length){const r=await api("/api/hosts");if(r.ok)MV.hosts=r.hosts||[];}
-  renderMachines();
+  renderOrphans();
 }
 
 function render(){
@@ -3172,7 +3195,9 @@ function render(){
   else if(mode==="groups")renderGroups();
   else if(mode==="activity")renderActivity();
   else if(mode==="flow")renderFlow();
-  else if(mode==="machines")openMachines();
+  // orphans is manual: the 2s poll must not rebuild it mid-click — enter once,
+  // then only host picks / adopts redraw it
+  else if(mode==="orphans"){if(!document.getElementById("mvhosts"))openOrphans();}
 }
 
 function pinned(){const c=$("#chat");return c.scrollHeight-c.scrollTop-c.clientHeight<60;}
@@ -3687,7 +3712,7 @@ document.addEventListener("keydown",e=>{
   if($("#modal").classList.contains("open")){if(e.key==="Escape")closeModal();return;}
   if(e.target.id==="filter"||e.target.id==="input"||e.target.id==="modalinput")return;
   if(e.target.closest&&e.target.closest("#newmodal"))return;
-  const map={"1":"grid","2":"groups","3":"activity","4":"flow","5":"machines"};
+  const map={"1":"grid","2":"groups","3":"activity","4":"flow","5":"orphans"};
   if(map[e.key])setMode(map[e.key]);
 });
 // resume + clear title flash when tab refocuses (#13 #20)
@@ -3962,7 +3987,12 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             if not sess:
                 self._json({"ok": False, "error": "missing_session"}, 400)
                 return
-            self._json(_peek_session(sess, None if h in ("", "local") else h))
+            try:
+                lines = max(1, min(50, int((q.get("lines") or ["12"])[0])))
+            except ValueError:
+                lines = 12
+            self._json(_peek_session(sess, None if h in ("", "local") else h,
+                                     lines=lines))
             return
         if url.path == "/api/dirs":
             # what exists ON the chosen machine — the cascade's 2nd level.
