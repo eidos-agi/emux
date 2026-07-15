@@ -2,6 +2,13 @@
 
 All notable changes to Emux are documented here.
 
+## v0.64.0 - 2026-07-15
+
+- **Hancock approvals are legible now.** The slide-out tray that threw itself open over the nav is replaced by an in-flow **browser-tab strip**: one tab per distinct approval, click to see detail, ✕ denies, a `×N` badge shows how many times it was filed. Each request leads with the **ask** (human-readable reason), shows **provenance chips** (`from emux:103 → terminal:…` — who asked, what approve will do), risk, and `filed ×N, first <age> ago` with a red **stale?** flag past an hour. A **peek** button jumps to the session the request is about. Approve/deny fire a fixed receipt toast.
+- **Duplicate storm killed at the source.** `_file_hancock_escalation` now checks Hancock's pending tray (read-only) before filing and skips if an identical `emux head <session>` request is already queued — survives daemon restarts, unlike the in-memory guard. The gate-clear rearm now requires 2 consecutive clear reads (anti-flap). Identical pendings also **coalesce** in the API into one group.
+- **Stale self-escalations auto-retract.** Each poll, emux denies its own `emux:<session>` requests once that session is no longer gated (and only for sessions it has actually observed). Never touches third-party requests.
+- Group-aware approve/deny: approving a coalesced tab runs once and retires the duplicates; denying clears the whole group.
+
 ## v0.63.0 - 2026-07-15
 
 - **MACHINES view becomes ORPHANS — the un-f'ing tool.** Key `5` now hunts orphans: tmux sessions emux cannot see yet, per machine, rendered in the grid look (live pane preview, age, cwd, unsent-prompt warning) with one-click **⇤ ATTACH**. Adopted sessions never appear; an empty machine says "every tmux is in emux ✓".

@@ -1175,6 +1175,7 @@ def _meta(session: str) -> dict[str, Any]:
 
 _ESCALATED: dict[str, str] = {}      # session -> the gate we've already escalated
 _AUTO_ANSWERED: dict[str, str] = {}  # session -> the gate we already auto-answered once
+_GATE_CLEAR: dict[str, int] = {}     # session -> consecutive-clear count (rearm gate on 2 reads)
 
 _GATE_POLICY_PATH = Path(os.environ.get("EMUX_GATE_POLICY")
                          or Path.home() / ".config" / "emux" / "gatepolicy.json")
@@ -1270,9 +1271,19 @@ def _escalate_if_gated(session: str, agent_key: str, content: str,
     # re-escalated an already-answered gate (found by the fraude live test).
     gate = adapters.gated(agent_key, _gate_tail(content))
     if not gate:
-        _ESCALATED.pop(session, None)       # gate cleared — rearm
-        _AUTO_ANSWERED.pop(session, None)
+        # gate reads clear; increment the consecutive-clear counter
+        n = _GATE_CLEAR.get(session, 0) + 1
+        if n >= 2:
+            # gate has read clear on 2 consecutive calls — rearm it
+            _ESCALATED.pop(session, None)
+            _AUTO_ANSWERED.pop(session, None)
+            _GATE_CLEAR.pop(session, None)
+        else:
+            _GATE_CLEAR[session] = n
         return
+    # a gate is up — any detection resets the consecutive-clear counter, so
+    # rearm needs 2 clears IN A ROW, not 2 clears scattered around flaps
+    _GATE_CLEAR.pop(session, None)
     if _ESCALATED.get(session) == gate:
         return                              # already escalated THIS gate
     # (0) the policy engine: a rule the operator wrote answers this gate with
@@ -1303,7 +1314,8 @@ def _hancock_db() -> Path:
 
 def _hancock_pending() -> list[dict[str, Any]]:
     """Read Hancock's pending signing tray straight from its SQLite db (read-only,
-    no CLI guard). This is what the human must approve/deny."""
+    no CLI guard). Coalesces rows by command so identical requests are grouped.
+    This is what the human must approve/deny."""
     import sqlite3
     db = _hancock_db()
     if not db.is_file():
@@ -1312,15 +1324,65 @@ def _hancock_pending() -> list[dict[str, Any]]:
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3)
         con.row_factory = sqlite3.Row
         rows = con.execute(
-            "SELECT id, command, cwd, reason, risk, created_at "
+            "SELECT id, command, cwd, reason, risk, created_at, meta, expires_at "
             "FROM request WHERE status='pending' AND deleted_at IS NULL "
             "ORDER BY created_at DESC LIMIT 50").fetchall()
         con.close()
     except sqlite3.Error:
         return []
-    return [{"id": r["id"], "command": r["command"], "cwd": r["cwd"],
-             "why": r["reason"] or "", "risk": r["risk"], "created_at": r["created_at"]}
-            for r in rows]
+
+    # Group rows by command (preserve newest-first order within each group)
+    groups_by_cmd: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        cmd = r["command"]
+        if cmd not in groups_by_cmd:
+            groups_by_cmd[cmd] = []
+        # parse meta JSON safely
+        meta: dict[str, Any] = {}
+        try:
+            meta = json.loads(r["meta"] or "{}")
+        except json.JSONDecodeError:
+            pass
+        groups_by_cmd[cmd].append({
+            "id": r["id"],
+            "command": cmd,
+            "cwd": r["cwd"],
+            "why": r["reason"] or "",
+            "risk": r["risk"],
+            "created_at": r["created_at"],
+            "expires_at": r["expires_at"],
+            "meta": meta,
+        })
+
+    # Build result: one dict per command group, preserving newest-first order
+    result = []
+    seen_cmds = set()
+    for r in rows:
+        cmd = r["command"]
+        if cmd in seen_cmds:
+            continue
+        seen_cmds.add(cmd)
+        group = groups_by_cmd[cmd]
+        # newest row in group is group[0] (DESC order); oldest is group[-1]
+        newest = group[0]
+        oldest = group[-1]
+        result.append({
+            "id": newest["id"],  # representative, for back-compat
+            "ids": [g["id"] for g in group],
+            "count": len(group),
+            "command": cmd,
+            "why": newest["why"],
+            "risk": newest["risk"],
+            "cwd": newest["cwd"],
+            "source": newest["meta"].get("source", ""),
+            "target": newest["meta"].get("target", ""),
+            "requester": newest["meta"].get("requester", ""),
+            "created_at": newest["created_at"],  # keep this key for existing UI
+            "first_created": oldest["created_at"],
+            "last_created": newest["created_at"],
+        })
+
+    return result
 
 
 def _hancock_approve(req_id: str) -> dict[str, Any]:
@@ -1374,7 +1436,23 @@ def _file_hancock_escalation(session: str, agent_key: str, gate: str) -> None:
     Best-effort and isolated: if hancock isn't installed or this fails, the NEED
     signal already fired — escalation degrades, it never breaks the poll."""
     import shutil
+    import sqlite3
     import subprocess
+
+    # Check for an existing pending request to avoid duplicate escalations
+    db = _hancock_db()
+    if db.is_file():
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3)
+            row = con.execute(
+                "SELECT 1 FROM request WHERE command=? AND status='pending' AND deleted_at IS NULL LIMIT 1",
+                (f"emux head {session}",)).fetchone()
+            con.close()
+            if row:
+                return  # identical pending request already queued
+        except sqlite3.Error:
+            pass  # on any error, fall through and file as before
+
     hancock = shutil.which("hancock")
     if not hancock:
         return
@@ -1391,6 +1469,51 @@ def _file_hancock_escalation(session: str, agent_key: str, gate: str) -> None:
             env=env, capture_output=True, text=True, timeout=15, check=False)
     except Exception:  # noqa: BLE001, S110
         pass
+
+
+def _retract_stale_escalations() -> None:
+    """Auto-retract emux self-escalations for sessions no longer gated.
+    A session is stale and should be retracted if:
+    1. It is NOT currently in _ESCALATED (no active gate).
+    2. It HAS been observed this process (in _ACTIVITY or _CACHE).
+    """
+    import sqlite3
+    db = _hancock_db()
+    if not db.is_file():
+        return
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3)
+        rows = con.execute(
+            "SELECT id, command, meta FROM request WHERE status='pending' "
+            "AND deleted_at IS NULL AND command LIKE 'emux head %'").fetchall()
+        con.close()
+    except sqlite3.Error:
+        return
+
+    # Identify which sessions have been observed
+    with _LOCK:
+        observed = set(_ACTIVITY.keys()) | set(_CACHE.keys())
+
+    for row in rows:
+        command = row[1]  # "emux head <sess>"
+        meta_json = row[2]
+        # Extract session from command
+        parts = command.split()
+        if len(parts) < 3 or parts[0] != "emux" or parts[1] != "head":
+            continue
+        sess = parts[2]
+        # Parse meta for source
+        try:
+            meta = json.loads(meta_json or "{}")
+        except json.JSONDecodeError:
+            meta = {}
+        source = meta.get("source", "")
+        # Check: source matches "emux:<sess>" format
+        if source != f"emux:{sess}":
+            continue
+        # Stale iff: NOT gated AND has been observed
+        if sess not in _ESCALATED and sess in observed:
+            _hancock_deny(row[0], reason="auto-retracted: session no longer gated")
 
 
 def _capture_and_observe(session: str, lines: int, host: str | None = None) -> str:
@@ -1612,6 +1735,11 @@ def poll_once(lines: int = 14) -> None:
             _CACHE.pop(dead, None)
             _GIST_CACHE.pop(dead, None)      # cache-bust: a dead session's gist is void
             _GIST_INFLIGHT.discard(dead)
+    # auto-retract stale escalations (never let this break the poll)
+    try:
+        _retract_stale_escalations()
+    except Exception:  # noqa: BLE001, S110
+        pass
 
 
 def grid_payload(lines: int = 14) -> dict[str, Any]:
@@ -1896,7 +2024,6 @@ body{
 #modalswitch.hot{border-color:#d99a00;color:#d99a00;font-weight:700}
 #modalswitch.armed{background:#a06800;color:#fff;border-color:#a06800;font-weight:700}
 body.costalert #costbanner{display:block;animation:costbannerpulse 1.4s ease-in-out infinite}
-body.costalert.hneedy #costbanner{top:38px}   /* stack under the hancock banner if both */
 @keyframes costbannerpulse{0%,100%{background:#a06800}50%{background:#c48400}}
 .needbadge{position:absolute;top:7px;right:7px;z-index:5;background:#c0392b;color:#fff;
   font-size:9.5px;font-weight:800;letter-spacing:.6px;padding:3px 7px;border-radius:5px;
@@ -2277,46 +2404,41 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 ::-webkit-scrollbar{width:8px}
 ::-webkit-scrollbar-thumb{background:var(--amber-faint)}
 ::-webkit-scrollbar-track{background:transparent}
-/* --- Hancock approvals --- */
+/* --- Hancock approvals: browser-tab strip (in-flow, never covers the nav) --- */
 #hbtn.hot{border-color:var(--amber);color:var(--amber);font-weight:700}
 #hbadge{background:#c0392b;color:#fff;border-radius:9px;padding:0 6px;margin-left:5px;font-size:11px;font-weight:700}
-#hbanner{display:none;position:fixed;top:0;left:0;right:0;z-index:120;
-  background:#c0392b;color:#fff;text-align:center;padding:9px 12px;font-weight:600;cursor:pointer;
-  box-shadow:0 2px 14px rgba(192,57,43,.5)}
-#hbanner u{text-underline-offset:3px}
-.hbell{display:inline-block}
-body.hneedy #hbanner{display:block;animation:hpulse 1.1s ease-in-out infinite}
-body.hneedy #hbanner .hbell{display:inline-block;animation:hshake .9s ease-in-out infinite;transform-origin:50% 0}
-body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2px}
-@keyframes hpulse{0%,100%{background:#c0392b}50%{background:#e05545}}
-@keyframes hshake{0%,100%{transform:rotate(0)}20%{transform:rotate(-16deg)}40%{transform:rotate(14deg)}60%{transform:rotate(-8deg)}80%{transform:rotate(6deg)}}
-#htray{position:fixed;top:0;right:0;bottom:0;width:380px;max-width:92vw;z-index:130;
-  background:var(--bg-raise);border-left:2px solid var(--amber);box-shadow:-8px 0 24px rgba(0,0,0,.35);
-  display:flex;flex-direction:column;transform:translateX(102%);transition:transform .28s cubic-bezier(.22,1,.36,1)}
-#htray.open{transform:translateX(0)}
-#htrayhead{padding:12px 14px;border-bottom:1px solid var(--line);color:var(--text);font-size:13px;letter-spacing:.5px}
-#htrayhead b{color:var(--amber)}
-#htrayclose{float:right;cursor:pointer;color:var(--text-dim);font-size:15px}
-#htoast{max-height:0;overflow:hidden;opacity:0;margin:0 10px;border-radius:6px;
-  font-size:12px;font-weight:600;transition:max-height .2s,opacity .2s,padding .2s;padding:0 12px}
-#htoast.show{max-height:44px;opacity:1;padding:9px 12px;margin-top:8px}
-#htoast.ok{background:rgba(46,160,67,.16);color:#2ea043;border:1px solid rgba(46,160,67,.4)}
-#htoast.err{background:rgba(192,57,43,.16);color:#e05545;border:1px solid rgba(192,57,43,.45)}
-.hreq.working{opacity:.55}
-#htraylist{overflow:auto;padding:10px;display:flex;flex-direction:column;gap:10px}
-.hempty{color:var(--text-dim);text-align:center;padding:30px 10px;font-size:13px}
-.hreq{background:var(--bg-card);border:1px solid var(--line);border-left:3px solid var(--stale);border-radius:8px;padding:10px}
-.hreq.r-high,.hreq.r-critical{border-left-color:#c0392b}
-.hreq.r-medium{border-left-color:var(--amber)}
-.hrisk{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);margin-bottom:4px}
-.hage{float:right;text-transform:none;letter-spacing:0;opacity:.75}
-.hage.stale{color:#e05545;opacity:1;font-weight:700}
-.hreq.r-high .hrisk,.hreq.r-critical .hrisk{color:#e05545}
-.hcmd{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--text);word-break:break-all;margin-bottom:5px}
-.hwhy{font-size:12px;color:var(--text-dim);margin-bottom:3px}
-.hcwd{font-size:11px;color:var(--text-dim);opacity:.7;font-family:ui-monospace,monospace;margin-bottom:7px}
-.hact{display:flex;gap:8px}
-.happrove,.hdeny{flex:1;padding:7px;border-radius:6px;cursor:pointer;font-weight:600;font-size:12px;border:1px solid}
+#happrovals{border-bottom:1px solid var(--line);background:var(--bg-raise)}
+#htabs{display:flex;gap:2px;padding:6px 8px 0;overflow-x:auto}
+.htab{display:flex;align-items:center;gap:6px;padding:6px 10px;font-size:11px;cursor:pointer;
+  color:var(--text-dim);background:var(--bg-card);border:1px solid var(--line);border-bottom:none;
+  border-radius:7px 7px 0 0;white-space:nowrap;position:relative;top:1px}
+.htab:hover{color:var(--text)}
+.htab.active{color:var(--text);background:var(--bg-raise);border-color:var(--amber);font-weight:700}
+.htab .hdot{width:7px;height:7px;border-radius:50%;background:var(--amber)}
+.htab.r-high .hdot,.htab.r-critical .hdot{background:#c0392b}
+.htab.r-low .hdot{background:var(--live)}
+.htab .hcount{background:var(--stale);color:#fff;border-radius:8px;padding:0 5px;font-size:9px;font-weight:700}
+.htab .hx{opacity:.5;font-size:11px;margin-left:2px}
+.htab .hx:hover{opacity:1;color:#c0392b}
+#hdetail{padding:12px 14px}
+.hask{font-size:14px;color:var(--text);font-weight:600;margin-bottom:8px}
+.hprov{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+.hchip2{font-size:11px;color:var(--amber-dim);border:1px solid var(--line);border-radius:9px;padding:2px 8px}
+.harrow{color:var(--text-dim)}
+.hmeta{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.hmeta.stale{color:#e05545;font-weight:700}
+.hcmd2{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--text-dim);opacity:.75;margin-bottom:10px;word-break:break-all}
+.hact2{display:flex;gap:8px}
+.hpeek{padding:7px 12px;border-radius:6px;cursor:pointer;font-weight:600;font-size:12px;
+  background:var(--bg-raise);color:var(--text);border:1px solid var(--text-dim)}
+.hpeek:hover{border-color:var(--amber);color:var(--amber)}
+#htoast{position:fixed;top:12px;left:50%;transform:translateX(-50%) translateY(-20px);
+  z-index:200;opacity:0;pointer-events:none;border-radius:8px;font-size:12px;font-weight:600;
+  padding:9px 16px;transition:opacity .2s,transform .2s}
+#htoast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#htoast.ok{background:#1f3d2a;color:#7ee2a8;border:1px solid #2ea043}
+#htoast.err{background:#3d1f1f;color:#f2a099;border:1px solid #c0392b}
+.happrove,.hdeny{padding:7px 12px;border-radius:6px;cursor:pointer;font-weight:600;font-size:12px;border:1px solid}
 .happrove{background:var(--amber);color:var(--on-accent);border-color:var(--amber)}
 .hdeny{background:var(--bg-raise);color:var(--text);border-color:var(--text-dim);font-weight:600}
 .hdeny:hover{background:#c0392b;color:#fff;border-color:#c0392b}
@@ -2394,13 +2516,7 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
 </style>
 </head>
 <body>
-<div id="hbanner" onclick="openHancock()"><span class="hbell">🔔</span> <b id="hbannern">0</b> need your signature — <u>review &amp; approve</u></div>
 <div id="costbanner" onclick="focusCost()">💸 <b id="costn">0</b> <span id="costword">session</span> hit a usage / cost limit — <u>review</u></div>
-<div id="htray">
-  <div id="htrayhead"><b>HANCOCK</b> · pending approvals <span id="htrayclose" onclick="closeHancock()">✕</span></div>
-  <div id="htoast"></div>
-  <div id="htraylist"></div>
-</div>
 <div id="setmodal" onclick="if(event.target===this)closeSettings()">
   <div id="setcard">
     <div id="sethead"><b>⚙ MODEL ROUTING</b><span onclick="closeSettings()" class="setx">✕</span></div>
@@ -2440,6 +2556,8 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
       <button class="tab" data-mode="orphans">ORPHANS</button>
     </div>
   </div>
+  <div id="happrovals" style="display:none"><div id="htabs"></div><div id="hdetail"></div></div>
+  <div id="htoast"></div>
   <div id="views"></div>
   <div id="chat"></div>
   <button id="jump">↓ jump to bottom</button>
@@ -3754,62 +3872,85 @@ setFeed(localStorage.getItem("emux_feed")!=="0");   // open by default
 setInterval(pollFeed,2000);
 
 // --- Hancock: pending approvals surfaced loud, opened async, cleared in-app ---
-let hancock=[], hDismissed=new Set();  // ids the user closed the tray on — stay closed until a NEW one arrives
+let hancock=[], hSelected=null, htoastTimer=null;   // hSelected = command of the open tab
+function hsess(h){ const s=(h.source||""); return s.indexOf("emux:")===0?s.slice(5):""; }
 async function pollHancock(){
   let r; try{ r=await api("/api/hancock"); }catch(e){ return; }
   if(!r||!r.ok)return;
   hancock=r.pending||[];
-  const ids=new Set(hancock.map(h=>h.id));
-  hDismissed.forEach(id=>{ if(!ids.has(id))hDismissed.delete(id); });  // forget cleared requests
-  const n=hancock.length, open=$("#htray").classList.contains("open");
+  const n=hancock.length;
   $("#hbadge").textContent=n;$("#hbadge").style.display=n?"inline-block":"none";
   $("#hbtn").classList.toggle("hot",n>0);
-  $("#hbannern").textContent=n;
-  if(open&&n===0){ $("#htray").classList.remove("open"); }        // queue cleared → slide away
-  else if(!open&&hancock.some(h=>!hDismissed.has(h.id))){ openHancock(); return; }  // fresh request → throw it open, don't wait
-  document.body.classList.toggle("hneedy",n>0&&!$("#htray").classList.contains("open"));
-  if($("#htray").classList.contains("open"))renderHancock();
+  if(!hancock.some(h=>h.command===hSelected)) hSelected=n?hancock[0].command:null;
+  renderApprovals();
 }
-function renderHancock(){
-  const box=$("#htraylist");
-  if(!hancock.length){box.innerHTML='<div class="hempty">nothing waiting — the fleet is clear ✓</div>';return;}
-  box.innerHTML=hancock.map(h=>{
+function renderApprovals(){
+  const wrap=$("#happrovals");
+  if(!hancock.length){ wrap.style.display="none"; return; }
+  wrap.style.display="";
+  $("#htabs").innerHTML=hancock.map(h=>{
     const risk=(h.risk||"medium");
-    // when it was filed — an approval with no age is undecidable: fresh ask or stale leftover?
-    const s=h.created_at?Math.max(0,(Date.now()-Date.parse(h.created_at))/1000):null;
-    const age=s==null?"":(s<60?Math.floor(s)+"s":ago(s));
-    const stale=s!=null&&s>3600;
-    return '<div class="hreq r-'+risk+'" data-id="'+h.id+'">'
-      +'<div class="hrisk">'+risk
-      +(age?'<span class="hage'+(stale?" stale":"")+'" title="'+esc(h.created_at)+'">'
-            +age+' ago'+(stale?" · stale?":"")+'</span>':'')+'</div>'
-      +'<div class="hcmd">'+esc(h.command)+'</div>'
-      +(h.why?'<div class="hwhy">'+esc(h.why)+'</div>':'')
-      +(h.cwd?'<div class="hcwd">'+esc(h.cwd)+'</div>':'')
-      +'<div class="hact"><button class="happrove" onclick="hancockDo(\''+h.id+'\',1)">approve &amp; run</button>'
-      +'<button class="hdeny" onclick="hancockDo(\''+h.id+'\',0)">deny</button></div></div>';
+    return '<div class="htab r-'+risk+(h.command===hSelected?" active":"")+'" data-cmd="'+esc(h.command)+'">'
+      +'<span class="hdot"></span>'+esc(h.source||h.command)
+      +(h.count>1?'<span class="hcount">×'+h.count+'</span>':'')
+      +'<span class="hx" data-cmd="'+esc(h.command)+'" title="deny">✕</span></div>';
   }).join("");
+  $("#htabs").querySelectorAll(".htab").forEach(el=>el.onclick=e=>{
+    if(e.target.classList.contains("hx"))return;
+    hSelected=el.dataset.cmd;renderApprovals();
+  });
+  $("#htabs").querySelectorAll(".hx").forEach(el=>el.onclick=e=>{
+    e.stopPropagation();const h=hancock.find(x=>x.command===el.dataset.cmd);if(h)hancockDo(h,0);
+  });
+  renderApprovalDetail();
 }
-let htoastTimer=null;
+function renderApprovalDetail(){
+  const box=$("#hdetail");
+  const h=hancock.find(x=>x.command===hSelected)||hancock[0];
+  if(!h){box.innerHTML="";return;}
+  const risk=(h.risk||"medium");
+  // age off the OLDEST filing (first_created), not the newest — a coalesced
+  // storm's newest row is always seconds old and would never read as stale
+  const s=h.first_created?Math.max(0,(Date.now()-Date.parse(h.first_created))/1000):null;
+  const age=s==null?"":(s<60?Math.floor(s)+"s":ago(s));
+  const stale=s!=null&&s>3600;
+  const sess=hsess(h);
+  box.innerHTML=
+    '<div class="hask">'+esc(h.why||h.command)+'</div>'
+    +'<div class="hprov">'
+      +(h.source?'<span class="hchip2">from '+esc(h.source)+'</span>':'')
+      +(h.target?'<span class="harrow">&#8594;</span><span class="hchip2">'+esc(h.target)+'</span>':'')
+    +'</div>'
+    +'<div class="hmeta'+(stale?' stale':'')+'" title="'+esc(h.first_created||'')+'">'+esc(risk)
+      +(h.count>1?' · filed ×'+h.count:'')
+      +(age?' · '+(h.count>1?'first ':'')+age+' ago':'')
+      +(stale?' · stale?':'')+'</div>'
+    +'<div class="hcmd2">'+esc(h.command)+'</div>'
+    +'<div class="hact2">'
+      +'<button class="happrove" id="hap">approve &amp; run</button>'
+      +'<button class="hdeny" id="hdn">deny</button>'
+      +(sess?'<button class="hpeek" id="hpk">peek '+esc(sess)+'</button>':'')
+    +'</div>';
+  $("#hap").onclick=()=>hancockDo(h,1);
+  $("#hdn").onclick=()=>hancockDo(h,0);
+  if(sess){const b=$("#hpk");if(b)b.onclick=()=>{const g=grid.find(x=>x.name===sess);if(g)openModal(g);else htoast("session "+sess+" not in the grid","err");};}
+}
 function htoast(msg,kind){
   const t=$("#htoast");t.textContent=msg;t.className="show "+(kind||"");
-  clearTimeout(htoastTimer);htoastTimer=setTimeout(()=>{t.className="";},kind==="err"?5000:2200);
+  clearTimeout(htoastTimer);htoastTimer=setTimeout(()=>{t.className="";},kind==="err"?5000:2600);
 }
-async function hancockDo(id,ok){
-  const card=document.querySelector('#htraylist .hreq[data-id="'+id+'"]');
-  const btns=card?card.querySelectorAll('button'):[];btns.forEach(b=>b.disabled=true);
-  if(card)card.classList.add("working");
+async function hancockDo(h,ok){
+  const ids=h.ids&&h.ids.length?h.ids:[h.id];
   const path=ok?"/api/hancock/approve":"/api/hancock/deny";
-  let r; try{ r=await api(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})}); }
+  let r; try{ r=await api(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ids})}); }
   catch(e){ r={ok:false,error:"unreachable"}; }
-  if(!r.ok){ btns.forEach(b=>b.disabled=false); if(card)card.classList.remove("working");
-    htoast((ok?"Approve":"Deny")+" failed — "+(r.error||"unknown"),"err"); return; }
-  htoast(ok?"Approved & ran ✓":"Denied ✓","ok");
-  hancock=hancock.filter(h=>h.id!==id);
-  renderHancock();pollHancock();
+  if(!r.ok){ htoast((ok?"Approve":"Deny")+" failed — "+(r.error||"unknown"),"err"); return; }
+  htoast(ok?("Approved & ran ✓"+(r.output?" — "+String(r.output).split("\n")[0].slice(0,60):"")):"Denied ✓","ok");
+  hancock=hancock.filter(x=>x.command!==h.command);
+  if(hSelected===h.command)hSelected=hancock.length?hancock[0].command:null;
+  renderApprovals();pollHancock();
 }
-function openHancock(){ $("#htray").classList.add("open");document.body.classList.remove("hneedy");renderHancock(); }
-function closeHancock(){ $("#htray").classList.remove("open");hancock.forEach(h=>hDismissed.add(h.id)); }  // stay closed for THESE; a new id re-opens
+function openHancock(){ if(hancock.length){hSelected=hancock[0].command;renderApprovals();var w=$("#happrovals");if(w)w.scrollIntoView({block:"nearest"});} }
 pollHancock();setInterval(pollHancock,3000);
 
 // --- model routing settings ---
@@ -4067,14 +4208,32 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                                     dry_run=bool(data.get("dry_run"))))
             return
         if url.path in ("/api/hancock/approve", "/api/hancock/deny"):
-            rid = (data.get("id") or "").strip()
-            if not rid:
+            # Support both single id and ids list (for group-aware operations)
+            ids = data.get("ids")
+            if not isinstance(ids, list) or not ids:
+                rid = (data.get("id") or "").strip()
+                ids = [rid] if rid else []
+            ids = [str(i).strip() for i in ids if str(i).strip()]
+            if not ids:
                 self._json({"ok": False, "error": "missing_id"}, 400)
                 return
             if url.path.endswith("approve"):
-                self._json(_hancock_approve(rid))
+                # Approve only the first (newest); deny the rest as redundant
+                result = _hancock_approve(ids[0])
+                for rid in ids[1:]:
+                    _hancock_deny(rid, reason="redundant duplicate")
+                self._json(result)
             else:
-                self._json(_hancock_deny(rid))
+                # Deny all ids in the group
+                errors = []
+                for rid in ids:
+                    deny_result = _hancock_deny(rid)
+                    if not deny_result.get("ok"):
+                        errors.append(deny_result.get("error", "unknown error"))
+                if errors:
+                    self._json({"ok": False, "error": errors[0]})
+                else:
+                    self._json({"ok": True})
             return
         session = data.get("session")
         if not isinstance(session, str) or not session:

@@ -487,6 +487,7 @@ def test_gated_worker_escalates_once_per_gate_low_risk_head(monkeypatch, tmp_pat
     gate = "Update available!\n1. Update now (runs brew upgrade)\n2. Skip"
     web._ESCALATED.clear()
     web._AUTO_ANSWERED.clear()
+    web._GATE_CLEAR.clear()
     web._escalate_if_gated("wrk", "codex", gate)
     web._escalate_if_gated("wrk", "codex", gate)   # same gate again → no repeat
 
@@ -497,9 +498,14 @@ def test_gated_worker_escalates_once_per_gate_low_risk_head(monkeypatch, tmp_pat
     assert cmd[cmd.index("-risk") + 1] == "low"    # low ⇒ allow rule auto-runs it
     assert "CLAUDECODE" not in (calls[0]["env"] or {})   # CC guard env scrubbed
 
-    # gate clears → rearm → a new gate escalates again
-    web._escalate_if_gated("wrk", "codex", "› write some code")   # not a gate
-    web._escalate_if_gated("wrk", "codex", gate)
+    # gate must read clear on 2 CONSECUTIVE polls before rearming (anti-flap);
+    # one clear alone does NOT rearm
+    web._escalate_if_gated("wrk", "codex", "› write some code")   # clear #1
+    web._escalate_if_gated("wrk", "codex", gate)                  # gate back → suppressed
+    assert len(calls) == 1                                        # not rearmed yet
+    web._escalate_if_gated("wrk", "codex", "› still working")     # clear #1 (counter reset by gate)
+    web._escalate_if_gated("wrk", "codex", "› more work")         # clear #2 → rearm
+    web._escalate_if_gated("wrk", "codex", gate)                  # now escalates again
     assert len(signals) == 2 and len(calls) == 2
 
 
@@ -522,6 +528,7 @@ def _wire_gate_policy(monkeypatch, tmp_path, rules):
     monkeypatch.setattr(web, "_file_hancock_escalation", lambda *a, **k: None)
     web._ESCALATED.clear()
     web._AUTO_ANSWERED.clear()
+    web._GATE_CLEAR.clear()
     return signals, sent
 
 
@@ -572,7 +579,8 @@ def test_answered_gate_in_scrollback_does_not_reescalate(monkeypatch, tmp_path):
     assert len(sent) == 1 and signals == []          # auto-answered
     # the gate text is still in scrollback, but 10+ fresh lines follow it
     after = gate_screen + "\n".join(f"working on step {i}" for i in range(12)) + "\n"
-    web._escalate_if_gated("wrk", "claude", after)
+    web._escalate_if_gated("wrk", "claude", after)    # clear #1
+    web._escalate_if_gated("wrk", "claude", after)    # clear #2 → rearm (anti-flap debounce)
     assert signals == []                              # cleared, not escalated
     assert "wrk" not in web._ESCALATED and "wrk" not in web._AUTO_ANSWERED  # rearmed
 
@@ -824,6 +832,95 @@ def test_orphans_view_is_wired_into_the_page():
 
 def test_hancock_requests_show_their_age():
     """A pending approval with no time element is undecidable — fresh ask or
-    stale leftover? The tray must render age from created_at and flag stale."""
+    stale leftover? The detail panel renders age from first_created."""
     from emux import web
-    assert "h.created_at" in web.PAGE and "hage" in web.PAGE and "stale" in web.PAGE
+    assert "first_created" in web.PAGE and "ago" in web.PAGE
+
+
+def _make_hancock_db(tmp_path, rows):
+    """Build a minimal hancock.db with the request table and the given pending
+    rows. Each row: (id, command, reason, risk, meta_dict, created_at)."""
+    import json as _json
+    import sqlite3
+    db = tmp_path / "hancock.db"
+    con = sqlite3.connect(str(db))
+    con.execute("""CREATE TABLE request(
+        id TEXT PRIMARY KEY, agent_id TEXT, kind TEXT DEFAULT 'command',
+        command TEXT NOT NULL, cwd TEXT, reason TEXT, risk TEXT DEFAULT 'medium',
+        status TEXT DEFAULT 'pending', meta TEXT DEFAULT '{}',
+        created_at TEXT, updated_at TEXT, expires_at TEXT, deleted_at TEXT)""")
+    con.execute("""CREATE TABLE decision(
+        id TEXT PRIMARY KEY, request_id TEXT, verdict TEXT, reason TEXT)""")
+    for rid, cmd, reason, risk, meta, created in rows:
+        con.execute(
+            "INSERT INTO request(id,command,reason,risk,status,meta,created_at) "
+            "VALUES(?,?,?,?,'pending',?,?)",
+            (rid, cmd, reason, risk, _json.dumps(meta), created))
+    con.commit()
+    con.close()
+    return db
+
+
+def test_hancock_pending_coalesces_and_lifts_meta(monkeypatch, tmp_path):
+    """The 81-duplicate storm: identical `emux head 103` rows must collapse to
+    ONE group carrying count + all ids, with source/target lifted from meta."""
+    from emux import web
+    meta = {"source": "emux:103", "target": "terminal:mac.local", "requester": "cli"}
+    db = _make_hancock_db(tmp_path, [
+        ("r3", "emux head 103", "103 gated", "low", meta, "2026-07-15T16:25:00Z"),
+        ("r2", "emux head 103", "103 gated", "low", meta, "2026-07-15T16:23:00Z"),
+        ("r1", "emux head 103", "103 gated", "low", meta, "2026-07-15T16:22:00Z"),
+        ("x1", "emux head login", "login gated", "low",
+         {"source": "emux:login"}, "2026-07-15T16:24:00Z"),
+    ])
+    monkeypatch.setattr(web, "_hancock_db", lambda: db)
+    out = web._hancock_pending()
+    by_cmd = {g["command"]: g for g in out}
+    g = by_cmd["emux head 103"]
+    assert g["count"] == 3
+    assert set(g["ids"]) == {"r1", "r2", "r3"}
+    assert g["ids"][0] == "r3"                       # newest first
+    assert g["source"] == "emux:103" and g["target"] == "terminal:mac.local"
+    assert g["created_at"] == "2026-07-15T16:25:00Z"  # newest
+    assert g["first_created"] == "2026-07-15T16:22:00Z"  # oldest
+    assert by_cmd["emux head login"]["count"] == 1
+    # groups ordered newest-first by their newest row
+    assert [g["command"] for g in out][0] == "emux head 103"
+
+
+def test_file_hancock_escalation_dedups_against_pending(monkeypatch, tmp_path):
+    """A1: if an identical `emux head 103` request is already pending, filing is
+    skipped — this is what stops the storm across daemon restarts."""
+    import shutil
+    import subprocess
+
+    from emux import web
+    db = _make_hancock_db(tmp_path, [
+        ("r1", "emux head 103", "gated", "low", {"source": "emux:103"},
+         "2026-07-15T16:22:00Z"),
+    ])
+    monkeypatch.setattr(web, "_hancock_db", lambda: db)
+    monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/hancock")
+    calls = []
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: calls.append(a) or type("R", (), {})())
+    web._file_hancock_escalation("103", "claude", "gate")
+    assert calls == []                               # deduped — never shelled out
+    # a DIFFERENT session is not deduped
+    web._file_hancock_escalation("999", "claude", "gate")
+    assert len(calls) == 1
+
+
+def test_hancock_browser_tab_ui_wired():
+    """The approvals UI is a browser-tab strip (issue #7), not the bully tray:
+    provenance shown, peek link to the session, coalesced ids in the POST."""
+    from emux import web
+    page = web.PAGE
+    assert "renderApprovals" in page and "happrovals" in page   # the strip
+    assert "htab" in page                                       # the tabs
+    assert "source" in page and "target" in page                # provenance (#1)
+    assert "openModal" in page                                  # peek link (#4)
+    assert '"ids"' in page or "ids:" in page or "JSON.stringify({ids" in page
+    # the bully is gone (#7): no full-width banner, no hneedy outline, no slide-tray
+    assert "hneedy" not in page
+    assert 'id="hbanner"' not in page
