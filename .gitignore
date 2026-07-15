@@ -8,3 +8,6 @@ build/
 .ruff_cache/
 .superpowers/
 uv.lock
+
+# transient fleet-worker briefs live in the worktree, never in the repo
+.ggo-*
