@@ -816,3 +816,10 @@ def test_machines_view_is_wired_into_the_page():
     # every endpoint the view calls is a real route
     for ep in ("/api/hosts", "/api/dirs?host=", "/api/peek?session=", "/api/adopt"):
         assert ep in page
+
+
+def test_hancock_requests_show_their_age():
+    """A pending approval with no time element is undecidable — fresh ask or
+    stale leftover? The tray must render age from created_at and flag stale."""
+    from emux import web
+    assert "h.created_at" in web.PAGE and "hage" in web.PAGE and "stale" in web.PAGE

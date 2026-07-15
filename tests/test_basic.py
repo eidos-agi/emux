@@ -12,6 +12,7 @@ import asyncio
 import json
 import shutil
 import subprocess
+import time
 import uuid
 
 import pytest
@@ -883,8 +884,17 @@ def test_local_claude_code_version_through_registered_tmux(tmp_path, monkeypatch
             capture_lines=30,
             by_registry_name=True,
         ))
-
         assert result["ok"] is True
-        assert "Claude Code" in result["content"]
+
+        # claude's startup beats 0.75s on an idle box but not a loaded one —
+        # poll up to ~10s for the output instead of trusting one fixed wait
+        content = result["content"]
+        deadline = time.time() + 10
+        while "Claude Code" not in content and time.time() < deadline:
+            time.sleep(0.5)
+            cap = asyncio.run(server.tmux_capture("claude-code", lines=30,
+                                                  by_registry_name=True))
+            content = cap.get("content", "")
+        assert "Claude Code" in content
     finally:
         subprocess.run(["tmux", "kill-session", "-t", session], check=False)

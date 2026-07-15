@@ -2,6 +2,13 @@
 
 All notable changes to Emux are documented here.
 
+## v0.62.1 - 2026-07-15
+
+- **Hancock approvals show their age.** Every pending request in the tray now carries "Nm ago" (hover for the exact timestamp); anything older than an hour is flagged red as `stale?`. An approval with no time element is undecidable — fresh ask or leftover?
+- **launchd daemon was silently blind to local tmux.** `_resolve_tmux` only checked PATH, and launchd hands daemons `/usr/bin:/bin:/usr/sbin:/sbin` — no Homebrew. The web daemon reported "no tmux sessions on local" and 0 live sessions while tmux ran fine in every terminal. Now falls back to `/opt/homebrew/bin/tmux` and `/usr/local/bin/tmux`.
+- Local Claude smoke test polls up to 10s for `claude --version` output instead of trusting one 0.75s wait (flaked on loaded machines).
+
+
 ## v0.62.0 - 2026-07-15
 
 - **MACHINES view.** A fifth tab (key `5`) in the web daemon: every reachable machine (local + ssh-config aliases + hosts already in the registry) as a chip; click one to list its live tmux sessions (age, windows, cwd, attached), click a row to peek inside without touching it, and one-click **⇤ ATTACH** to adopt any session into emux. Same endpoints the new-session cascade uses (`/api/hosts`, `/api/dirs`, `/api/peek`, `/api/adopt`) — browse-first instead of intent-first.

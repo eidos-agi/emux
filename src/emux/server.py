@@ -415,8 +415,18 @@ def _pane_text_for(name: str, lines: int = 50) -> str:
 
 
 def _resolve_tmux() -> str | None:
-    """Return path to the `tmux` binary, or None if not on PATH."""
-    return shutil.which("tmux")
+    """Return path to the `tmux` binary, or None if not found.
+
+    PATH first, then well-known install locations: a launchd daemon gets
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin, which made `which` fail and silently
+    blinded the web daemon to every local session."""
+    found = shutil.which("tmux")
+    if found:
+        return found
+    for p in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"):
+        if os.access(p, os.X_OK):
+            return p
+    return None
 
 
 def _run_tmux(

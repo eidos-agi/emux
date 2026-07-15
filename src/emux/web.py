@@ -2311,6 +2311,8 @@ body.hneedy #main,body.hneedy #side{outline:2px solid #c0392b;outline-offset:-2p
 .hreq.r-high,.hreq.r-critical{border-left-color:#c0392b}
 .hreq.r-medium{border-left-color:var(--amber)}
 .hrisk{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);margin-bottom:4px}
+.hage{float:right;text-transform:none;letter-spacing:0;opacity:.75}
+.hage.stale{color:#e05545;opacity:1;font-weight:700}
 .hreq.r-high .hrisk,.hreq.r-critical .hrisk{color:#e05545}
 .hcmd{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--text);word-break:break-all;margin-bottom:5px}
 .hwhy{font-size:12px;color:var(--text-dim);margin-bottom:3px}
@@ -3748,8 +3750,14 @@ function renderHancock(){
   if(!hancock.length){box.innerHTML='<div class="hempty">nothing waiting — the fleet is clear ✓</div>';return;}
   box.innerHTML=hancock.map(h=>{
     const risk=(h.risk||"medium");
+    // when it was filed — an approval with no age is undecidable: fresh ask or stale leftover?
+    const s=h.created_at?Math.max(0,(Date.now()-Date.parse(h.created_at))/1000):null;
+    const age=s==null?"":(s<60?Math.floor(s)+"s":ago(s));
+    const stale=s!=null&&s>3600;
     return '<div class="hreq r-'+risk+'" data-id="'+h.id+'">'
-      +'<div class="hrisk">'+risk+'</div>'
+      +'<div class="hrisk">'+risk
+      +(age?'<span class="hage'+(stale?" stale":"")+'" title="'+esc(h.created_at)+'">'
+            +age+' ago'+(stale?" · stale?":"")+'</span>':'')+'</div>'
       +'<div class="hcmd">'+esc(h.command)+'</div>'
       +(h.why?'<div class="hwhy">'+esc(h.why)+'</div>':'')
       +(h.cwd?'<div class="hcwd">'+esc(h.cwd)+'</div>':'')
