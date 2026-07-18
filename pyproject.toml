@@ -42,6 +42,7 @@ Issues = "https://github.com/eidos-agi/emux/issues"
 
 [project.scripts]
 emux = "emux.cli:main"
+emux-controller = "emux.controller.main:main"
 
 [build-system]
 requires = ["hatchling"]
