@@ -217,6 +217,7 @@ def test_http_serves_ui(daemon):
     assert status == 200
     assert "EMUX" in body and "control room" in body
     assert 'id="help-panel"' in body and "/api/help?q=" in body
+    assert 'id="docsbtn"' in body and 'href="/docs"' in body
 
 
 def test_http_serves_docs_with_shared_help_client(daemon):
