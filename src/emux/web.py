@@ -1961,7 +1961,7 @@ body{
 .fev.fresh{animation:fevin .5s ease}
 @keyframes fevin{from{background:rgba(255,176,0,.18)}to{background:transparent}}
 #topbar{
-  flex:none;display:flex;align-items:center;gap:14px;
+  flex:none;display:flex;align-items:center;gap:14px;flex-wrap:wrap;
   padding:10px 22px;border-bottom:1px solid var(--line);background:var(--bg-raise);
 }
 #topbar #title{font-family:"VT323",monospace;font-size:26px;color:var(--amber);letter-spacing:1px}
