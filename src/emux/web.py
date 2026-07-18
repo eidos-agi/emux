@@ -44,6 +44,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
+from . import help as _help
 from . import server as _server
 
 DEFAULT_HOST = "127.0.0.1"
@@ -4046,7 +4047,15 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
         url = urlparse(self.path)
         if url.path == "/" or url.path == "/index.html":
-            body = PAGE.replace("__VERSION__", __version__).encode()
+            body = _help.control_room_page(PAGE, __version__).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if url.path in ("/docs", "/docs/"):
+            body = _help.docs_page(__version__).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -4065,6 +4074,11 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                 return
         if url.path == "/api/sessions":
             self._json(sessions_payload())
+            return
+        if url.path == "/api/help":
+            query = (parse_qs(url.query).get("q") or [""])[0]
+            payload = _help.answer(query)
+            self._json(payload, 200 if payload.get("ok") else 400)
             return
         if url.path == "/api/grid":
             q = parse_qs(url.query)

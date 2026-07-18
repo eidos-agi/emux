@@ -216,6 +216,49 @@ def test_http_serves_ui(daemon):
     status, body = _get(daemon + "/")
     assert status == 200
     assert "EMUX" in body and "control room" in body
+    assert 'id="help-panel"' in body and "/api/help?q=" in body
+
+
+def test_http_serves_docs_with_shared_help_client(daemon):
+    status, body = _get(daemon + "/docs")
+    assert status == 200
+    assert "Emux documentation" in body
+    assert 'id="help-panel"' in body and "/api/help?q=" in body
+    assert "Getting started" in body and "Product boundaries" in body
+
+
+def test_http_help_is_grounded_and_read_only(daemon):
+    status, body = _get(daemon + "/api/help?q=how%20do%20I%20register%20a%20session")
+    assert status == 200 and body["ok"] and body["found"]
+    assert body["sources"][0]["url"].startswith("/docs#")
+    assert "emux register" in body["answer"]
+
+
+def test_http_help_explains_memory_boundary(daemon):
+    status, body = _get(daemon + "/api/help?q=does%20emux%20store%20product%20memory")
+    assert status == 200 and body["found"]
+    assert "Fleet owns durable learning" in body["answer"]
+
+
+def test_http_help_does_not_fabricate_unknown_answers(daemon):
+    status, body = _get(daemon + "/api/help?q=quantum%20banana%20tax%20policy")
+    assert status == 200 and body["ok"] and not body["found"]
+    assert body["answer"] == "" and body["sources"] == []
+
+
+def test_http_help_requires_query(daemon):
+    status, body = _get(daemon + "/api/help")
+    assert status == 400 and body["error"] == "missing_query"
+
+
+def test_http_help_cannot_be_invoked_as_control_post(daemon):
+    req = urllib.request.Request(
+        daemon + "/api/help", data=b'{"query":"send keys"}',
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(req)
+    assert exc.value.code == 404
 
 
 def test_http_sessions(daemon):
