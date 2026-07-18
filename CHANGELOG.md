@@ -2,6 +2,12 @@
 
 All notable changes to Emux are documented here.
 
+## Unreleased
+
+- **Approval gates have an explicit transaction.** `emux gate` issues a short-lived opaque fingerprint for the currently visible trusted-workspace, MCP, Bash/command, hook, update, or confirmation gate. `emux approve --fingerprint … --action approve|reject` recaptures and re-fingerprints immediately, fails closed on stale/cleared/changed/missing/replayed gates, and sends exactly one allowlisted `Enter` or `Escape`.
+- **Gate approvals are durable and redacted.** A cross-process lock plus an fsynced JSONL audit makes fingerprints single-use across CLI invocations and records timestamp, subject/device when available, target, gate fingerprint/type, action, outcome, and request ID without pane or prompt content.
+- The deprecated `tmux_send(force=True)` no longer bypasses a detected gate. Ordinary send remains blocked and directs callers to the auditable two-step path.
+
 ## v0.67.1 - 2026-07-17
 
 - **Agent paste-settle is honored by ask/converse.** Before typing, emux asks the target pane which agent is running and uses that adapter's paste-settle delay, so Claude Code and Codex reliably ingest a prompt before `ask`/`converse` submits it — no more races where the newline lands before the paste settles.

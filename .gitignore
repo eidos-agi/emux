@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 .venv-test/
+.venv-controller/
 *.egg-info/
 dist/
 build/

@@ -53,7 +53,9 @@ from .server import (
     navigate,
     pursue,
     run_mcp_server,
+    tmux_approve_gate,
     tmux_capture,
+    tmux_gate,
     tmux_linear_evidence,
     tmux_linear_link,
     tmux_linear_status,
@@ -938,6 +940,24 @@ def cmd_interrupt(args: argparse.Namespace) -> int:
     return _print_result(result, as_json=args.json)
 
 
+def cmd_gate(args: argparse.Namespace) -> int:
+    result = asyncio.run(tmux_gate(target=args.target, by_registry_name=not args.session))
+    if result.get("ok") and not args.json:
+        print(f"{result['gate_type']} {result['gate_fingerprint']} "
+              f"(expires in {result['expires_in']}s)")
+        return 0
+    return _print_result(result, as_json=args.json)
+
+
+def cmd_approve(args: argparse.Namespace) -> int:
+    result = asyncio.run(tmux_approve_gate(
+        target=args.target, gate_fingerprint=args.fingerprint, action=args.action,
+        key=args.key, by_registry_name=not args.session, subject=args.subject,
+        device=args.device, request_id=args.request_id,
+    ))
+    return _print_result(result, as_json=args.json)
+
+
 def cmd_capture(args: argparse.Namespace) -> int:
     """Capture a registered name by default."""
     result = asyncio.run(
@@ -1512,6 +1532,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_send.add_argument("--json", action="store_true", help="print structured result JSON")
 
+    p_gate = sub.add_parser("gate", help="observe a live approval gate and print its fingerprint")
+    p_gate.add_argument("target", help="registered name by default, or tmux session with --session")
+    p_gate.add_argument("--session", action="store_true", help="target a raw tmux session")
+    p_gate.add_argument("--json", action="store_true", help="print structured result JSON")
+
+    p_approve = sub.add_parser("approve", help="resolve an exact observed gate once")
+    p_approve.add_argument("target", help="registered name by default, or tmux session with --session")
+    p_approve.add_argument("--fingerprint", required=True, help="fingerprint returned by `emux gate`")
+    p_approve.add_argument("--action", choices=("approve", "reject"), default="approve")
+    p_approve.add_argument("--key", help="must be Enter for approve or Escape for reject")
+    p_approve.add_argument("--subject", help="immutable operator subject when available")
+    p_approve.add_argument("--device", help="operator device identifier when available")
+    p_approve.add_argument("--request-id", help="caller request ID (must be unique)")
+    p_approve.add_argument("--session", action="store_true", help="target a raw tmux session")
+    p_approve.add_argument("--json", action="store_true", help="print structured result JSON")
+
     p_interrupt = sub.add_parser("interrupt", help="send C-c to a registered session")
     p_interrupt.add_argument(
         "target", help="registered name by default, or tmux session with --session"
@@ -1652,6 +1688,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_log(args)
     if args.cmd == "send":
         return cmd_send(args)
+    if args.cmd == "gate":
+        return cmd_gate(args)
+    if args.cmd == "approve":
+        return cmd_approve(args)
     if args.cmd == "interrupt":
         return cmd_interrupt(args)
     if args.cmd == "capture":
