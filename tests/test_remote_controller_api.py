@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import json
-import threading
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
-from emux.controller.credentials import Credential
-from emux.controller.protocol import ProtocolError
-from emux.controller.registry import PairedServer
-from emux.controller.remote import HttpRemoteExecutor
-from emux.controller.remote_api import RemoteConfig, RemoteControllerAPI, TrustedIdentity
+from emux.remote_control.api import (
+    RemoteConfig,
+    RemoteControllerAPI,
+    StaticTokenBoundary,
+    TrustedIdentity,
+)
+from emux.remote_control.protocol import ProtocolError
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "controller_v1.json").read_text())
 HEADERS = {"Authorization": "Bearer paired-controller"}
@@ -182,40 +182,40 @@ def test_status_and_completed_work_not_cancellable(rig):
     assert exc.value.code == "not_cancellable"
 
 
-def test_http_adapter_round_trip_capability_request_and_status(rig, monkeypatch):
-    from emux import web
-    from emux.controller import remote as remote_module
 
-    monkeypatch.setattr(remote_module.time, "time", lambda: 1000.0)
-    api, _, calls, _ = rig
-    handler = type("RemoteHandler", (web.EmuxWebHandler,), {"remote_controller_api": api})
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    endpoint = f"http://127.0.0.1:{httpd.server_address[1]}"
-    server = PairedServer("alpha", endpoint, "credential", FIXTURE["protocol"], "srv-alpha")
-    remote = HttpRemoteExecutor()
-    credential = Credential("paired-controller", "generation-1")
-    try:
-        caps = remote.capabilities(server, credential)
-        assert caps.server_id == "srv-alpha" and caps.actions == frozenset(FIXTURE["actions"])
-        result = remote.execute(
-            server,
-            credential,
-            {
-                "protocol": FIXTURE["protocol"],
-                "request_id": "http-request",
-                "human_uid": "uid-daniel",
-                "device_id": "device-laptop",
-                "target": FIXTURE["target"],
-                "action": "session.send",
-                "parameters": {"text": "from adapter"},
-            },
-        )
-        assert result["acknowledged"] and result["status"] == "completed"
-        status = remote.status(server, credential, "http-request")
-        assert status["status"] == "completed"
-        assert calls == [("same-name", "from adapter", True, True)]
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
+def test_static_boundary_binds_token_to_immutable_identity():
+    identity = TrustedIdentity("uid-daniel", "device-laptop", "controller-laptop")
+    boundary = StaticTokenBoundary("x" * 32, identity)
+    assert boundary.authenticate({"Authorization": "Bearer " + "x" * 32}) == identity
+    with pytest.raises(ProtocolError) as exc:
+        boundary.authenticate({"Authorization": "Bearer wrong"})
+    assert exc.value.code == "unauthorized"
+
+
+def test_environment_wiring_is_disabled_or_fails_closed(monkeypatch, tmp_path):
+    from emux import web
+
+    monkeypatch.delenv("EMUX_REMOTE_CONTROLLER_TOKEN", raising=False)
+    assert web._remote_controller_from_env() is None
+
+    monkeypatch.setenv("EMUX_REMOTE_CONTROLLER_TOKEN", "x" * 32)
+    with pytest.raises(RuntimeError, match="partially configured"):
+        web._remote_controller_from_env()
+
+    values = {
+        "EMUX_REMOTE_CONTROLLER_HUMAN_UID": "uid-daniel",
+        "EMUX_REMOTE_CONTROLLER_DEVICE_ID": "device-laptop",
+        "EMUX_REMOTE_CONTROLLER_ID": "controller-laptop",
+        "EMUX_REMOTE_CONTROLLER_SERVER_ID": "hostkey-server",
+        "EMUX_REMOTE_CONTROLLER_ALIASES": "hostkey,hostkey-e1",
+        "EMUX_REMOTE_CONTROLLER_STATE": str(tmp_path / "requests.json"),
+    }
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+    api = web._remote_controller_from_env()
+    assert api.capabilities({"Authorization": "Bearer " + "x" * 32})["server_id"] == (
+        "hostkey-server"
+    )
+    with pytest.raises(ProtocolError) as exc:
+        api.capabilities({"Authorization": "Bearer wrong"})
+    assert exc.value.code == "unauthorized"

@@ -8,6 +8,7 @@ only operational receipts, never semantic memory.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import threading
@@ -40,6 +41,23 @@ class HancockGate(Protocol):
 class DenyBoundary:
     def authenticate(self, headers: Mapping[str, str]) -> TrustedIdentity:
         raise ProtocolError("unauthorized", "controller boundary is not configured")
+
+
+class StaticTokenBoundary:
+    """Bind one revocable controller credential to one immutable identity."""
+
+    def __init__(self, token: str, identity: TrustedIdentity):
+        if len(token) < 32:
+            raise ValueError("controller token must contain at least 32 characters")
+        self.token = token
+        self.identity = identity
+
+    def authenticate(self, headers: Mapping[str, str]) -> TrustedIdentity:
+        supplied = headers.get("Authorization", "")
+        expected = f"Bearer {self.token}"
+        if not hmac.compare_digest(supplied, expected):
+            raise ProtocolError("unauthorized", "controller credential is invalid")
+        return self.identity
 
 
 class DenyConsequentialGate:

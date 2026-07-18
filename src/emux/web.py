@@ -4016,7 +4016,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
     remote_controller_api: Any = None
 
     def _controller_error(self, exc: Exception) -> None:
-        from .controller.protocol import ProtocolError
+        from .remote_control.protocol import ProtocolError
         if not isinstance(exc, ProtocolError):
             raise exc
         status = {"unauthorized": 401, "identity_mismatch": 403,
@@ -4379,6 +4379,59 @@ def launchd_plist(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
 """
 
 
+def _remote_controller_from_env() -> Any:
+    """Build the optional remote API from an explicit, fail-closed environment."""
+    token = os.environ.get("EMUX_REMOTE_CONTROLLER_TOKEN")
+    if not token:
+        return None
+    required = {
+        "EMUX_REMOTE_CONTROLLER_HUMAN_UID": os.environ.get("EMUX_REMOTE_CONTROLLER_HUMAN_UID"),
+        "EMUX_REMOTE_CONTROLLER_DEVICE_ID": os.environ.get("EMUX_REMOTE_CONTROLLER_DEVICE_ID"),
+        "EMUX_REMOTE_CONTROLLER_ID": os.environ.get("EMUX_REMOTE_CONTROLLER_ID"),
+        "EMUX_REMOTE_CONTROLLER_SERVER_ID": os.environ.get("EMUX_REMOTE_CONTROLLER_SERVER_ID"),
+        "EMUX_REMOTE_CONTROLLER_ALIASES": os.environ.get("EMUX_REMOTE_CONTROLLER_ALIASES"),
+        "EMUX_REMOTE_CONTROLLER_STATE": os.environ.get("EMUX_REMOTE_CONTROLLER_STATE"),
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise RuntimeError(
+            "remote controller is partially configured; missing " + ", ".join(missing)
+        )
+    from .remote_control.api import (
+        DenyConsequentialGate,
+        RemoteConfig,
+        RemoteControllerAPI,
+        StaticTokenBoundary,
+        TrustedIdentity,
+    )
+
+    identity = TrustedIdentity(
+        str(required["EMUX_REMOTE_CONTROLLER_HUMAN_UID"]),
+        str(required["EMUX_REMOTE_CONTROLLER_DEVICE_ID"]),
+        str(required["EMUX_REMOTE_CONTROLLER_ID"]),
+    )
+    aliases = frozenset(
+        value.strip()
+        for value in str(required["EMUX_REMOTE_CONTROLLER_ALIASES"]).split(",")
+        if value.strip()
+    )
+    return RemoteControllerAPI(
+        RemoteConfig(
+            str(required["EMUX_REMOTE_CONTROLLER_SERVER_ID"]),
+            aliases,
+            os.environ.get("EMUX_REMOTE_CONTROLLER_REVISION", "emux-0.67.2"),
+            Path(str(required["EMUX_REMOTE_CONTROLLER_STATE"])),
+        ),
+        StaticTokenBoundary(token, identity),
+        DenyConsequentialGate(),
+        _server._load_registry,
+        lambda session, lines: capture_payload(session, lines),
+        lambda session, text, literal, enter: send_payload(
+            session, text, literal=literal, enter=enter
+        ),
+    )
+
+
 def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bool = False,
             public_origin: str | None = None) -> int:
     """Start the emux web daemon. Blocks until Ctrl-C."""
@@ -4394,6 +4447,7 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
         public_origin = public_origin.rstrip("/")
     EmuxWebHandler.extra_host = host if host not in _LOCALHOSTS else None
     EmuxWebHandler.public_origin = public_origin
+    EmuxWebHandler.remote_controller_api = _remote_controller_from_env()
     try:
         server = ThreadingHTTPServer((host, port), EmuxWebHandler)
     except OSError as e:
