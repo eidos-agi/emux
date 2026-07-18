@@ -1019,3 +1019,27 @@ def test_hancock_browser_tab_ui_wired():
     # the bully is gone (#7): no full-width banner, no hneedy outline, no slide-tray
     assert "hneedy" not in page
     assert 'id="hbanner"' not in page
+
+
+def test_http_docs_lead_with_ai_tree_product_thesis(daemon):
+    status, body = _get(daemon + "/docs")
+    assert status == 200
+    assert "What Emux is" in body and "Your first AI tree" in body
+    assert "human control room for live trees of AIs" in body
+    assert body.index("What Emux is") < body.index("Getting started")
+
+
+def test_http_help_answers_what_emux_is_as_an_ai_tree_control_room(daemon):
+    status, body = _get(daemon + "/api/help?q=what%20is%20emux%20ai%20tree")
+    assert status == 200 and body["ok"] and body["found"]
+    assert "human control room for live trees of AIs" in body["answer"]
+    assert body["sources"][0]["url"] == "/docs#overview"
+
+
+def test_help_layout_reserves_desktop_space_and_replaces_mobile_content(daemon):
+    status, body = _get(daemon + "/")
+    assert status == 200
+    assert 'body.help-open{width:calc(100% - clamp(360px,32vw,480px))}' in body
+    assert 'body.help-open> :not(#help-panel)' in body
+    assert 'document.body.classList.add("help-open")' in body
+    assert 'document.body.classList.remove("help-open","help-expanded")' in body
