@@ -648,6 +648,41 @@ def test_cmd_send_targets_registry_name_by_default(monkeypatch, capsys):
     assert "ok: alpha -> real-session" in capsys.readouterr().out
 
 
+def test_cmd_send_enter_and_submit_matrix(monkeypatch):
+    """Regression matrix for the auto-submit decision: a lone recognized named
+    key IS the keystroke → enter=False (Enter, C-c); ordinary input keeps the
+    submitting Enter → enter=True, whether it's multi-word (echo hi) or a bare
+    word that isn't a named key (yes)."""
+    import argparse
+
+    from emux import cli
+
+    calls = []
+
+    async def fake_send(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True, "target": kwargs["target"], "resolved_session": "real-session"}
+
+    monkeypatch.setattr(cli, "tmux_send", fake_send)
+
+    cases = [
+        (["Enter"], "Enter", False),
+        (["C-c"], "C-c", False),
+        (["echo", "hi"], "echo hi", True),
+        (["yes"], "yes", True),
+    ]
+    for keys, expect_keys, expect_enter in cases:
+        calls.clear()
+        rc = cli.cmd_send(
+            argparse.Namespace(
+                target="alpha", keys=keys, no_enter=False, session=False, json=False
+            )
+        )
+        assert rc == 0
+        assert calls[0]["keys"] == expect_keys, keys
+        assert calls[0]["enter"] is expect_enter, keys
+
+
 def test_cmd_interrupt_sends_control_c_without_enter(monkeypatch):
     import argparse
 
