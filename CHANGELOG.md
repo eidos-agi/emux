@@ -2,6 +2,10 @@
 
 All notable changes to Emux are documented here.
 
+## v0.67.2 - 2026-07-18
+
+- **The web daemon can sit behind one trusted reverse proxy.** `emux web --public-origin https://emux.example.com` names a single canonical origin that the DNS-rebinding Host check and the cross-site Origin check both accept, so a published deployment works without widening `--host` past loopback. The flag is validated up front — it must be a bare `http(s)` origin (scheme + host only; no creds, path, query, or fragment) or the daemon refuses to start. With no `--public-origin`, behavior is unchanged: loopback-only.
+
 ## v0.67.1 - 2026-07-17
 
 - **Agent paste-settle is honored by ask/converse.** Before typing, emux asks the target pane which agent is running and uses that adapter's paste-settle delay, so Claude Code and Codex reliably ingest a prompt before `ask`/`converse` submits it — no more races where the newline lands before the paste settles.
