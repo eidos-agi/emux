@@ -1052,6 +1052,14 @@ def _events(limit: int = 60) -> list[dict[str, Any]]:
     return ev[:limit]
 
 
+def _host_os() -> str:
+    """The daemon host's OS (platform.system(), e.g. 'Darwin'/'Linux'). Stamped
+    onto the page so the UI can gate macOS-only controls (iTerm2). Its own
+    function so tests can pin it independently of the real host."""
+    import platform
+    return platform.system()
+
+
 def _iterm_run(command: str, focus: bool = False) -> tuple[bool, str | None]:
     """Open a NEW iTerm2 window running `command`, driven by AppleScript — no
     `.command` file, so macOS Gatekeeper doesn't throw a quarantine prompt.
@@ -1861,7 +1869,7 @@ def _switch_plan(session: str, host: str | None = None, to: str | None = None,
 
 
 PAGE = r"""<!doctype html>
-<html lang="en">
+<html lang="en" data-os="__OS__">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -2513,9 +2521,38 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 #tchatsend{background:var(--amber);color:var(--on-accent);border:none;border-radius:9px;width:40px;
   font-size:15px;cursor:pointer}
 .happrove:disabled,.hdeny:disabled{opacity:.4;cursor:default}
+
+/* ── macOS-only controls (iTerm2 driven by AppleScript) — hidden anywhere the
+   daemon host isn't a Mac, since `emux head` / the gui checkbox can't work there.
+   data-os is stamped on <html> from the server's platform.system(). ── */
+html:not([data-os="Darwin"]) .maconly{display:none !important}
+
+/* ── the off-canvas nav drawer + feed backdrop (mobile only; inert on desktop) ── */
+#navtoggle{display:none}
+#scrim{display:none;position:fixed;inset:0;z-index:150;background:rgba(0,0,0,.45)}
+
+/* ── responsive: below this the fixed 3-column control room would clip sideways
+   (280px side + 300px feed leave the main nav no room, pushing it off-screen).
+   Side + feed become on-demand overlays so the main column — and its nav — always
+   fit. The laptop control-room layout above this width is deliberately untouched. ── */
+@media (max-width:760px){
+  #side{position:fixed;top:0;left:0;height:100%;z-index:160;width:82vw;max-width:300px;
+    transform:translateX(-100%);transition:transform .2s ease;box-shadow:6px 0 26px rgba(0,0,0,.4)}
+  body.nav-open #side{transform:none}
+  body.nav-open #scrim{display:block}
+  #feed{position:fixed;top:0;right:0;z-index:160;width:82vw;max-width:320px;
+    box-shadow:-6px 0 26px rgba(0,0,0,.4)}
+  #feed:not(.open){width:0;box-shadow:none}
+  #navtoggle{display:inline-flex;align-items:center}
+  #topbar{flex-wrap:wrap;row-gap:8px;padding:10px 14px}
+  #tabs{margin-left:0;flex-wrap:wrap}
+  #views{padding:12px}
+  .tilegrid{grid-template-columns:1fr}
+}
 </style>
 </head>
 <body>
+<div id="scrim"></div>
 <div id="costbanner" onclick="focusCost()">💸 <b id="costn">0</b> <span id="costword">session</span> hit a usage / cost limit — <u>review</u></div>
 <div id="setmodal" onclick="if(event.target===this)closeSettings()">
   <div id="setcard">
@@ -2540,6 +2577,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 </aside>
 <main id="main">
   <div id="topbar">
+    <button id="navtoggle" class="act" title="sessions" aria-label="toggle sessions">☰</button>
     <span id="title">grid</span>
     <span id="status">connecting…</span>
     <button id="attachbtn" class="act" style="display:none">⧉ copy attach</button>
@@ -2591,7 +2629,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
       <span id="modalthink"><span class="tdots"><i></i><i></i><i></i></span>thinking <b>0s</b></span>
       <span class="st" id="modalstatus">live</span>
       <button id="modalswitch" title="fail this session over to another Claude account (exits + relaunches + resumes)" onclick="switchPlan()">⇄ switch account</button>
-      <button id="modaliterm" title="open this session in a new iTerm2 window (attached tmux)">⧉ iTerm2</button>
+      <button id="modaliterm" class="maconly" title="open this session in a new iTerm2 window (attached tmux)">⧉ iTerm2</button>
       <button id="modalclose">✕ close</button>
     </div>
     <div id="modaljudge"></div>
@@ -2685,7 +2723,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
         <div class="steph"><span class="num">4</span><span class="lbl" id="namelbl">name it</span>
           <span class="sub" id="namesub"></span></div>
         <input id="newname" placeholder="session name" autocomplete="off">
-        <label class="chk"><input type="checkbox" id="newgui" checked>
+        <label class="chk maconly"><input type="checkbox" id="newgui" checked>
           <span id="guilbl">open an iTerm2 window attached to it</span></label>
         <div id="guinote"></div>
       </div>
@@ -2933,7 +2971,9 @@ function renderSidebar(){
     d.innerHTML='<div class="nm"><span class="dot '+(s.live?"live":"stale")+'"></span>'+s.name+att+'</div>'
       +'<div class="sub">→ '+s.session+(up?" · "+up:"")+(s.description?" — "+s.description:"")+'</div>'
       +'<div class="badges">'+badges+'</div>';
-    d.onclick=()=>openModal(s);
+    // a click on a nested tag chip filters — it must NOT also open the card. Guard
+    // at the card so this holds regardless of child-handler timing/re-render order.
+    d.onclick=ev=>{if(ev.target.closest(".tagjump"))return;openModal(s);};
     box.appendChild(d);
   });
   document.querySelectorAll(".tagjump").forEach(el=>el.onclick=ev=>{   // click a card's tag → filter to it
@@ -3427,6 +3467,7 @@ $("#filter").addEventListener("input",e=>{filterStr=e.target.value.toLowerCase()
 let modalSession=null, modalTimer=null;
 let digestErr=false, digestRetries=0;   // The Gist: recover from a failed summarize when the pane changes, capped at 10
 function openModal(s){
+  document.body.classList.remove("nav-open");   // mobile: dismiss the session drawer
   modalSession=s;
   digestErr=false;digestRetries=0;
   $("#modalname").textContent=s.name;
@@ -3868,7 +3909,13 @@ function setFeed(open){
 }
 $("#feedbtn").onclick=()=>setFeed(!$("#feed").classList.contains("open"));
 $("#feedclose").onclick=()=>setFeed(false);
-setFeed(localStorage.getItem("emux_feed")!=="0");   // open by default
+// mobile: side + feed are overlays, so start them closed to keep the main nav in view
+const isNarrow=()=>window.matchMedia("(max-width:760px)").matches;
+$("#navtoggle").onclick=()=>document.body.classList.toggle("nav-open");
+$("#scrim").onclick=()=>document.body.classList.remove("nav-open");
+setFeed(!isNarrow()&&localStorage.getItem("emux_feed")!=="0");   // open by default on desktop only
+// the iTerm2 gui checkbox is a no-op off macOS — don't send it as checked there
+if(document.documentElement.dataset.os!=="Darwin"){const g=$("#newgui");if(g)g.checked=false;}
 setInterval(pollFeed,2000);
 
 // --- Hancock: pending approvals surfaced loud, opened async, cleared in-app ---
@@ -4046,7 +4093,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
         url = urlparse(self.path)
         if url.path == "/" or url.path == "/index.html":
-            body = PAGE.replace("__VERSION__", __version__).encode()
+            body = PAGE.replace("__VERSION__", __version__).replace("__OS__", _host_os()).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
