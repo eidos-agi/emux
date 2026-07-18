@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import secrets
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -27,6 +29,9 @@ class RemoteExecutor(Protocol):
     def cancel(
         self, server: PairedServer, credential: Credential, request_id: str
     ) -> dict[str, Any]: ...
+    def status(
+        self, server: PairedServer, credential: Credential, request_id: str
+    ) -> dict[str, Any]: ...
 
 
 class HttpRemoteExecutor:
@@ -50,7 +55,18 @@ class HttpRemoteExecutor:
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
                 result = json.load(response)
-        except (OSError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
+        except urllib.error.HTTPError as exc:
+            if 400 <= exc.code < 500:
+                try:
+                    payload = json.load(exc)
+                    code = str(payload.get("error") or "remote_rejected")
+                except (json.JSONDecodeError, AttributeError):
+                    code = "remote_rejected"
+                raise ProtocolError(code, f"remote Emux rejected request: {server.alias}") from exc
+            raise ProtocolError(
+                "server_offline", f"remote Emux unavailable: {server.alias}"
+            ) from exc
+        except (OSError, json.JSONDecodeError) as exc:
             raise ProtocolError(
                 "server_offline", f"remote Emux unavailable: {server.alias}"
             ) from exc
@@ -75,11 +91,28 @@ class HttpRemoteExecutor:
     def execute(
         self, server: PairedServer, credential: Credential, request: dict[str, Any]
     ) -> dict[str, Any]:
-        return self._call(server, credential, "/api/controller/v1/requests", request)
+        return self._call(
+            server,
+            credential,
+            "/api/controller/v1/requests",
+            {**request, "nonce": secrets.token_urlsafe(24), "issued_at": time.time()},
+        )
 
     def cancel(
         self, server: PairedServer, credential: Credential, request_id: str
     ) -> dict[str, Any]:
         return self._call(
-            server, credential, f"/api/controller/v1/requests/{request_id}/cancel", {}
+            server,
+            credential,
+            f"/api/controller/v1/requests/{request_id}/cancel",
+            {
+                "protocol": server.expected_protocol,
+                "nonce": secrets.token_urlsafe(24),
+                "issued_at": time.time(),
+            },
         )
+
+    def status(
+        self, server: PairedServer, credential: Credential, request_id: str
+    ) -> dict[str, Any]:
+        return self._call(server, credential, f"/api/controller/v1/requests/{request_id}")

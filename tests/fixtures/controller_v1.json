@@ -1,0 +1,9 @@
+{
+  "protocol": "emux-remote/1.0",
+  "servers": [
+    {"alias": "alpha", "server_id": "srv-alpha"},
+    {"alias": "beta", "server_id": "srv-beta"}
+  ],
+  "target": {"server": "alpha", "channel": "engineering", "workspace": "emux", "session": "same-name"},
+  "actions": ["session.capture", "session.interrupt", "session.send"]
+}

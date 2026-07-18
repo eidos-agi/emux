@@ -4011,6 +4011,21 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
     # Optional canonical browser origin when published through a trusted proxy.
     # Default remains loopback-only.
     public_origin: str | None = None
+    # Disabled unless supplied by an embedding service with a trusted identity
+    # boundary. Never infer controller trust from localhost or browser headers.
+    remote_controller_api: Any = None
+
+    def _controller_error(self, exc: Exception) -> None:
+        from .controller.protocol import ProtocolError
+        if not isinstance(exc, ProtocolError):
+            raise exc
+        status = {"unauthorized": 401, "identity_mismatch": 403,
+                  "wrong_server": 409, "protocol_skew": 409, "replay": 409,
+                  "not_cancellable": 409, "unknown_request": 404}.get(exc.code, 400)
+        self._json({"ok": False, "error": exc.code}, status)
+
+    def _controller_headers(self) -> dict[str, str]:
+        return {str(k): str(v) for k, v in self.headers.items()}
 
     def _json(self, payload: dict[str, Any], status: int = 200) -> None:
         body = json.dumps(payload).encode()
@@ -4074,6 +4089,27 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             if not self._host_allowed():
                 self._json({"ok": False, "error": "forbidden_host"}, 403)
                 return
+        if url.path == "/api/controller/v1/capabilities":
+            if self.remote_controller_api is None:
+                self._json({"ok": False, "error": "controller_api_disabled"}, 503)
+                return
+            try:
+                self._json(self.remote_controller_api.capabilities(self._controller_headers()))
+            except Exception as exc:
+                self._controller_error(exc)
+            return
+        match = re.fullmatch(r"/api/controller/v1/requests/([^/]+)", url.path)
+        if match:
+            if self.remote_controller_api is None:
+                self._json({"ok": False, "error": "controller_api_disabled"}, 503)
+                return
+            try:
+                status, payload = self.remote_controller_api.status(
+                    self._controller_headers(), match.group(1))
+                self._json(payload, status)
+            except Exception as exc:
+                self._controller_error(exc)
+            return
         if url.path == "/api/sessions":
             self._json(sessions_payload())
             return
@@ -4173,6 +4209,36 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         url = urlparse(self.path)
+        controller_submit = url.path == "/api/controller/v1/requests"
+        controller_cancel = re.fullmatch(
+            r"/api/controller/v1/requests/([^/]+)/cancel", url.path)
+        if controller_submit or controller_cancel:
+            if not self._host_allowed():
+                self._json({"ok": False, "error": "forbidden_host"}, 403)
+                return
+            if self.remote_controller_api is None:
+                self._json({"ok": False, "error": "controller_api_disabled"}, 503)
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                data = json.loads(self.rfile.read(length) or b"{}")
+                if not isinstance(data, dict):
+                    raise ValueError
+            except (ValueError, json.JSONDecodeError):
+                self._json({"ok": False, "error": "bad_json"}, 400)
+                return
+            try:
+                if controller_submit:
+                    status, payload = self.remote_controller_api.submit(
+                        self._controller_headers(), data)
+                else:
+                    assert controller_cancel is not None
+                    status, payload = self.remote_controller_api.cancel(
+                        self._controller_headers(), controller_cancel.group(1), data)
+                self._json(payload, status)
+            except Exception as exc:
+                self._controller_error(exc)
+            return
         if url.path not in ("/api/send", "/api/head", "/api/spawn", "/api/suggest",
                             "/api/adopt", "/api/reply",
                             "/api/hancock/approve", "/api/hancock/deny",
