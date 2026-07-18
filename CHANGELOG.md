@@ -2,6 +2,22 @@
 
 All notable changes to Emux are documented here.
 
+## v0.67.0 - 2026-07-17
+
+- **Every channel is an OKF v0.1 bundle.** Channel and subchannel creation now writes a conformant `index.md`, typed `channel.md` contract, and reserved `log.md` learning history under `~/.config/emux/channel-okf/<channel>/`. Notes keep the learning log synchronized, refresh backfills existing channels, and agent context exposes the bundle path.
+
+## v0.66.0 - 2026-07-17
+
+- **Linear work contracts for child agents.** Sessions can carry an issue, project, team, and acceptance criteria at register/spawn time or through `emux linear link`; that metadata also participates in channel auto-tagging and the first context injection.
+- **Evidence-gated manager reconciliation.** `emux linear evidence` records append-only proof against numbered acceptance criteria, while `emux linear status` joins durable worker signals and evidence into `in_progress`, `needs_input`, `blocked`, `evidence_missing`, or `ready_for_review` states.
+- **No false closure.** Emux never writes to Linear and never recommends Closed/Done. A worker's `DONE` is only a claim; every acceptance criterion needs manager-recorded evidence before emux recommends `In Review`. Acked inbox signals now join the durable signal ledger so reconciliation survives manager reads.
+
+## v0.65.0 - 2026-07-17
+
+- **Tiered channels.** `emux channel` adds T0 canon, T1 domain, T2 workstream, and T3 mission manifests over the existing registry and durable logs. Sessions auto-tag from deterministic matchers, inherit parent/canon channels, and repeated meaningful registry tags produce creation suggestions.
+- **Agents learn before rediscovering.** The first `tmux_ask` after channel context changes injects a compact brief of channel rules and recent structured notes; unchanged context is not injected again. MCP exposes `tmux_channels` and `tmux_channel_note`.
+- **Learning stays bounded.** Channel notes are typed, capped, and redact common item/account/token/card identifiers. Raw transcripts remain in session logs rather than being copied into a second store.
+
 ## v0.64.0 - 2026-07-15
 
 - **Hancock approvals are legible now.** The slide-out tray that threw itself open over the nav is replaced by an in-flow **browser-tab strip**: one tab per distinct approval, click to see detail, ✕ denies, a `×N` badge shows how many times it was filed. Each request leads with the **ask** (human-readable reason), shows **provenance chips** (`from emux:103 → terminal:…` — who asked, what approve will do), risk, and `filed ×N, first <age> ago` with a red **stale?** flag past an hour. A **peek** button jumps to the session the request is about. Approve/deny fire a fixed receipt toast.

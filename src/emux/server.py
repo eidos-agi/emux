@@ -45,6 +45,9 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from . import channels as channel_store
+from . import linear as linear_store
+
 mcp = FastMCP("emux")
 
 
@@ -85,11 +88,13 @@ def _audit(op: str, args: dict[str, Any], result: Any = None) -> None:
 def audited(fn):
     """Wrap an MCP tool so every call is recorded to the audit trail. Put it
     UNDER @mcp.tool() so FastMCP still introspects the real signature."""
+
     @functools.wraps(fn)
     async def wrap(*a, **k):
         result = await fn(*a, **k)
         _audit(fn.__name__, k, result)
         return result
+
     return wrap
 
 
@@ -128,7 +133,7 @@ def _read_log(name: str, lines: int | None = None, strip: bool = True) -> str:
     with path.open(encoding="utf-8", errors="ignore", newline="") as f:
         data = f.read()
     if strip:
-        data = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", data)     # CSI
+        data = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", data)  # CSI
         data = re.sub(r"\x1b\][^\x07]*(?:\x07|\x1b\\)", "", data)  # OSC
         data = data.replace("\r", "")
     if lines:
@@ -143,9 +148,7 @@ def _read_log(name: str, lines: int | None = None, strip: bool = True) -> str:
 # KIND ∈ IDLE | READY | DONE | NEED | PROGRESS | ERROR.  IDLE/READY = "finished
 # that task, HOLDING for the next" (a warm worker to keep + feed, not exit); DONE
 # = "my whole purpose is finished, I may exit". e.g. echo "@@EMUX@@ IDLE".
-_SIGNAL_RE = re.compile(
-    r"@@EMUX@@[ \t]+(IDLE|READY|DONE|NEED|PROGRESS|ERROR)\b[ \t]*(.*)"
-)
+_SIGNAL_RE = re.compile(r"@@EMUX@@[ \t]+(IDLE|READY|DONE|NEED|PROGRESS|ERROR)\b[ \t]*(.*)")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
 _SIGNAL_OFFSETS = _STATE_DIR / "signal_offsets.json"
 _SIGNAL_LEDGER = _STATE_DIR / "signals.jsonl"
@@ -156,8 +159,8 @@ _SIGNAL_LEDGER = _STATE_DIR / "signals.jsonl"
 _INBOX_DIR = _STATE_DIR / "inbox"
 
 
-_SIGNAL_SEEN = _STATE_DIR / "signal_seen.json"      # per-session id dedup: {name: [ids]}
-_INBOX_RELPATH = ".local/state/emux/inbox"          # a REMOTE box's inbox, relative to its $HOME
+_SIGNAL_SEEN = _STATE_DIR / "signal_seen.json"  # per-session id dedup: {name: [ids]}
+_INBOX_RELPATH = ".local/state/emux/inbox"  # a REMOTE box's inbox, relative to its $HOME
 
 
 def _safe_name(name: str) -> str:
@@ -174,13 +177,19 @@ def remote_inbox_relpath(name: str) -> str:
     return f"{_INBOX_RELPATH}/{_safe_name(name)}.jsonl"
 
 
-def inject_signal(session: str, kind: str, payload: str = "",
-                  sid: str | None = None) -> dict[str, Any] | None:
+def inject_signal(
+    session: str, kind: str, payload: str = "", sid: str | None = None
+) -> dict[str, Any] | None:
     """Append a signal to a session's LOCAL inbox and return the written record
     (carrying its dedup `id`). Called by the `emux signal` CLI, which a worker's
     Stop/Notification hook runs. Best-effort; returns None on failure."""
-    rec = {"id": sid or uuid.uuid4().hex[:12], "t": int(time.time()),
-           "session": session, "kind": kind.upper(), "payload": payload}
+    rec = {
+        "id": sid or uuid.uuid4().hex[:12],
+        "t": int(time.time()),
+        "session": session,
+        "kind": kind.upper(),
+        "payload": payload,
+    }
     try:
         p = _inbox_path(session)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -202,8 +211,15 @@ def _parse_inbox_text(name: str, text: str) -> list[dict[str, Any]]:
         except Exception:
             continue
         d.setdefault("id", hashlib.sha256(line.encode()).hexdigest()[:12])  # legacy id-less
-        out.append({"id": d["id"], "t": d.get("t"), "session": name,
-                    "kind": d.get("kind"), "payload": d.get("payload", "")})
+        out.append(
+            {
+                "id": d["id"],
+                "t": d.get("t"),
+                "session": name,
+                "kind": d.get("kind"),
+                "payload": d.get("payload", ""),
+            }
+        )
     return out
 
 
@@ -229,7 +245,7 @@ def _ensure_mirror_tail(host: str, name: str) -> None:
     with _tail_lock:
         proc = _tail_procs.get(key)
         if proc and proc.poll() is None:
-            return                                  # follower already live
+            return  # follower already live
         mirror = _remote_mirror_path(name)
         mirror.parent.mkdir(parents=True, exist_ok=True)
         # cap the mirror so reconnect-replays don't grow it without bound (dedup
@@ -245,13 +261,16 @@ def _ensure_mirror_tail(host: str, name: str) -> None:
         # a line written while the follower attaches (id-dedup absorbs the replay).
         # `stdbuf -oL` line-buffers so a single new signal flushes across ssh at
         # once instead of waiting for a full block buffer.
-        remote = (f"touch {rel} 2>/dev/null; "
-                  f"if command -v stdbuf >/dev/null 2>&1; then exec stdbuf -oL tail -F -n +1 {rel}; "
-                  f"else exec tail -F -n +1 {rel}; fi")
+        remote = (
+            f"touch {rel} 2>/dev/null; "
+            f"if command -v stdbuf >/dev/null 2>&1; then exec stdbuf -oL tail -F -n +1 {rel}; "
+            f"else exec tail -F -n +1 {rel}; fi"
+        )
         try:
-            fh = open(mirror, "a")                   # noqa: SIM115 — owned by the child proc
-            proc = subprocess.Popen(["ssh", host, remote],
-                                    stdout=fh, stderr=subprocess.DEVNULL, text=True)
+            fh = open(mirror, "a")  # noqa: SIM115 — owned by the child proc
+            proc = subprocess.Popen(
+                ["ssh", host, remote], stdout=fh, stderr=subprocess.DEVNULL, text=True
+            )
             _tail_procs[key] = proc
         except Exception:
             pass
@@ -314,9 +333,20 @@ def _new_inbox_signals(name: str, ack: bool, host: str | None = None) -> list[di
         seen_list.append(d["id"])
         fresh.append(d)
     if ack and fresh:
-        seen_all[name] = seen_list[-1000:]      # keep most-recent ids, bounded
+        seen_all[name] = seen_list[-1000:]  # keep most-recent ids, bounded
         _save_seen(seen_all)
+        for signal in fresh:
+            _append_signal_ledger(signal)
     return fresh
+
+
+def _append_signal_ledger(signal: dict[str, Any]) -> None:
+    try:
+        _SIGNAL_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+        with _SIGNAL_LEDGER.open("a") as f:
+            f.write(json.dumps(signal) + "\n")
+    except Exception:
+        pass
 
 
 def _load_offsets() -> dict[str, int]:
@@ -349,7 +379,7 @@ def _new_signals(name: str, ack: bool) -> list[dict[str, Any]]:
     offs = _load_offsets()
     start = offs.get(name, 0)
     size = path.stat().st_size
-    if start > size:                       # log truncated/rotated — restart
+    if start > size:  # log truncated/rotated — restart
         start = 0
     with path.open("rb") as f:
         f.seek(start)
@@ -358,20 +388,14 @@ def _new_signals(name: str, ack: bool) -> list[dict[str, Any]]:
     consumed = raw[: last_nl + 1] if last_nl != -1 else b""
     text = _ANSI_RE.sub("", consumed.decode("utf-8", "ignore")).replace("\r", "")
     out = [
-        {"t": int(time.time()), "session": name, "kind": m.group(1),
-         "payload": m.group(2).strip()}
+        {"t": int(time.time()), "session": name, "kind": m.group(1), "payload": m.group(2).strip()}
         for m in _SIGNAL_RE.finditer(text)
     ]
     if ack and consumed:
         offs[name] = start + len(consumed)
         _save_offsets(offs)
         for sig in out:
-            try:
-                _SIGNAL_LEDGER.parent.mkdir(parents=True, exist_ok=True)
-                with open(_SIGNAL_LEDGER, "a") as f:
-                    f.write(json.dumps(sig) + "\n")
-            except Exception:
-                pass
+            _append_signal_ledger(sig)
     # Union the scraped sentinels (above) with the robust hook/CLI inbox (local
     # push-destination + remote pull). A manager can't tell — and shouldn't have
     # to — which channel or machine a signal came from.
@@ -408,7 +432,8 @@ def _pane_text_for(name: str, lines: int = 50) -> str:
     host = entry.get("host") if entry else None
     try:
         code, out, _ = _run_tmux(
-            ["capture-pane", "-t", session, "-p", "-S", f"-{lines}"], host=host)
+            ["capture-pane", "-t", session, "-p", "-S", f"-{lines}"], host=host
+        )
     except FileNotFoundError:
         return ""
     return _strip_ansi(out or "") if code == 0 else ""
@@ -429,9 +454,7 @@ def _resolve_tmux() -> str | None:
     return None
 
 
-def _run_tmux(
-    args: list[str], timeout: int = 10, host: str | None = None
-) -> tuple[int, str, str]:
+def _run_tmux(args: list[str], timeout: int = 10, host: str | None = None) -> tuple[int, str, str]:
     """Run `tmux <args>` and return (returncode, stdout, stderr).
 
     When `host` is given (any ssh destination — `user@ip` or a `~/.ssh/config`
@@ -451,13 +474,17 @@ def _run_tmux(
         # remote just works without the user configuring anything.
         # ponytail: covers homebrew (arm+intel) and /usr/local; if a host puts
         # tmux somewhere exotic, set it on that host's ssh-config or PATH.
-        remote = (
-            "PATH=/opt/homebrew/bin:/usr/local/bin:$PATH "
-            "tmux " + " ".join(shlex.quote(a) for a in args)
+        remote = "PATH=/opt/homebrew/bin:/usr/local/bin:$PATH tmux " + " ".join(
+            shlex.quote(a) for a in args
         )
         cmd = [
-            "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-            host, remote,
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            host,
+            remote,
         ]
     else:
         tmux = _resolve_tmux()
@@ -474,7 +501,9 @@ def _run_tmux(
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def _resolve_target(target: str, by_registry_name: bool) -> tuple[str | None, str | None, str | None]:
+def _resolve_target(
+    target: str, by_registry_name: bool
+) -> tuple[str | None, str | None, str | None]:
     """Return (session, host, error). Resolves a registry name to its tmux
     session id AND its host (None = local), so a single call drives a session
     whether it lives on this machine or a remote one."""
@@ -533,13 +562,19 @@ def _live_sessions(host: str | None = None) -> list[dict[str, Any]]:
     activity, working directory, and current command, which is what lets you
     FIND the right existing session to hook into (most-recent, in this project,
     running claude), not just enumerate raw names."""
-    code, out, _err = _run_tmux([
-        "list-sessions",
-        "-F",
-        "#{session_name}\t#{session_windows}\t#{session_created}\t"
-        "#{session_attached}\t#{session_activity}\t#{pane_current_path}\t"
-        "#{pane_current_command}",
-    ], host=host)
+    try:
+        code, out, _err = _run_tmux(
+            [
+                "list-sessions",
+                "-F",
+                "#{session_name}\t#{session_windows}\t#{session_created}\t"
+                "#{session_attached}\t#{session_activity}\t#{pane_current_path}\t"
+                "#{pane_current_command}",
+            ],
+            host=host,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []  # one unavailable host must not take down fleet discovery
     if code != 0:
         return []  # nonzero (incl. "no server running") → no sessions
     now = int(time.time())
@@ -554,17 +589,19 @@ def _live_sessions(host: str | None = None) -> list[dict[str, Any]]:
             parts.append("")
         name, windows, created, attached, activity, cwd, command = parts[:7]
         act = int(activity) if activity.isdigit() else None
-        sessions.append({
-            "name": name,
-            "windows": int(windows) if windows.isdigit() else windows,
-            "created_unix": int(created) if created.isdigit() else created,
-            "activity_unix": act,
-            "last_active_ago": _ago(act, now),
-            "attached": attached != "0",
-            "cwd": cwd or None,
-            "command": command or None,
-            "kind": _classify(command),
-        })
+        sessions.append(
+            {
+                "name": name,
+                "windows": int(windows) if windows.isdigit() else windows,
+                "created_unix": int(created) if created.isdigit() else created,
+                "activity_unix": act,
+                "last_active_ago": _ago(act, now),
+                "attached": attached != "0",
+                "cwd": cwd or None,
+                "command": command or None,
+                "kind": _classify(command),
+            }
+        )
     return sessions
 
 
@@ -683,15 +720,16 @@ async def tmux_sessions(
             "error": "tmux_not_installed",
             "hint": "Install tmux: `brew install tmux` (macOS) or `apt install tmux` (Debian).",
         }
-    all_live = _live_sessions(host=host)   # one discovery call (one ssh hop)
-    _track(all_live, host)                 # remember them — findable after they end
+    all_live = _live_sessions(host=host)  # one discovery call (one ssh hop)
+    _track(all_live, host)  # remember them — findable after they end
     live_names = {s["name"] for s in all_live}
     live = list(all_live)
 
     if match:
         m = match.lower()
         live = [
-            s for s in live
+            s
+            for s in live
             if m in f"{s['name']} {s.get('cwd') or ''} {s.get('command') or ''}".lower()
         ]
     if kind:
@@ -711,7 +749,9 @@ async def tmux_sessions(
     annotated = {}
     for name, entry in registry.items():
         entry_host = entry.get("host")
-        stale: bool | None = (entry.get("session") not in live_names) if entry_host == host else None
+        stale: bool | None = (
+            (entry.get("session") not in live_names) if entry_host == host else None
+        )
         annotated[name] = {**entry, "stale": stale}
     return {"ok": True, "host": host, "count": len(live), "live": live, "registry": annotated}
 
@@ -783,10 +823,13 @@ async def tmux_search(
             continue
         if query and query.lower() not in f"{e['name']} {e.get('cwd') or ''}".lower():
             continue
-        results.append({
-            **e, "status": st,
-            "last_seen_ago": _ago(e.get("last_seen_unix"), now),
-        })
+        results.append(
+            {
+                **e,
+                "status": st,
+                "last_seen_ago": _ago(e.get("last_seen_unix"), now),
+            }
+        )
 
     results.sort(key=lambda r: r.get("last_seen_unix") or 0, reverse=True)
     return {"ok": True, "count": len(results), "results": results[: max(0, limit)]}
@@ -803,6 +846,11 @@ async def tmux_spawn(
     description: str | None = None,
     tags: list[str] | None = None,
     manages: list[str] | None = None,
+    channels: list[str] | None = None,
+    linear_issue: str | None = None,
+    linear_project: str | None = None,
+    linear_team: str | None = None,
+    acceptance_criteria: list[str] | None = None,
 ) -> dict[str, Any]:
     """Spawn a fresh, driveable tmux session and register it — in one call.
 
@@ -841,6 +889,13 @@ async def tmux_spawn(
     Returns:
         {ok, name, host, session, gui_opened, launched, drive_hint}.
     """
+    if linear_issue:
+        try:
+            linear_store.metadata(linear_issue, linear_project, linear_team, acceptance_criteria)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+    elif linear_project or linear_team or acceptance_criteria:
+        return {"ok": False, "error": "linear_issue is required with Linear metadata"}
     session = name
     # 1) create the session (kill any stale one of the same name first)
     _run_tmux(["kill-session", "-t", session], host=host)  # ignore result
@@ -849,14 +904,33 @@ async def tmux_spawn(
         new_args += ["-c", cwd]
     code, _out, err = _run_tmux(new_args, host=host, timeout=15)
     if code != 0:
-        return {"ok": False, "error": "spawn_failed", "stderr": err,
-                "host": host, "hint": "check ssh reachability + tmux on the host"}
+        return {
+            "ok": False,
+            "error": "spawn_failed",
+            "stderr": err,
+            "host": host,
+            "hint": "check ssh reachability + tmux on the host",
+        }
 
     # 2) register FIRST so the stream log is armed (pipe-pane) BEFORE the command
     #    runs — otherwise a worker that signals early (or exits fast) emits into a
     #    pane no one is recording yet and its @@EMUX@@ up-channel line is lost.
-    await tmux_register(name=name, session=session, description=description,
-                        tags=tags, host=host, manages=manages)
+    registration = await tmux_register(
+        name=name,
+        session=session,
+        description=description,
+        tags=tags,
+        host=host,
+        manages=manages,
+        channels=channels,
+        linear_issue=linear_issue,
+        linear_project=linear_project,
+        linear_team=linear_team,
+        acceptance_criteria=acceptance_criteria,
+    )
+    if not registration.get("ok"):
+        _run_tmux(["kill-session", "-t", session], host=host)
+        return registration
 
     # 3) launch the command, if any — its output now flows into the armed log
     launched = False
@@ -869,26 +943,35 @@ async def tmux_spawn(
     if gui:
         attach = (
             f"ssh -t {shlex.quote(host)} tmux attach -t {shlex.quote(session)}"
-            if host else f"tmux attach -t {shlex.quote(session)}"
+            if host
+            else f"tmux attach -t {shlex.quote(session)}"
         )
         try:
             script = (
                 'tell application "iTerm2"\n'
-                ' create window with default profile\n'
-                ' tell current session of current window to write text '
+                " create window with default profile\n"
+                " tell current session of current window to write text "
                 f'"{attach}"\n'
-                ' activate\n'
-                'end tell'
+                " activate\n"
+                "end tell"
             )
-            g = subprocess.run(["osascript", "-e", script],
-                               capture_output=True, text=True, timeout=15)
+            g = subprocess.run(
+                ["osascript", "-e", script], capture_output=True, text=True, timeout=15
+            )
             gui_opened = g.returncode == 0
         except Exception:
             gui_opened = False
 
     return {
-        "ok": True, "name": name, "host": host, "session": session,
-        "gui_opened": gui_opened, "launched": launched,
+        "ok": True,
+        "name": name,
+        "host": host,
+        "session": session,
+        "gui_opened": gui_opened,
+        "launched": launched,
+        "channels": registration.get("entry", {}).get("channels", []),
+        "linear": registration.get("entry", {}).get("linear"),
+        "channel_suggestions": registration.get("channel_suggestions", []),
         "drive_hint": f"tmux_send/tmux_capture with target='{name}', by_registry_name=True",
     }
 
@@ -902,6 +985,11 @@ async def tmux_register(
     tags: list[str] | None = None,
     manages: list[str] | None = None,
     host: str | None = None,
+    channels: list[str] | None = None,
+    linear_issue: str | None = None,
+    linear_project: str | None = None,
+    linear_team: str | None = None,
+    acceptance_criteria: list[str] | None = None,
 ) -> dict[str, Any]:
     """Register a tmux session under a friendly name with metadata.
 
@@ -931,6 +1019,16 @@ async def tmux_register(
         "manages": manages or [],
         "registered_at": int(time.time()),
     }
+    if linear_issue:
+        try:
+            entry["linear"] = linear_store.metadata(
+                linear_issue, linear_project, linear_team, acceptance_criteria
+            )
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+    elif linear_project or linear_team or acceptance_criteria:
+        return {"ok": False, "error": "linear_issue is required with Linear metadata"}
+    entry["channels"] = channel_store.resolve_channels(name, {**entry, "channels": channels or []})
     if host:
         entry["host"] = host  # remote session: all ops for this name run over ssh
     registry[name] = entry
@@ -946,6 +1044,158 @@ async def tmux_register(
         "name": name,
         "entry": entry,
         "session_live": session_live,
+        "channel_suggestions": channel_store.suggest_channels(registry),
+    }
+
+
+@mcp.tool()
+@audited
+async def tmux_channels(session: str | None = None) -> dict[str, Any]:
+    """List tiered channels, or return the compact learning context for one session.
+
+    Agents should call this before rediscovering domain history. Channel tiers are
+    0=canon, 1=domain, 2=workstream, 3=mission. Raw transcripts stay in existing
+    session logs; channels index sessions and durable structured notes.
+    """
+    registry = _load_registry()
+    definitions = channel_store.load_channels()
+    if session:
+        if session not in registry:
+            return {"ok": False, "error": "not_registered", "session": session}
+        names = channel_store.resolve_channels(session, registry[session], definitions)
+        return {
+            "ok": True,
+            "session": session,
+            "channels": names,
+            "context": channel_store.session_context(session, registry),
+        }
+    return {
+        "ok": True,
+        "channels": [
+            channel_store.channel_context(name, registry, definitions)
+            for name in sorted(definitions, key=lambda n: (definitions[n].get("tier", 9), n))
+        ],
+        "suggestions": channel_store.suggest_channels(registry),
+    }
+
+
+@mcp.tool()
+@audited
+async def tmux_channel_note(
+    channel: str,
+    kind: str,
+    text: str,
+    source: str | None = None,
+) -> dict[str, Any]:
+    """Record a durable learned decision/outcome/failure/policy/fact in a channel."""
+    try:
+        note = channel_store.append_note(channel, kind, text, source)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "channel": channel, "note": note}
+
+
+def _linear_signal_history(names: set[str]) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    try:
+        for line in _SIGNAL_LEDGER.read_text(errors="ignore").splitlines():
+            try:
+                signal = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if signal.get("session") in names:
+                signals.append(signal)
+    except OSError:
+        pass
+    for name in names:
+        signals.extend(_new_signals(name, ack=False))
+    deduped: dict[str, dict[str, Any]] = {}
+    for signal in signals:
+        key = str(
+            signal.get("id")
+            or (signal.get("session"), signal.get("t"), signal.get("kind"), signal.get("payload"))
+        )
+        deduped[key] = signal
+    return list(deduped.values())
+
+
+@mcp.tool()
+@audited
+async def tmux_linear_link(
+    session: str,
+    issue: str,
+    project: str | None = None,
+    team: str | None = None,
+    acceptance_criteria: list[str] | None = None,
+) -> dict[str, Any]:
+    """Link one managed session to a Linear work contract; does not write Linear."""
+    registry = _load_registry()
+    try:
+        contract = linear_store.link_session(
+            registry, session, issue, project, team, acceptance_criteria
+        )
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    registry[session]["channels"] = channel_store.resolve_channels(session, registry[session])
+    _save_registry(registry)
+    return {
+        "ok": True,
+        "session": session,
+        "linear": contract,
+        "channels": registry[session]["channels"],
+    }
+
+
+@mcp.tool()
+@audited
+async def tmux_linear_evidence(
+    session: str,
+    criterion: int,
+    proof: str,
+    source: str | None = None,
+) -> dict[str, Any]:
+    """Append manager-verified proof for one acceptance criterion."""
+    try:
+        evidence = linear_store.record_evidence(_load_registry(), session, criterion, proof, source)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "evidence": evidence}
+
+
+@mcp.tool()
+@audited
+async def tmux_linear_status(
+    session: str | None = None,
+    channel: str | None = None,
+) -> dict[str, Any]:
+    """Reconcile Linear-linked workers; recommends review but never closes work."""
+    registry = _load_registry()
+    names = {name for name, entry in registry.items() if entry.get("linear", {}).get("issue")}
+    if session:
+        if session not in registry:
+            return {"ok": False, "error": "not_registered", "session": session}
+        names &= {session}
+    if channel:
+        definitions = channel_store.load_channels()
+        if channel not in definitions:
+            return {"ok": False, "error": f"unknown channel: {channel}"}
+        names = {
+            name
+            for name in names
+            if channel in channel_store.resolve_channels(name, registry[name], definitions)
+        }
+    signals = _linear_signal_history(names)
+    rows = linear_store.reconcile(
+        registry,
+        signals,
+        lambda _name, entry: _session_exists(entry["session"], entry.get("host")),
+        names,
+    )
+    return {
+        "ok": True,
+        "count": len(rows),
+        "work": rows,
+        "policy": "Emux may recommend In Review; it never closes Linear issues.",
     }
 
 
@@ -976,8 +1226,10 @@ def _pane_agent(session: str, host: str | None = None) -> str | None:
     if hit and (time.time() - hit[0]) < _PANE_AGENT_TTL:
         return hit[1]
     from . import adapters
+
     code, out, _ = _run_tmux(
-        ["display-message", "-p", "-t", session, "#{pane_current_command}"], host=host)
+        ["display-message", "-p", "-t", session, "#{pane_current_command}"], host=host
+    )
     if code != 0:
         return None
     a = adapters.detect(out.strip())
@@ -990,6 +1242,7 @@ def _pane_settle(session: str, host: str | None = None) -> float:
     """The paste-detection settle for whatever agent is in this pane. 0 if we
     haven't measured that agent — better than borrowing another agent's number."""
     from . import adapters
+
     return adapters.settle_for(_pane_agent(session, host))
 
 
@@ -1048,22 +1301,26 @@ async def tmux_send(
     if settle is None:
         # The paste-detection quirk belongs to the AGENT, not to the caller.
         from . import adapters
+
         settle = adapters.settle_for(agent)
     # A GATE on screen eats keystrokes and persists the answer — typing a prompt
     # into a gated pane is a config write, not a no-op. Refuse unless forced.
     if not force:
         from . import adapters
-        code, screen, _ = _run_tmux(
-            ["capture-pane", "-t", session, "-p", "-S", "-12"], host=host)
+
+        code, screen, _ = _run_tmux(["capture-pane", "-t", session, "-p", "-S", "-12"], host=host)
         gate = adapters.gated(agent, screen if code == 0 else "")
         if gate:
             return {
-                "ok": False, "error": "blocked_on_gate", "gate": gate,
-                "agent": agent, "session": session,
+                "ok": False,
+                "error": "blocked_on_gate",
+                "gate": gate,
+                "agent": agent,
+                "session": session,
                 "hint": "This pane is showing a modal gate. Typing into it feeds "
-                        "the MENU, not the prompt — a digit can select an option "
-                        "and persist it. Resolve the gate deliberately (tmux_send "
-                        "with force=True and the exact key), then send your text.",
+                "the MENU, not the prompt — a digit can select an option "
+                "and persist it. Resolve the gate deliberately (tmux_send "
+                "with force=True and the exact key), then send your text.",
             }
     key_args = keys if isinstance(keys, list) else [keys]
     if enter and settle and settle > 0:
@@ -1071,8 +1328,13 @@ async def tmux_send(
         # separate Enter — otherwise a paste-detecting TUI swallows the newline.
         c1 = _run_tmux(["send-keys", "-t", session, *key_args], host=host)
         if c1[0] != 0:
-            return {"ok": False, "error": "tmux_send_failed", "stderr": c1[2],
-                    "session": session, "host": host}
+            return {
+                "ok": False,
+                "error": "tmux_send_failed",
+                "stderr": c1[2],
+                "session": session,
+                "host": host,
+            }
         time.sleep(settle)
         result = _run_tmux(["send-keys", "-t", session, "Enter"], host=host)
     else:
@@ -1081,25 +1343,45 @@ async def tmux_send(
             args.append("Enter")
         result = _run_tmux(args, host=host)
     if result[0] != 0:
-        return {"ok": False, "error": "tmux_send_failed", "stderr": result[2], "session": session, "host": host}
-    out: dict[str, Any] = {"ok": True, "target": target, "resolved_session": session,
-                           "host": host, "sent": keys, "enter": enter}
+        return {
+            "ok": False,
+            "error": "tmux_send_failed",
+            "stderr": result[2],
+            "session": session,
+            "host": host,
+        }
+    out: dict[str, Any] = {
+        "ok": True,
+        "target": target,
+        "resolved_session": session,
+        "host": host,
+        "sent": keys,
+        "enter": enter,
+    }
     # Verify submission: a paste-guarded composer sometimes eats the Enter and
     # the text just SITS there (observed live — the send reports ok, nothing
     # runs). When we submitted literal text into a known AI's composer, look
     # once; if the composer box still holds the tail of what we typed, press
     # Enter again and re-check. Skipped for shells/unknown panes (no composer).
-    literal = (enter and agent is not None and len(key_args) == 1
-               and " " in key_args[0] and len(key_args[0]) > 3)
+    literal = (
+        enter
+        and agent is not None
+        and len(key_args) == 1
+        and " " in key_args[0]
+        and len(key_args[0]) > 3
+    )
     if literal:
         needle = key_args[0][-24:]
+
         def _composing() -> bool | None:
             code, screen, _ = _run_tmux(
-                ["capture-pane", "-t", session, "-p", "-S", "-12"], host=host)
+                ["capture-pane", "-t", session, "-p", "-S", "-12"], host=host
+            )
             if code != 0:
                 return None
             box = _composer_text(_strip_ansi(screen or ""))
             return None if box is None else needle in box
+
         time.sleep(max(0.6, settle or 0.0))
         c = _composing()
         if c:
@@ -1119,11 +1401,10 @@ def _composer_text(screen: str) -> str | None:
     transcript echo of a submitted message lives ABOVE it). None if the screen
     doesn't have two rules to parse."""
     lines = screen.splitlines()
-    rules = [i for i, ln in enumerate(lines)
-             if len(ln.strip()) >= 8 and set(ln.strip()) == {"─"}]
+    rules = [i for i, ln in enumerate(lines) if len(ln.strip()) >= 8 and set(ln.strip()) == {"─"}]
     if len(rules) < 2:
         return None
-    return "\n".join(lines[rules[-2] + 1:rules[-1]])
+    return "\n".join(lines[rules[-2] + 1 : rules[-1]])
 
 
 @mcp.tool()
@@ -1154,14 +1435,25 @@ async def tmux_capture(
         return {"ok": False, "error": rerr or "not_registered", "name": target}
     if host is None and _resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
-    code, out, err = _run_tmux([
-        "capture-pane",
-        "-t", session,
-        "-p",
-        "-S", f"-{lines}",
-    ], host=host)
+    code, out, err = _run_tmux(
+        [
+            "capture-pane",
+            "-t",
+            session,
+            "-p",
+            "-S",
+            f"-{lines}",
+        ],
+        host=host,
+    )
     if code != 0:
-        return {"ok": False, "error": "tmux_capture_failed", "stderr": err, "session": session, "host": host}
+        return {
+            "ok": False,
+            "error": "tmux_capture_failed",
+            "stderr": err,
+            "session": session,
+            "host": host,
+        }
     return {
         "ok": True,
         "target": target,
@@ -1245,13 +1537,22 @@ async def tmux_run(
     Returns:
         {ok, target, command, wait_seconds, content, lines_captured}
     """
-    send_result = await tmux_send(target=target, keys=command, enter=True, by_registry_name=by_registry_name)
+    send_result = await tmux_send(
+        target=target, keys=command, enter=True, by_registry_name=by_registry_name
+    )
     if not send_result.get("ok"):
         return {"ok": False, "stage": "send", "send_result": send_result}
     await asyncio.sleep(wait_seconds)
-    capture_result = await tmux_capture(target=target, lines=capture_lines, by_registry_name=by_registry_name)
+    capture_result = await tmux_capture(
+        target=target, lines=capture_lines, by_registry_name=by_registry_name
+    )
     if not capture_result.get("ok"):
-        return {"ok": False, "stage": "capture", "send_result": send_result, "capture_result": capture_result}
+        return {
+            "ok": False,
+            "stage": "capture",
+            "send_result": send_result,
+            "capture_result": capture_result,
+        }
     return {
         "ok": True,
         "target": target,
@@ -1302,8 +1603,8 @@ def _reply_delta(before: str, after: str) -> str:
 # with no marker — a live elapsed timer, or Claude Code's "esc to interrupt" hint.
 _GENERATING_PATTERNS = (
     re.compile(r"esc to interrupt", re.I),
-    re.compile(r"\b\d+s\s*·"),   # live elapsed timer, e.g. "12s ·" / "(9s · thinking)"
-    re.compile(r"·\s*\d+s\b"),   # "· 12s"
+    re.compile(r"\b\d+s\s*·"),  # live elapsed timer, e.g. "12s ·" / "(9s · thinking)"
+    re.compile(r"·\s*\d+s\b"),  # "· 12s"
 )
 
 
@@ -1391,9 +1692,14 @@ def converse(
             last = cur
 
     if died:
-        return {"ok": False, "error": "session_gone", "target": target,
-                "resolved_session": session, "prompt": prompt,
-                "detail": "tmux session vanished mid-reply"}
+        return {
+            "ok": False,
+            "error": "session_gone",
+            "target": target,
+            "resolved_session": session,
+            "prompt": prompt,
+            "detail": "tmux session vanished mid-reply",
+        }
 
     after = last if last is not None else before
     reply = _reply_delta(before, after)
@@ -1456,10 +1762,17 @@ async def tmux_ask(
         settled pane (ANSI stripped) if you need more context. `settled=False`
         means it hit `max_seconds` — the AI may still be responding.
     """
-    return await asyncio.to_thread(
+    effective_prompt = prompt
+    injected = False
+    if by_registry_name:
+        prelude = channel_store.agent_prelude_once(target, _load_registry())
+        if prelude:
+            effective_prompt = f"{prelude}\n\nCURRENT REQUEST:\n{prompt}"
+            injected = True
+    result = await asyncio.to_thread(
         converse,
         target,
-        prompt,
+        effective_prompt,
         submit,
         settle_seconds,
         poll_interval,
@@ -1469,6 +1782,10 @@ async def tmux_ask(
         True,  # strip_ansi
         busy_markers,
     )
+    result["channel_context_injected"] = injected
+    if injected:
+        result["prompt"] = prompt
+    return result
 
 
 # ---- navigate: model-driven TUI navigation --------------------------------
@@ -1490,9 +1807,26 @@ _NAV_MODEL_ESCALATE = os.environ.get("EMUX_NAV_MODEL_ESCALATE", "claude-sonnet-5
 
 # tmux key names the model is allowed to emit (guards against it inventing keys).
 _NAV_ALLOWED_KEYS = {
-    "Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "BTab",
-    "Space", "BSpace", "Home", "End", "PageUp", "PageDown",
-    "C-c", "C-d", "C-u", "C-k", "C-a", "C-e",
+    "Up",
+    "Down",
+    "Left",
+    "Right",
+    "Enter",
+    "Escape",
+    "Tab",
+    "BTab",
+    "Space",
+    "BSpace",
+    "Home",
+    "End",
+    "PageUp",
+    "PageDown",
+    "C-c",
+    "C-d",
+    "C-u",
+    "C-k",
+    "C-a",
+    "C-e",
 }
 
 # ---- destructive-action gate -----------------------------------------------
@@ -1555,19 +1889,21 @@ def _claude_decide(model: str, goal: str, screen: str, history: list[str]) -> di
         f"ACTIONS ALREADY TAKEN:\n{hist}\n\n"
         f"CURRENT SCREEN:\n<<<\n{screen}\n>>>\n\n"
         "Reply with ONE line of JSON, nothing else:\n"
-        '{\"thought\": \"<brief>\", \"done\": <bool>, '
-        '\"text\": \"<literal text to type, or empty>\", '
-        '\"keys\": [<tmux key names to send after the text>]}\n'
+        '{"thought": "<brief>", "done": <bool>, '
+        '"text": "<literal text to type, or empty>", '
+        '"keys": [<tmux key names to send after the text>]}\n'
         f"Allowed key names: {sorted(_NAV_ALLOWED_KEYS)}. "
-        "Use \"text\" to type into a filter/input box; use \"keys\" for navigation "
-        "(e.g. [\"Down\",\"Enter\"]). Set done=true ONLY when the GOAL is already "
+        'Use "text" to type into a filter/input box; use "keys" for navigation '
+        '(e.g. ["Down","Enter"]). Set done=true ONLY when the GOAL is already '
         "satisfied by the current screen — then keys/text are ignored. "
         "Prefer the fewest keys. Never guess a key not in the allowed list."
     )
     try:
         proc = subprocess.run(
             [claude, "-p", prompt, "--model", model],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
     except (subprocess.TimeoutExpired, OSError) as e:
         return {"_error": f"claude -p failed: {e}"}
@@ -1581,9 +1917,7 @@ def _claude_decide(model: str, goal: str, screen: str, history: list[str]) -> di
         return {"_error": "unparseable JSON from model", "raw": out[:400]}
 
 
-def _decide_step(
-    models: list[str], goal: str, screen: str, history: list[str]
-) -> dict[str, Any]:
+def _decide_step(models: list[str], goal: str, screen: str, history: list[str]) -> dict[str, Any]:
     """Get a usable navigation step, escalating through `models` on a stall.
 
     A "stall" is a model/parse error OR a valid reply with no action (no text and
@@ -1600,8 +1934,13 @@ def _decide_step(
         text = (decision.get("text") or "").strip()
         keys = [k for k in (decision.get("keys") or []) if k in _NAV_ALLOWED_KEYS]
         if text or keys:
-            return {"done": False, "text": text, "keys": keys,
-                    "thought": decision.get("thought"), "model": model}
+            return {
+                "done": False,
+                "text": text,
+                "keys": keys,
+                "thought": decision.get("thought"),
+                "model": model,
+            }
         last = {"stall": "no_action", "thought": decision.get("thought"), "model": model}
     return {"stall": last.get("stall", "unknown"), **last}
 
@@ -1640,11 +1979,19 @@ def navigate(
         # Observe with recovery from a dead session or a transient blank frame.
         screen = _observe(session, capture_lines)
         if screen is None:
-            return {"ok": False, "error": "session_gone",
-                    "detail": "tmux session vanished (ssh dropped or killed)", "steps": history}
+            return {
+                "ok": False,
+                "error": "session_gone",
+                "detail": "tmux session vanished (ssh dropped or killed)",
+                "steps": history,
+            }
         if not screen.strip():
-            return {"ok": False, "error": "blank_screen",
-                    "detail": "session alive but rendered nothing", "steps": history}
+            return {
+                "ok": False,
+                "error": "blank_screen",
+                "detail": "session alive but rendered nothing",
+                "steps": history,
+            }
         # Hard stop: caller-supplied target string already visible.
         if until and until in screen:
             return {"ok": True, "reached": "until", "steps": history, "screen": screen}
@@ -1660,23 +2007,42 @@ def navigate(
                 decision = _decide_step(chain, goal, rescreen, history)
                 screen = rescreen
         if "stall" in decision:
-            return {"ok": False, "error": "model_stalled", "detail": decision["stall"],
-                    "thought": decision.get("thought"), "raw": decision.get("raw"),
-                    "steps": history, "screen": screen}
+            return {
+                "ok": False,
+                "error": "model_stalled",
+                "detail": decision["stall"],
+                "thought": decision.get("thought"),
+                "raw": decision.get("raw"),
+                "steps": history,
+                "screen": screen,
+            }
         if decision.get("done"):
-            return {"ok": True, "reached": "model_done", "steps": history,
-                    "thought": decision.get("thought"), "screen": screen}
+            return {
+                "ok": True,
+                "reached": "model_done",
+                "steps": history,
+                "thought": decision.get("thought"),
+                "screen": screen,
+            }
 
         text, keys = decision["text"], decision["keys"]
         if not allow_dangerous and (danger := _danger_reason(screen, text, keys, submit=False)):
-            return {"ok": False, "error": "blocked_dangerous", "detail": danger,
-                    "thought": decision.get("thought"), "steps": history, "screen": screen}
+            return {
+                "ok": False,
+                "error": "blocked_dangerous",
+                "detail": danger,
+                "thought": decision.get("thought"),
+                "steps": history,
+                "screen": screen,
+            }
         if text:
             _run_tmux(["send-keys", "-t", session, "-l", text])
         for k in keys:
             _run_tmux(["send-keys", "-t", session, k])
         esc = "" if decision["model"] == chain[0] else f" [escalated:{decision['model']}]"
-        history.append(f"step {step + 1}: {decision.get('thought','')!r} text={text!r} keys={keys}{esc}")
+        history.append(
+            f"step {step + 1}: {decision.get('thought', '')!r} text={text!r} keys={keys}{esc}"
+        )
         time.sleep(step_pause)
 
     final = _observe(session, capture_lines) or ""
@@ -1726,8 +2092,16 @@ async def tmux_navigate(
         blocked (`blocked_dangerous`).
     """
     return await asyncio.to_thread(
-        navigate, target, goal, until, max_steps, step_pause, 200, None,
-        by_registry_name, allow_dangerous,
+        navigate,
+        target,
+        goal,
+        until,
+        max_steps,
+        step_pause,
+        200,
+        None,
+        by_registry_name,
+        allow_dangerous,
     )
 
 
@@ -1771,9 +2145,7 @@ def _wait_stable(
     return last if last is not None else ""
 
 
-def _pursue_decide(
-    chain: list[str], goal: str, screen: str, history: list[str]
-) -> dict[str, Any]:
+def _pursue_decide(chain: list[str], goal: str, screen: str, history: list[str]) -> dict[str, Any]:
     """Ask the model for the next goal-mode action, escalating on a stall.
 
     Returns a validated action dict {action, ...} or {stall: <reason>}."""
@@ -1788,12 +2160,12 @@ def _pursue_decide(
         f"HISTORY (your prior actions + what you observed):\n{hist}\n\n"
         f"CURRENT SCREEN:\n<<<\n{screen}\n>>>\n\n"
         "Reply with ONE line of JSON, nothing else. One of:\n"
-        '  {\"thought\":\"..\",\"action\":\"keys\",\"keys\":[<tmux key names>]}\n'
-        '  {\"thought\":\"..\",\"action\":\"type\",\"text\":\"..\",\"submit\":true}\n'
-        '  {\"thought\":\"..\",\"action\":\"wait\"}\n'
-        '  {\"thought\":\"..\",\"action\":\"done\",\"success\":true,\"summary\":\"..\"}\n\n'
+        '  {"thought":"..","action":"keys","keys":[<tmux key names>]}\n'
+        '  {"thought":"..","action":"type","text":"..","submit":true}\n'
+        '  {"thought":"..","action":"wait"}\n'
+        '  {"thought":"..","action":"done","success":true,"summary":".."}\n\n'
         f"Allowed key names: {sorted(_NAV_ALLOWED_KEYS)}.\n"
-        "- 'keys' to navigate menus (e.g. [\"Down\",\"Enter\"]).\n"
+        '- \'keys\' to navigate menus (e.g. ["Down","Enter"]).\n'
         "- 'type' to enter a message, answer, or field value; submit=true presses Enter.\n"
         "- 'wait' if a reply is still streaming / the screen is mid-update.\n"
         "- 'done' when the GOAL is achieved (success=true) or clearly impossible "
@@ -1803,14 +2175,19 @@ def _pursue_decide(
     last: dict[str, Any] = {}
     for model in chain:
         try:
-            proc = subprocess.run([claude, "-p", prompt, "--model", model],
-                                  capture_output=True, text=True, timeout=90)
+            proc = subprocess.run(
+                [claude, "-p", prompt, "--model", model], capture_output=True, text=True, timeout=90
+            )
         except (subprocess.TimeoutExpired, OSError) as e:
             last = {"stall": f"claude -p failed: {e}", "model": model}
             continue
         m = re.search(r"\{.*\}", proc.stdout or "", re.DOTALL)
         if not m:
-            last = {"stall": "no JSON in model reply", "raw": (proc.stdout or "")[:400], "model": model}
+            last = {
+                "stall": "no JSON in model reply",
+                "raw": (proc.stdout or "")[:400],
+                "model": model,
+            }
             continue
         try:
             d = json.loads(m.group(0))
@@ -1957,14 +2334,20 @@ def pursue(
     thome: str | None = None
     if telos and _telos_available():
         thome = _telos_home()
-        opened = _telos_call(
-            ["set-north-star", "--goal", goal, "--metric", _TELOS_METRIC], thome
-        )
+        opened = _telos_call(["set-north-star", "--goal", goal, "--metric", _TELOS_METRIC], thome)
         ns_id = (opened or {}).get("north_star_id")
 
     result = _pursue_core(
-        session, goal, chain, max_steps, settle_seconds, wait_cap,
-        capture_lines, ns_id, thome, allow_dangerous,
+        session,
+        goal,
+        chain,
+        max_steps,
+        settle_seconds,
+        wait_cap,
+        capture_lines,
+        ns_id,
+        thome,
+        allow_dangerous,
     )
 
     if ns_id and thome:  # close the north star with a terminal outcome
@@ -1993,19 +2376,29 @@ def _pursue_core(
         # --- observe, recovering from a dead session or a transient blank ---
         screen = _observe(session, capture_lines)
         if screen is None:
-            return {"ok": False, "error": "session_gone",
-                    "detail": "tmux session vanished (ssh dropped or killed)", "steps": history}
+            return {
+                "ok": False,
+                "error": "session_gone",
+                "detail": "tmux session vanished (ssh dropped or killed)",
+                "steps": history,
+            }
         if not screen.strip():
-            return {"ok": False, "error": "blank_screen",
-                    "detail": "session alive but rendered nothing", "steps": history}
+            return {
+                "ok": False,
+                "error": "blank_screen",
+                "detail": "session alive but rendered nothing",
+                "steps": history,
+            }
 
         # Tell the model when its recent actions aren't moving the UI, so it can
         # change tactics (Escape, a different item) before we give up.
         ctx = history
         if no_progress:
-            ctx = history + [f"NOTE: the last {no_progress} action(s) did not change the "
-                             "screen — you appear stuck; try a DIFFERENT action (e.g. Escape, "
-                             "a different menu item), or 'done' with success=false if impossible."]
+            ctx = history + [
+                f"NOTE: the last {no_progress} action(s) did not change the "
+                "screen — you appear stuck; try a DIFFERENT action (e.g. Escape, "
+                "a different menu item), or 'done' with success=false if impossible."
+            ]
 
         # --- decide, retrying once on a transient stall (re-observe first) ---
         d = _pursue_decide(chain, goal, screen, ctx)
@@ -2018,16 +2411,28 @@ def _pursue_core(
                 d = _pursue_decide(chain, goal, rescreen, ctx)
                 screen = rescreen
         if "stall" in d:
-            return {"ok": False, "error": "model_stalled", "detail": d["stall"],
-                    "raw": d.get("raw"), "steps": history, "screen": screen}
+            return {
+                "ok": False,
+                "error": "model_stalled",
+                "detail": d["stall"],
+                "raw": d.get("raw"),
+                "steps": history,
+                "screen": screen,
+            }
 
         action = d["action"]
         esc = "" if d.get("model") == chain[0] else f" [escalated:{d.get('model')}]"
         thought = d.get("thought", "")
 
         if action == "done":
-            return {"ok": True, "reached": "done", "success": bool(d.get("success", True)),
-                    "summary": d.get("summary", ""), "steps": history, "screen": screen}
+            return {
+                "ok": True,
+                "reached": "done",
+                "success": bool(d.get("success", True)),
+                "summary": d.get("summary", ""),
+                "steps": history,
+                "screen": screen,
+            }
         if action == "wait":
             screen = _wait_stable(session, capture_lines, settle_seconds, 0.8, wait_cap)
             history.append(f"step {step + 1}: wait{esc} — observed: {_tail(screen)}")
@@ -2035,13 +2440,19 @@ def _pursue_core(
         # --- destructive-action gate (unless explicitly allowed) ---
         if not allow_dangerous:
             danger = (
-                _danger_reason(screen, "", d["keys"], submit=False) if action == "keys"
+                _danger_reason(screen, "", d["keys"], submit=False)
+                if action == "keys"
                 else _danger_reason(screen, d["text"], [], submit=bool(d.get("submit")))
             )
             if danger:
                 history.append(f"step {step + 1}: BLOCKED ({thought!r}) — {danger}")
-                return {"ok": False, "error": "blocked_dangerous", "detail": danger,
-                        "steps": history, "screen": screen}
+                return {
+                    "ok": False,
+                    "error": "blocked_dangerous",
+                    "detail": danger,
+                    "steps": history,
+                    "screen": screen,
+                }
 
         if action == "keys":
             for k in d["keys"]:
@@ -2051,7 +2462,9 @@ def _pursue_core(
             _run_tmux(["send-keys", "-t", session, "-l", d["text"]])
             if d.get("submit"):
                 _run_tmux(["send-keys", "-t", session, "Enter"])
-            history.append(f"step {step + 1}: type={d['text']!r} submit={bool(d.get('submit'))} ({thought!r}){esc}")
+            history.append(
+                f"step {step + 1}: type={d['text']!r} submit={bool(d.get('submit'))} ({thought!r}){esc}"
+            )
 
         # Let the UI react, then re-observe a settled frame.
         settled = _wait_stable(session, capture_lines, settle_seconds, 0.8, wait_cap)
@@ -2061,9 +2474,13 @@ def _pursue_core(
             no_progress += 1
             history[-1] += f" -> {_tail(settled)} [NO CHANGE x{no_progress}]"
             if no_progress >= _STUCK_LIMIT:
-                return {"ok": False, "error": "stuck_no_progress",
-                        "detail": f"{no_progress} consecutive actions changed nothing",
-                        "steps": history, "screen": settled}
+                return {
+                    "ok": False,
+                    "error": "stuck_no_progress",
+                    "detail": f"{no_progress} consecutive actions changed nothing",
+                    "steps": history,
+                    "screen": settled,
+                }
         else:
             no_progress = 0
             history[-1] += f" -> {_tail(settled)}"
@@ -2071,19 +2488,29 @@ def _pursue_core(
         # --- telos drift-guard: report this step; honor a stop signal ---
         if ns_id and thome:
             tick = _telos_call(
-                ["tick", "--north-star-id", ns_id,
-                 "--action-summary", (thought or action)[:200],
-                 # measurement is the settled UI signature: it stays constant
-                 # when the agent is stuck, so telos's zero-delta guard fires.
-                 "--measurement", _tail(settled, 2) or "(blank)"],
+                [
+                    "tick",
+                    "--north-star-id",
+                    ns_id,
+                    "--action-summary",
+                    (thought or action)[:200],
+                    # measurement is the settled UI signature: it stays constant
+                    # when the agent is stuck, so telos's zero-delta guard fires.
+                    "--measurement",
+                    _tail(settled, 2) or "(blank)",
+                ],
                 thome,
             )
             if tick and tick.get("signal") == "stop":
                 why = tick.get("drift_category") or tick.get("heading") or "drift"
                 history[-1] += f" [telos STOP: {why}]"
-                return {"ok": False, "error": "telos_stop",
-                        "detail": f"telos halted the run: {why}",
-                        "steps": history, "screen": settled}
+                return {
+                    "ok": False,
+                    "error": "telos_stop",
+                    "detail": f"telos halted the run: {why}",
+                    "steps": history,
+                    "screen": settled,
+                }
 
     final = _observe(session, capture_lines) or ""
     return {"ok": False, "error": "max_steps_reached", "steps": history, "screen": final}
@@ -2147,8 +2574,17 @@ async def tmux_goal(
         `telos` block when the drift-guard was engaged.
     """
     return await asyncio.to_thread(
-        pursue, target, goal, max_steps, 2.5, 60.0, 200, None,
-        by_registry_name, telos, allow_dangerous,
+        pursue,
+        target,
+        goal,
+        max_steps,
+        2.5,
+        60.0,
+        200,
+        None,
+        by_registry_name,
+        telos,
+        allow_dangerous,
     )
 
 
@@ -2162,15 +2598,14 @@ async def tmux_goal(
 # the screen. The sequence is a fixed TUI, so the steps are deterministic —
 # no model calls. Host-aware via the registry, like every other emux op.
 
-_OAUTH_URL_RE = re.compile(
-    r"https://(?:claude\.ai|console\.anthropic\.com)/oauth[^\s\"'`)\]]*"
-)
+_OAUTH_URL_RE = re.compile(r"https://(?:claude\.ai|console\.anthropic\.com)/oauth[^\s\"'`)\]]*")
 _LOGIN_SUCCESS_RE = re.compile(r"Login successful|Logged in as", re.I)
 _LOGIN_FAIL_RE = re.compile(r"Invalid (?:code|authorization)|Login failed|OAuth error", re.I)
 
 
-def _login_step(screen: str, code_pending: bool = False,
-                sent_login: bool = False) -> dict[str, Any]:
+def _login_step(
+    screen: str, code_pending: bool = False, sent_login: bool = False
+) -> dict[str, Any]:
     """Decide the next login-flow action from a settled screen. Pure — this is
     the testable core of login_flow.
 
@@ -2223,15 +2658,19 @@ def login_flow(
     if not _session_exists(session, host=host):
         return {"ok": False, "error": "session_not_found", "session": session}
     if _pane_agent(session, host) != "claude":
-        return {"ok": False, "error": "not_a_claude_pane",
-                "detail": "the pane is not running claude — if it exited, "
-                          "restart claude in the session first"}
+        return {
+            "ok": False,
+            "error": "not_a_claude_pane",
+            "detail": "the pane is not running claude — if it exited, "
+            "restart claude in the session first",
+        }
 
     def cap() -> str:
         try:
             # -J joins wrapped lines so the OAuth URL survives narrow panes.
             c, out, _ = _run_tmux(
-                ["capture-pane", "-t", session, "-p", "-J", "-S", "-150"], host=host)
+                ["capture-pane", "-t", session, "-p", "-J", "-S", "-150"], host=host
+            )
         except FileNotFoundError:
             return ""
         return _strip_ansi(out or "") if c == 0 else ""
@@ -2261,9 +2700,12 @@ def login_flow(
     if code is not None:
         screen = settled()
         if _login_step(screen, code_pending=True)["action"] != "paste":
-            return {"ok": False, "error": "no_paste_prompt",
-                    "detail": "the session is not waiting for a login code",
-                    "screen": _tail(screen, 12)}
+            return {
+                "ok": False,
+                "error": "no_paste_prompt",
+                "detail": "the session is not waiting for a login code",
+                "screen": _tail(screen, 12),
+            }
         send(code, "Enter")
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -2274,19 +2716,20 @@ def login_flow(
                 time.sleep(1.0)
                 return {"ok": True, "logged_in": True, "screen": _tail(cap(), 6)}
             if _LOGIN_FAIL_RE.search(screen):
-                return {"ok": False, "error": "login_failed",
-                        "screen": _tail(screen, 12)}
-        return {"ok": False, "error": "login_not_confirmed",
-                "detail": "no success marker before timeout",
-                "screen": _tail(cap(), 12)}
+                return {"ok": False, "error": "login_failed", "screen": _tail(screen, 12)}
+        return {
+            "ok": False,
+            "error": "login_not_confirmed",
+            "detail": "no success marker before timeout",
+            "screen": _tail(cap(), 12),
+        }
 
     # ---- start: (optionally /logout), step through the TUI to the OAuth URL ----
     if switch:
         send("/logout", "Enter")
         settled()
 
-    finish = (f"emux login {target}{' -n' if by_registry_name else ''} "
-              "--code <paste>")
+    finish = f"emux login {target}{' -n' if by_registry_name else ''} --code <paste>"
     sent_login = False
     for _ in range(max_steps):
         screen = settled()
@@ -2298,19 +2741,25 @@ def login_flow(
         if step["action"] == "done":
             return {"ok": True, "logged_in": True, "screen": _tail(screen, 6)}
         if step["action"] == "url":
-            return {"ok": True, "logged_in": False, "url": step["url"],
-                    "next": "open the url in a browser, sign in, then finish "
-                            f"with: {finish}"}
+            return {
+                "ok": True,
+                "logged_in": False,
+                "url": step["url"],
+                "next": f"open the url in a browser, sign in, then finish with: {finish}",
+            }
         if step["action"] == "enter":
             send(None, "Enter")
         elif step["action"] == "send_login":
             send("/login", "Enter")
             sent_login = True
         else:
-            return {"ok": False, "error": "unrecognized_screen",
-                    "detail": "not a known login screen — drive it manually "
-                              "with emux navigate / tmux_navigate",
-                    "screen": _tail(screen, 12)}
+            return {
+                "ok": False,
+                "error": "unrecognized_screen",
+                "detail": "not a known login screen — drive it manually "
+                "with emux navigate / tmux_navigate",
+                "screen": _tail(screen, 12),
+            }
         time.sleep(0.5)
     return {"ok": False, "error": "max_steps_reached", "screen": _tail(cap(), 12)}
 
@@ -2344,9 +2793,16 @@ async def tmux_login(
         (`not_a_claude_pane`, `no_paste_prompt`, `unrecognized_screen`, …).
     """
     result = await asyncio.to_thread(login_flow, target, code, switch, by_registry_name)
-    _audit("tmux_login", {"target": target, "switch": switch,
-                          "by_registry_name": by_registry_name,
-                          "code": "<redacted>" if code else None}, result)
+    _audit(
+        "tmux_login",
+        {
+            "target": target,
+            "switch": switch,
+            "by_registry_name": by_registry_name,
+            "code": "<redacted>" if code else None,
+        },
+        result,
+    )
     return result
 
 
@@ -2357,6 +2813,7 @@ async def tmux_login(
 # looked "broken" while the disk was fine. The tell was comparing the tmux
 # server's own access (run-shell) against a fresh process's (direct/ssh) —
 # doctor automates exactly that comparison plus the basic health probes.
+
 
 def doctor(target: str, by_registry_name: bool = False) -> dict[str, Any]:
     """Environment health for one session: liveness, pane, capture, stream log,
@@ -2370,26 +2827,42 @@ def doctor(target: str, by_registry_name: bool = False) -> dict[str, Any]:
         checks.append({"check": name, "ok": ok, "detail": detail})
 
     live = _session_exists(session, host=host)
-    check("session_live", live, f"tmux has-session {session}"
-          + (f" on {host}" if host else " locally"))
+    check(
+        "session_live",
+        live,
+        f"tmux has-session {session}" + (f" on {host}" if host else " locally"),
+    )
     if not live:
-        return {"ok": False, "target": target, "session": session, "host": host,
-                "checks": checks, "diagnosis": "session is gone — clean up or respawn"}
+        return {
+            "ok": False,
+            "target": target,
+            "session": session,
+            "host": host,
+            "checks": checks,
+            "diagnosis": "session is gone — clean up or respawn",
+        }
 
     code, out, _ = _run_tmux(
         ["display-message", "-p", "-t", session, "#{pane_current_command}|#{pane_current_path}"],
-        host=host)
-    pane_cmd, _, pane_cwd = (out.strip().partition("|") if code == 0 else ("", "", ""))
+        host=host,
+    )
+    pane_cmd, _, pane_cwd = out.strip().partition("|") if code == 0 else ("", "", "")
     check("pane", code == 0, f"command={pane_cmd or '?'} cwd={pane_cwd or '?'}")
 
     cap = _pane_text_for(target if by_registry_name else session, lines=30)
     check("capture", bool(cap.strip()), f"{len(cap.splitlines())} lines captured")
 
     log_sz = _log_size(target if by_registry_name else session)
-    check("stream_log", log_sz > 0,
-          f"{log_sz} bytes" if log_sz else "no armed stream log — idle-wait falls back to pane polling")
+    check(
+        "stream_log",
+        log_sz > 0,
+        f"{log_sz} bytes"
+        if log_sz
+        else "no armed stream log — idle-wait falls back to pane polling",
+    )
 
     from . import adapters
+
     gate = adapters.gated(_pane_agent(session, host), cap)
     check("gate", None, f"modal gate up: {gate!r}" if gate else "no modal gate")
 
@@ -2399,30 +2872,55 @@ def doctor(target: str, by_registry_name: bool = False) -> dict[str, Any]:
         # and can a FRESH process (this one, or a fresh sshd child) read it?
         q = shlex.quote(pane_cwd)
         code_srv, out_srv, err_srv = _run_tmux(
-            ["run-shell", f"ls {q} >/dev/null 2>&1 && echo OK || echo DENIED"], host=host)
+            ["run-shell", f"ls {q} >/dev/null 2>&1 && echo OK || echo DENIED"], host=host
+        )
         server_ok = code_srv == 0 and "OK" in out_srv
         if host:
             fresh = subprocess.run(
                 ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, f"ls {q}"],
-                capture_output=True, text=True, timeout=20, check=False)
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
             fresh_ok = fresh.returncode == 0
         else:
             fresh_ok = os.access(pane_cwd, os.R_OK | os.X_OK)
-        check("fs_tmux_server", server_ok, f"tmux server reads {pane_cwd}"
-              if server_ok else f"tmux server CANNOT read {pane_cwd} ({(out_srv or err_srv).strip()[:80]})")
-        check("fs_fresh_process", fresh_ok, f"fresh process reads {pane_cwd}"
-              if fresh_ok else f"fresh process cannot read {pane_cwd}")
+        check(
+            "fs_tmux_server",
+            server_ok,
+            f"tmux server reads {pane_cwd}"
+            if server_ok
+            else f"tmux server CANNOT read {pane_cwd} ({(out_srv or err_srv).strip()[:80]})",
+        )
+        check(
+            "fs_fresh_process",
+            fresh_ok,
+            f"fresh process reads {pane_cwd}"
+            if fresh_ok
+            else f"fresh process cannot read {pane_cwd}",
+        )
         if fresh_ok and not server_ok:
-            diagnosis = ("tmux server lost filesystem access to the pane's cwd while the "
-                         "disk is fine (macOS TCC grants don't reach running processes). "
-                         "Fix: grant Full Disk Access to the tmux binary and RESTART the "
-                         "tmux server at the desk — this kills its sessions, so time it.")
+            diagnosis = (
+                "tmux server lost filesystem access to the pane's cwd while the "
+                "disk is fine (macOS TCC grants don't reach running processes). "
+                "Fix: grant Full Disk Access to the tmux binary and RESTART the "
+                "tmux server at the desk — this kills its sessions, so time it."
+            )
         elif not fresh_ok and not server_ok:
             diagnosis = "the path is unreadable from everywhere — check the volume/mount itself"
     if gate and diagnosis == "healthy":
-        diagnosis = "healthy, but a modal gate is up — answer it (tmux_send force with the exact key)"
-    return {"ok": True, "target": target, "session": session, "host": host,
-            "checks": checks, "diagnosis": diagnosis}
+        diagnosis = (
+            "healthy, but a modal gate is up — answer it (tmux_send force with the exact key)"
+        )
+    return {
+        "ok": True,
+        "target": target,
+        "session": session,
+        "host": host,
+        "checks": checks,
+        "diagnosis": diagnosis,
+    }
 
 
 @mcp.tool()
@@ -2565,8 +3063,11 @@ async def tmux_wait(
                     last_grow[n] = time.time()
                     if until == "change":
                         why = "change"
-                if until == "idle" and time.time() - last_grow.get(n, 0.0) >= quiet \
-                        and _name_live(n):
+                if (
+                    until == "idle"
+                    and time.time() - last_grow.get(n, 0.0) >= quiet
+                    and _name_live(n)
+                ):
                     why = "idle"
                 elif until == "prompt":
                     line = _read_log(n, lines=1).strip()
@@ -2577,8 +3078,7 @@ async def tmux_wait(
                 if not line and not has_log.get(n, True):
                     # no log to quote — use the live pane's last non-blank line
                     pane = pane_seen.get(n) or _pane_text_for(n)
-                    line = next(
-                        (ln for ln in reversed(pane.splitlines()) if ln.strip()), "")
+                    line = next((ln for ln in reversed(pane.splitlines()) if ln.strip()), "")
                 extra.setdefault("last_line", line.strip()[-200:])
                 # Carry the DECISION, not an invitation to poll: classify the
                 # ready session and extract any modal gate text, so the caller
@@ -2586,14 +3086,14 @@ async def tmux_wait(
                 try:
                     from . import adapters
                     from .judge import classify_session
+
                     verdict = classify_session(n)
                     extra["state"] = verdict.get("state")
                     extra["flags"] = verdict.get("flags", [])
                     extra["summary"] = verdict.get("summary")
                     entry = _load_registry().get(n) or {}
                     sess, hst = entry.get("session", n), entry.get("host")
-                    gate = adapters.gated(_pane_agent(sess, hst),
-                                          _pane_text_for(n, lines=15))
+                    gate = adapters.gated(_pane_agent(sess, hst), _pane_text_for(n, lines=15))
                     if gate:
                         extra["gate"] = gate
                 except Exception:  # noqa: BLE001, S110 — enrichment must never break the wait
@@ -2601,9 +3101,12 @@ async def tmux_wait(
                 ready.append({"name": n, "why": why, **extra})
         if ready or time.time() >= deadline:
             done = {r["name"] for r in ready}
-            return {"ok": True, "ready": ready,
-                    "still_working": [n for n in names if n not in done],
-                    "timed_out": not ready}
+            return {
+                "ok": True,
+                "ready": ready,
+                "still_working": [n for n in names if n not in done],
+                "timed_out": not ready,
+            }
         await asyncio.sleep(1.0)
 
 
@@ -2631,6 +3134,7 @@ async def agent_advice(scenario: str = "") -> dict[str, Any]:
         Without: the full registry — agents, routes, rejected claims, what's installed.
     """
     from . import agents as _agents
+
     if not (scenario or "").strip():
         return {"ok": True, **_agents.table()}
     return {"ok": True, **_agents.advise(scenario)}
@@ -2663,8 +3167,9 @@ def _session_cwd(sid: str) -> str | None:
 
 @mcp.tool()
 @audited
-async def move_to_emux(name: str | None = None, session_id: str | None = None,
-                       cwd: str | None = None, gui: bool = True) -> dict[str, Any]:
+async def move_to_emux(
+    name: str | None = None, session_id: str | None = None, cwd: str | None = None, gui: bool = True
+) -> dict[str, Any]:
     """Move the CURRENT Claude Code session INTO emux — resume this conversation
     inside a driveable, emux-registered tmux window so emux can watch, classify,
     and steer it from the web control room.
@@ -2689,21 +3194,37 @@ async def move_to_emux(name: str | None = None, session_id: str | None = None,
     """
     sid = session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not sid:
-        return {"ok": False, "error": "no_session_id",
-                "hint": "not inside a Claude Code session; pass session_id=<id>"}
+        return {
+            "ok": False,
+            "error": "no_session_id",
+            "hint": "not inside a Claude Code session; pass session_id=<id>",
+        }
     workdir = cwd or _session_cwd(sid) or os.environ.get("HOME") or "."
     reg_name = name or f"chat-{sid[:8]}"
-    resume = (f"cd {shlex.quote(workdir)} && "
-              f"claude --dangerously-skip-permissions --resume {shlex.quote(sid)}")
-    r = await tmux_spawn(name=reg_name, gui=gui, command=resume,
-                         description=f"Claude Code chat {sid[:8]} — moved into emux",
-                         tags=["claude", "chat", "moved"])
+    resume = (
+        f"cd {shlex.quote(workdir)} && "
+        f"claude --dangerously-skip-permissions --resume {shlex.quote(sid)}"
+    )
+    r = await tmux_spawn(
+        name=reg_name,
+        gui=gui,
+        command=resume,
+        description=f"Claude Code chat {sid[:8]} — moved into emux",
+        tags=["claude", "chat", "moved"],
+    )
     if not r.get("ok"):
         return {"ok": False, "error": "spawn_failed", "detail": r}
-    return {"ok": True, "name": reg_name, "session_id": sid, "cwd": workdir,
-            "attach": f"tmux attach -t {reg_name}",
-            "note": ("A window opened with this conversation resumed. Switch to it and "
-                     "CLOSE the original terminal so only one copy stays live.")}
+    return {
+        "ok": True,
+        "name": reg_name,
+        "session_id": sid,
+        "cwd": workdir,
+        "attach": f"tmux attach -t {reg_name}",
+        "note": (
+            "A window opened with this conversation resumed. Switch to it and "
+            "CLOSE the original terminal so only one copy stays live."
+        ),
+    }
 
 
 def run_mcp_server() -> None:

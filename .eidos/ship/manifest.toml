@@ -1,0 +1,4 @@
+[agentic_first]
+code_justification = "specialist runtime"
+agentic_capability = "Provides durable tmux session, channel, and work-contract primitives that agents operate through."
+non_code_paths_considered = ["instruction", "routing", "proof"]

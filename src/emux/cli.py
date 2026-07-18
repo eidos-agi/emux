@@ -38,6 +38,8 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from . import channels as channel_store
+from . import linear as linear_store
 from .server import (
     _live_sessions,
     _load_registry,
@@ -52,6 +54,9 @@ from .server import (
     pursue,
     run_mcp_server,
     tmux_capture,
+    tmux_linear_evidence,
+    tmux_linear_link,
+    tmux_linear_status,
     tmux_run,
     tmux_send,
 )
@@ -61,7 +66,10 @@ def _attach_to_session(session: str) -> None:
     """Replace this process with `tmux attach -t <session>`. Does not return."""
     tmux = _resolve_tmux()
     if tmux is None:
-        print("emux: tmux not on PATH. install with `brew install tmux` or equivalent.", file=sys.stderr)
+        print(
+            "emux: tmux not on PATH. install with `brew install tmux` or equivalent.",
+            file=sys.stderr,
+        )
         sys.exit(2)
     os.execv(tmux, [tmux, "attach", "-t", session])
 
@@ -144,7 +152,9 @@ def _plan_prompt(transcript: list[str]) -> str:
     )
 
 
-def _run_with_spinner(label: str, argv: list[str], timeout: float = 120) -> subprocess.CompletedProcess:
+def _run_with_spinner(
+    label: str, argv: list[str], timeout: float = 120
+) -> subprocess.CompletedProcess:
     """Run a subprocess with a live spinner on stdout so the user can see the
     AI is still working. Silent (no spinner) when stdout is not a tty."""
     import itertools
@@ -230,8 +240,10 @@ def _new_mission_chat() -> dict[str, Any] | None:
             return None
         plan = _parse_plan(proc.stdout or "")
         if plan is None:
-            print(f"  emux: no usable plan in model reply: {(proc.stdout or proc.stderr or '')[:300]}",
-                  file=sys.stderr)
+            print(
+                f"  emux: no usable plan in model reply: {(proc.stdout or proc.stderr or '')[:300]}",
+                file=sys.stderr,
+            )
             return None
 
         if plan.get("question"):
@@ -261,7 +273,9 @@ def _new_mission_chat() -> dict[str, Any] | None:
         print(f"  command   {plan['command']}")
         print(f"  perms     {mode} ({perms_note})")
         print(f"  path      {_mission_path(plan)}")
-        print(f"  attach    {_head_attach_command(str(plan.get('name', '?')), plan.get('host') or None)}")
+        print(
+            f"  attach    {_head_attach_command(str(plan.get('name', '?')), plan.get('host') or None)}"
+        )
         answer = input("\n  start it? [Y/n, or type changes]: ").strip()
         if answer.lower() in {"", "y", "yes"}:
             return plan
@@ -289,7 +303,11 @@ def cmd_new_mission() -> int:
     if _session_exists(name, host=host):
         where = f" on {host}" if host else ""
         print(f"\n  ⚠ session '{name}' is already live{where} — starting would KILL it.")
-        choice = input(f"  [u]nique name '{name}-2' / [r]eplace it / [a]bort (default u): ").strip().lower()
+        choice = (
+            input(f"  [u]nique name '{name}-2' / [r]eplace it / [a]bort (default u): ")
+            .strip()
+            .lower()
+        )
         if choice in {"a", "abort"}:
             print("  aborted.")
             return 0
@@ -301,14 +319,16 @@ def cmd_new_mission() -> int:
             plan["name"] = name
             print(f"  starting as '{name}'.")
 
-    result = asyncio.run(tmux_spawn(
-        name=name,
-        command=str(plan["command"]),
-        host=host,
-        cwd=plan.get("cwd") or None,
-        description=plan.get("summary") or None,
-        tags=["mission"],
-    ))
+    result = asyncio.run(
+        tmux_spawn(
+            name=name,
+            command=str(plan["command"]),
+            host=host,
+            cwd=plan.get("cwd") or None,
+            description=plan.get("summary") or None,
+            tags=["mission"],
+        )
+    )
     if not result.get("ok"):
         print(f"emux: spawn failed: {result.get('stderr') or result.get('error')}", file=sys.stderr)
         return 1
@@ -320,7 +340,8 @@ def cmd_new_mission() -> int:
     # logged in, bad cwd) is caught HERE, not discovered on attach an hour later.
     time.sleep(2.5)
     code, out, _err = _run_tmux(
-        ["capture-pane", "-t", result["session"], "-p", "-S", "-15"], host=host)
+        ["capture-pane", "-t", result["session"], "-p", "-S", "-15"], host=host
+    )
     pane = "\n".join(ln for ln in (out or "").splitlines() if ln.strip())[-600:]
     if code == 0 and pane:
         print("\n  ━━ first light (pane after 2.5s) ━━")
@@ -332,8 +353,10 @@ def cmd_new_mission() -> int:
         print("\n  ⚠ could not capture the pane — the session may have died already.")
     attach = input("  attach now? [Y/n]: ").strip().lower()
     if attach in {"", "y", "yes"}:
-        os.execvp("/bin/sh", ["/bin/sh", "-c",
-                              _head_attach_command(result["session"], result.get("host"))])
+        os.execvp(
+            "/bin/sh",
+            ["/bin/sh", "-c", _head_attach_command(result["session"], result.get("host"))],
+        )
     return 0
 
 
@@ -341,7 +364,10 @@ def cmd_picker() -> int:
     """Run the textual TUI picker, then dispatch the user's selection."""
     if _resolve_tmux() is None:
         print("emux: tmux not found on PATH.", file=sys.stderr)
-        print("       install with `brew install tmux` (macOS) or `apt install tmux` (Debian).", file=sys.stderr)
+        print(
+            "       install with `brew install tmux` (macOS) or `apt install tmux` (Debian).",
+            file=sys.stderr,
+        )
         return 2
 
     from .tui import run_tui
@@ -480,10 +506,13 @@ def cmd_goal(args: argparse.Namespace) -> int:
     if tel := result.get("telos"):
         print(f"[telos: {tel['north_star_id']} closed {tel['outcome']}]", file=sys.stderr)
     if not result.get("ok"):
-        print(f"emux goal: {result.get('error', 'failed')} ({result.get('detail','')})", file=sys.stderr)
+        print(
+            f"emux goal: {result.get('error', 'failed')} ({result.get('detail', '')})",
+            file=sys.stderr,
+        )
         return 1
     verdict = "achieved" if result.get("success") else "not achievable"
-    print(f"goal {verdict} in {len(result.get('steps', []))} step(s): {result.get('summary','')}")
+    print(f"goal {verdict} in {len(result.get('steps', []))} step(s): {result.get('summary', '')}")
     return 0 if result.get("success") else 1
 
 
@@ -500,8 +529,10 @@ def cmd_login(args: argparse.Namespace) -> int:
         return 0 if result.get("ok") else 1
     if not result.get("ok"):
         detail = result.get("detail", "")
-        print(f"emux login: {result.get('error', 'failed')}"
-              + (f" — {detail}" if detail else ""), file=sys.stderr)
+        print(
+            f"emux login: {result.get('error', 'failed')}" + (f" — {detail}" if detail else ""),
+            file=sys.stderr,
+        )
         if result.get("screen"):
             print(f"  screen: {result['screen']}", file=sys.stderr)
         return 1
@@ -545,26 +576,30 @@ def _watch_targets(
         for session in live:
             if session["name"] in registered_sessions:
                 continue
-            targets.append({
-                "kind": "live",
-                "name": session["name"],
-                "session": session["name"],
-                "description": None,
-                "tags": [],
-                "live": True,
-                "tmux": session,
-            })
+            targets.append(
+                {
+                    "kind": "live",
+                    "name": session["name"],
+                    "session": session["name"],
+                    "description": None,
+                    "tags": [],
+                    "live": True,
+                    "tmux": session,
+                }
+            )
 
     if not query:
         return targets
 
     def matches(item: dict[str, Any]) -> bool:
-        haystack = " ".join([
-            str(item.get("name", "")),
-            str(item.get("session", "")),
-            str(item.get("description") or ""),
-            " ".join(str(t) for t in item.get("tags") or []),
-        ]).lower()
+        haystack = " ".join(
+            [
+                str(item.get("name", "")),
+                str(item.get("session", "")),
+                str(item.get("description") or ""),
+                " ".join(str(t) for t in item.get("tags") or []),
+            ]
+        ).lower()
         return query in haystack
 
     return [item for item in targets if matches(item)]
@@ -625,7 +660,10 @@ def cmd_watch(args: argparse.Namespace) -> int:
     """Watch many registered/live tmux sessions in one terminal."""
     if _resolve_tmux() is None:
         print("emux: tmux not found on PATH.", file=sys.stderr)
-        print("       install with `brew install tmux` (macOS) or `apt install tmux` (Debian).", file=sys.stderr)
+        print(
+            "       install with `brew install tmux` (macOS) or `apt install tmux` (Debian).",
+            file=sys.stderr,
+        )
         return 2
 
     try:
@@ -656,17 +694,144 @@ def cmd_watch(args: argparse.Namespace) -> int:
 def cmd_register(args: argparse.Namespace) -> int:
     """Non-interactive register command for scripting."""
     import time
+
     registry = _load_registry()
-    registry[args.name] = {
+    entry = {
         "session": args.session,
         "description": args.description,
         "tags": args.tags or [],
         "manages": args.manages or [],
         "registered_at": int(time.time()),
     }
+    if args.linear_issue:
+        try:
+            entry["linear"] = linear_store.metadata(
+                args.linear_issue, args.linear_project, args.linear_team, args.acceptance
+            )
+        except ValueError as e:
+            print(f"emux register: {e}", file=sys.stderr)
+            return 2
+    elif args.linear_project or args.linear_team or args.acceptance:
+        print("emux register: --linear-issue is required with Linear metadata", file=sys.stderr)
+        return 2
+    entry["channels"] = channel_store.resolve_channels(
+        args.name, {**entry, "channels": args.channels or []}
+    )
+    registry[args.name] = entry
     _save_registry(registry)
     _start_stream_log(args.session, args.name)  # arm durable logging on register
-    print(f"registered '{args.name}' → {args.session}")
+    suffix = f" channels={','.join(entry['channels'])}" if entry["channels"] else ""
+    print(f"registered '{args.name}' → {args.session}{suffix}")
+    for suggestion in channel_store.suggest_channels(registry):
+        print(
+            f"suggested channel: T{suggestion['tier']} {suggestion['name']} ({suggestion['reason']})"
+        )
+    return 0
+
+
+def cmd_channel(args: argparse.Namespace) -> int:
+    registry = _load_registry()
+    if args.channel_cmd == "create":
+        try:
+            created = channel_store.create_channel(
+                args.name, args.tier, args.description, args.parent, args.matchers
+            )
+        except ValueError as e:
+            print(f"emux channel: {e}", file=sys.stderr)
+            return 2
+        changed = channel_store.refresh_registry(registry)
+        if changed:
+            _save_registry(registry)
+        created["tagged_sessions"] = changed
+        print(
+            json.dumps(created, indent=2)
+            if args.json
+            else f"created T{created['tier']} channel '{created['name']}'"
+        )
+        return 0
+    if args.channel_cmd == "note":
+        try:
+            note = channel_store.append_note(args.name, args.kind, args.text, args.source)
+        except ValueError as e:
+            print(f"emux channel: {e}", file=sys.stderr)
+            return 2
+        print(json.dumps(note, indent=2) if args.json else f"noted {args.kind} in '{args.name}'")
+        return 0
+    if args.channel_cmd == "suggest":
+        suggestions = channel_store.suggest_channels(registry)
+        print(
+            json.dumps(suggestions, indent=2)
+            if args.json
+            else "\n".join(f"T{x['tier']} {x['name']}: {x['reason']}" for x in suggestions)
+            or "no channel suggestions"
+        )
+        return 0
+    if args.channel_cmd == "refresh":
+        changed = channel_store.refresh_registry(registry)
+        channel_store.refresh_okf()
+        if changed:
+            _save_registry(registry)
+        print(json.dumps(changed, indent=2) if args.json else f"refreshed {len(changed)} sessions")
+        return 0
+    definitions = channel_store.load_channels()
+    if args.channel_cmd == "show":
+        try:
+            result = channel_store.channel_context(args.name, registry, definitions)
+        except ValueError as e:
+            print(f"emux channel: {e}", file=sys.stderr)
+            return 2
+        print(json.dumps(result, indent=2))
+        return 0
+    rows = [
+        channel_store.channel_context(name, registry, definitions)
+        for name in sorted(definitions, key=lambda n: (definitions[n].get("tier", 9), n))
+    ]
+    if args.json:
+        print(json.dumps(rows, indent=2))
+    else:
+        for row in rows:
+            parent = f" ← {row['parent']}" if row.get("parent") else ""
+            print(
+                f"T{row['tier']} {row['name']}{parent} ({len(row['sessions'])} sessions) — {row['description']}"
+            )
+    return 0
+
+
+def cmd_linear(args: argparse.Namespace) -> int:
+    """Manage local Linear work contracts; never mutates Linear itself."""
+    if args.linear_cmd == "link":
+        result = asyncio.run(
+            tmux_linear_link(args.session, args.issue, args.project, args.team, args.acceptance)
+        )
+    elif args.linear_cmd == "evidence":
+        result = asyncio.run(
+            tmux_linear_evidence(args.session, args.criterion, args.proof, args.source)
+        )
+    else:
+        result = asyncio.run(tmux_linear_status(args.session, args.channel))
+    if not result.get("ok"):
+        print(f"emux linear: {result.get('error', 'failed')}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2))
+    elif args.linear_cmd == "link":
+        print(f"linked {args.session} → {result['linear']['issue']}")
+    elif args.linear_cmd == "evidence":
+        evidence = result["evidence"]
+        print(f"recorded evidence for {evidence['issue']} criterion {evidence['criterion']}")
+    else:
+        for row in result["work"]:
+            missing = len(row["missing_evidence"])
+            recommendation = (
+                f" → recommend {row['recommended_linear_status']}"
+                if row["recommended_linear_status"]
+                else ""
+            )
+            print(
+                f"{row['issue']}  {row['state']}  session={row['session']}  missing={missing}{recommendation}"
+            )
+        if not result["work"]:
+            print("no Linear-linked sessions")
     return 0
 
 
@@ -675,8 +840,11 @@ def cmd_log(args: argparse.Namespace) -> int:
     streamed via pipe-pane, not an ephemeral pane snapshot."""
     out = _read_log(args.name, lines=args.lines, strip=not args.raw)
     if not out.strip():
-        print(f"emux: no log for '{args.name}' yet — logging arms on register/drive "
-              "and streams forward from that moment.", file=sys.stderr)
+        print(
+            f"emux: no log for '{args.name}' yet — logging arms on register/drive "
+            "and streams forward from that moment.",
+            file=sys.stderr,
+        )
         return 1
     print(out)
     return 0
@@ -700,7 +868,9 @@ def _joined_words(words: list[str], field_name: str) -> str:
     return value
 
 
-def _print_result(result: dict[str, Any], as_json: bool = False, content_key: str | None = None) -> int:
+def _print_result(
+    result: dict[str, Any], as_json: bool = False, content_key: str | None = None
+) -> int:
     if as_json:
         print(json.dumps(result, indent=2, sort_keys=True))
     elif result.get("ok") and content_key and content_key in result:
@@ -726,46 +896,54 @@ def _print_result(result: dict[str, Any], as_json: bool = False, content_key: st
 def cmd_send(args: argparse.Namespace) -> int:
     """Send tmux keys to a registered name by default."""
     keys = _joined_words(args.keys, "keys")
-    result = asyncio.run(tmux_send(
-        target=args.target,
-        keys=keys,
-        enter=not args.no_enter,
-        by_registry_name=not args.session,
-    ))
+    result = asyncio.run(
+        tmux_send(
+            target=args.target,
+            keys=keys,
+            enter=not args.no_enter,
+            by_registry_name=not args.session,
+        )
+    )
     return _print_result(result, as_json=args.json)
 
 
 def cmd_interrupt(args: argparse.Namespace) -> int:
     """Send C-c to a registered name by default."""
-    result = asyncio.run(tmux_send(
-        target=args.target,
-        keys="C-c",
-        enter=False,
-        by_registry_name=not args.session,
-    ))
+    result = asyncio.run(
+        tmux_send(
+            target=args.target,
+            keys="C-c",
+            enter=False,
+            by_registry_name=not args.session,
+        )
+    )
     return _print_result(result, as_json=args.json)
 
 
 def cmd_capture(args: argparse.Namespace) -> int:
     """Capture a registered name by default."""
-    result = asyncio.run(tmux_capture(
-        target=args.target,
-        lines=args.lines,
-        by_registry_name=not args.session,
-    ))
+    result = asyncio.run(
+        tmux_capture(
+            target=args.target,
+            lines=args.lines,
+            by_registry_name=not args.session,
+        )
+    )
     return _print_result(result, as_json=args.json, content_key="content")
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     """Send a command, wait, then capture."""
     command = _joined_words(args.command, "command")
-    result = asyncio.run(tmux_run(
-        target=args.target,
-        command=command,
-        wait_seconds=args.wait,
-        capture_lines=args.lines,
-        by_registry_name=not args.session,
-    ))
+    result = asyncio.run(
+        tmux_run(
+            target=args.target,
+            command=command,
+            wait_seconds=args.wait,
+            capture_lines=args.lines,
+            by_registry_name=not args.session,
+        )
+    )
     return _print_result(result, as_json=args.json, content_key="content")
 
 
@@ -775,6 +953,7 @@ def _resolve_session_target(
     """Resolve a CLI target to a live tmux session: (ok, session, host, err).
     Host-aware — a registry entry on another machine checks liveness THERE."""
     from .server import _session_exists
+
     session, host = target, None
     if by_registry_name:
         registry = _load_registry()
@@ -806,8 +985,9 @@ def _head_attach_command(session: str, host: str | None = None) -> str:
     session (same PATH shim as server._run_tmux — non-interactive ssh misses
     Homebrew's bin)."""
     if host:
-        remote = ("PATH=/opt/homebrew/bin:/usr/local/bin:$PATH "
-                  f"tmux attach -t {shlex.quote(session)}")
+        remote = (
+            f"PATH=/opt/homebrew/bin:/usr/local/bin:$PATH tmux attach -t {shlex.quote(session)}"
+        )
         return f"ssh -t {shlex.quote(host)} {shlex.quote(remote)}"
     return f"tmux attach -t {shlex.quote(session)}"
 
@@ -816,13 +996,14 @@ def _write_head_command_file(session: str, host: str | None = None) -> Path:
     command = _head_attach_command(session, host)
     safe_session = "".join(ch if ch.isalnum() or ch in ".-_" else "-" for ch in session)
     script_path = Path(tempfile.gettempdir()) / f"emux-head-{os.getpid()}-{safe_session}.command"
-    script_path.write_text(f"#!/bin/zsh\nrm -f \"$0\"\nexec {command}\n")
+    script_path.write_text(f'#!/bin/zsh\nrm -f "$0"\nexec {command}\n')
     script_path.chmod(0o700)
     return script_path
 
 
-def _open_iterm_head(session: str, new_window: bool = False,
-                     host: str | None = None) -> tuple[bool, str | None]:
+def _open_iterm_head(
+    session: str, new_window: bool = False, host: str | None = None
+) -> tuple[bool, str | None]:
     """Open iTerm2/iTerm attached to an existing tmux session (ssh -t if remote)."""
     if platform.system() != "Darwin":
         return False, "emux head currently supports macOS iTerm2/iTerm only"
@@ -853,8 +1034,7 @@ def _open_iterm_head(session: str, new_window: bool = False,
     return True, None
 
 
-def _open_terminal_app_head(session: str,
-                            host: str | None = None) -> tuple[bool, str | None]:
+def _open_terminal_app_head(session: str, host: str | None = None) -> tuple[bool, str | None]:
     """Open macOS Terminal.app attached to an existing tmux session."""
     if platform.system() != "Darwin":
         return False, "Terminal.app head currently supports macOS only"
@@ -901,9 +1081,11 @@ def _current_tmux_session() -> str | None:
     """The tmux session this process is running inside (a hook runs in the
     worker's pane), or None if not in tmux."""
     import subprocess
+
     try:
-        r = subprocess.run(["tmux", "display-message", "-p", "#S"],
-                           capture_output=True, text=True, timeout=5)
+        r = subprocess.run(
+            ["tmux", "display-message", "-p", "#S"], capture_output=True, text=True, timeout=5
+        )
         return r.stdout.strip() or None
     except Exception:
         return None
@@ -917,10 +1099,13 @@ def _push_signal(host: str, session: str, rec: dict) -> str:
     import subprocess
 
     from .server import remote_inbox_relpath
+
     rel = remote_inbox_relpath(session)
     line = json.dumps(rec)
-    cmd = (f"mkdir -p {shlex.quote(rel.rsplit('/', 1)[0])} && "
-           f"printf '%s\\n' {shlex.quote(line)} >> {shlex.quote(rel)}")
+    cmd = (
+        f"mkdir -p {shlex.quote(rel.rsplit('/', 1)[0])} && "
+        f"printf '%s\\n' {shlex.quote(line)} >> {shlex.quote(rel)}"
+    )
     try:
         r = subprocess.run(["ssh", host, cmd], capture_output=True, text=True, timeout=15)
         return f" (pushed → {host})" if r.returncode == 0 else f" (push → {host} FAILED)"
@@ -930,10 +1115,10 @@ def _push_signal(host: str, session: str, rec: dict) -> str:
 
 def cmd_signal(args: argparse.Namespace) -> int:
     from .server import inject_signal
+
     session = args.session or _current_tmux_session()
     if not session:
-        print("emux signal: no --session given and not inside a tmux session",
-              file=sys.stderr)
+        print("emux signal: no --session given and not inside a tmux session", file=sys.stderr)
         return 2
     rec = inject_signal(session, args.kind, args.payload or "")
     if rec is None:
@@ -977,8 +1162,10 @@ def cmd_gates(args: argparse.Namespace) -> int:
     # audited send to that session within 120s — the human's actual keystroke.
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     for ev in events:
-        g = groups.setdefault((ev.get("agent", ""), ev.get("gate", "")),
-                              {"auto": 0, "escalated": 0, "keys": {}, "last": 0})
+        g = groups.setdefault(
+            (ev.get("agent", ""), ev.get("gate", "")),
+            {"auto": 0, "escalated": 0, "keys": {}, "last": 0},
+        )
         g[ev.get("action", "escalated")] = g.get(ev.get("action", "escalated"), 0) + 1
         g["last"] = max(g["last"], ev.get("t", 0))
         if ev.get("action") == "auto":
@@ -986,8 +1173,7 @@ def cmd_gates(args: argparse.Namespace) -> int:
             g["keys"][k] = g["keys"].get(k, 0) + 1
         else:
             for s in sends:
-                if s.get("target") == ev.get("session") and \
-                        0 <= s["t"] - ev.get("t", 0) <= 120:
+                if s.get("target") == ev.get("session") and 0 <= s["t"] - ev.get("t", 0) <= 120:
                     k = str(s.get("keys", ""))[:40]
                     g["keys"][k] = g["keys"].get(k, 0) + 1
                     break
@@ -996,25 +1182,33 @@ def cmd_gates(args: argparse.Namespace) -> int:
         return 0
     order = sorted(groups.items(), key=lambda kv: -(kv[1]["auto"] + kv[1]["escalated"]))
     print(f"{len(events)} gate sightings, {len(groups)} distinct gates\n")
-    for (agent, gate), g in order[:args.limit]:
+    for (agent, gate), g in order[: args.limit]:
         total = g["auto"] + g["escalated"]
         top = max(g["keys"].items(), key=lambda kv: kv[1]) if g["keys"] else None
         print(f"{total:4d}x  [{agent or '?'}] {gate[:70]!r}")
-        print(f"       auto:{g['auto']} escalated:{g['escalated']}"
-              + (f"  usual answer: {top[0]!r} ({top[1]}x)" if top else "  no recorded answer"))
+        print(
+            f"       auto:{g['auto']} escalated:{g['escalated']}"
+            + (f"  usual answer: {top[0]!r} ({top[1]}x)" if top else "  no recorded answer")
+        )
         if g["escalated"] and top and top[1] >= max(3, total // 2):
-            rule = {"pattern": re.escape(gate)[:80], "keys": top[0].split() or ["Enter"],
-                    "note": f"mined from {total} sightings"}
+            rule = {
+                "pattern": re.escape(gate)[:80],
+                "keys": top[0].split() or ["Enter"],
+                "note": f"mined from {total} sightings",
+            }
             print(f"       suggested rule: {json.dumps(rule)}")
-    print("\nadd rules to ~/.config/emux/gatepolicy.json as "
-          '{"rules": [{"pattern": "...", "keys": ["Enter"], "note": "..."}]} '
-          "— the daemon answers matching gates itself (destructive text never auto-answers)")
+    print(
+        "\nadd rules to ~/.config/emux/gatepolicy.json as "
+        '{"rules": [{"pattern": "...", "keys": ["Enter"], "note": "..."}]} '
+        "— the daemon answers matching gates itself (destructive text never auto-answers)"
+    )
     return 0
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Diagnose a session's environment (liveness, capture, log, gate, fs access)."""
     from .server import doctor
+
     result = doctor(args.target, by_registry_name=not args.session)
     if args.json:
         print(json.dumps(result, indent=2))
@@ -1041,8 +1235,9 @@ def cmd_head(args: argparse.Namespace) -> int:
         print(_head_attach_command(session, host))
         return 0
 
-    ok, app_name, err = _open_terminal_head(session, terminal=args.terminal,
-                                            new_window=args.window, host=host)
+    ok, app_name, err = _open_terminal_head(
+        session, terminal=args.terminal, new_window=args.window, host=host
+    )
     if not ok:
         print(f"emux: {err}", file=sys.stderr)
         return 1
@@ -1060,52 +1255,133 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd")
 
     sub.add_parser("mcp", help="start the emux MCP server (stdio)")
-    sub.add_parser("new", help="new mission: describe what you want, confirm the AI's session spec, start it (same as 'n' in the TUI)")
+    sub.add_parser(
+        "new",
+        help="new mission: describe what you want, confirm the AI's session spec, start it (same as 'n' in the TUI)",
+    )
     sub.add_parser("ls", help="print registered + live sessions (non-interactive)")
 
-    p_ask = sub.add_parser("ask", help="send a prompt to an AI in a tmux session, wait for it to settle, print the reply")
+    p_ask = sub.add_parser(
+        "ask",
+        help="send a prompt to an AI in a tmux session, wait for it to settle, print the reply",
+    )
     p_ask.add_argument("target", help="tmux session name (or registry name with -n)")
     p_ask.add_argument("prompt", help="the message to send to the AI")
-    p_ask.add_argument("-n", "--by-name", action="store_true", help="resolve target via the registry")
-    p_ask.add_argument("--settle", type=float, default=2.5, help="reply is done once the pane is unchanged this long (default 2.5s)")
-    p_ask.add_argument("--max", type=float, default=90.0, help="hard cap on total wait (default 90s)")
-    p_ask.add_argument("-b", "--busy", action="append", metavar="MARKER",
-                       help="substring meaning the AI is still working (e.g. 'thinking'); never settle while on screen. Repeatable.")
-    p_ask.add_argument("--screen", action="store_true", help="print the full settled pane instead of just the reply delta")
+    p_ask.add_argument(
+        "-n", "--by-name", action="store_true", help="resolve target via the registry"
+    )
+    p_ask.add_argument(
+        "--settle",
+        type=float,
+        default=2.5,
+        help="reply is done once the pane is unchanged this long (default 2.5s)",
+    )
+    p_ask.add_argument(
+        "--max", type=float, default=90.0, help="hard cap on total wait (default 90s)"
+    )
+    p_ask.add_argument(
+        "-b",
+        "--busy",
+        action="append",
+        metavar="MARKER",
+        help="substring meaning the AI is still working (e.g. 'thinking'); never settle while on screen. Repeatable.",
+    )
+    p_ask.add_argument(
+        "--screen",
+        action="store_true",
+        help="print the full settled pane instead of just the reply delta",
+    )
 
-    p_nav = sub.add_parser("navigate", help="drive a session's TUI toward a goal, letting a model (claude -p) pick keystrokes")
+    p_nav = sub.add_parser(
+        "navigate",
+        help="drive a session's TUI toward a goal, letting a model (claude -p) pick keystrokes",
+    )
     p_nav.add_argument("target", help="tmux session name (or registry name with -n)")
     p_nav.add_argument("goal", help="plain-English description of where to get to")
-    p_nav.add_argument("-n", "--by-name", action="store_true", help="resolve target via the registry")
-    p_nav.add_argument("--until", default=None, help="stop early if this substring appears on screen")
-    p_nav.add_argument("--max-steps", type=int, default=12, help="max navigation steps (default 12)")
-    p_nav.add_argument("--yolo", action="store_true", help="disable the destructive-action gate (also via $EMUX_ALLOW_DANGEROUS)")
+    p_nav.add_argument(
+        "-n", "--by-name", action="store_true", help="resolve target via the registry"
+    )
+    p_nav.add_argument(
+        "--until", default=None, help="stop early if this substring appears on screen"
+    )
+    p_nav.add_argument(
+        "--max-steps", type=int, default=12, help="max navigation steps (default 12)"
+    )
+    p_nav.add_argument(
+        "--yolo",
+        action="store_true",
+        help="disable the destructive-action gate (also via $EMUX_ALLOW_DANGEROUS)",
+    )
 
-    p_goal = sub.add_parser("goal", help="pursue a GOAL in a session's TUI autonomously (observe→act→repeat until done)")
+    p_goal = sub.add_parser(
+        "goal", help="pursue a GOAL in a session's TUI autonomously (observe→act→repeat until done)"
+    )
     p_goal.add_argument("target", help="tmux session name (or registry name with -n)")
     p_goal.add_argument("goal", help="what to accomplish, in plain English")
-    p_goal.add_argument("-n", "--by-name", action="store_true", help="resolve target via the registry")
-    p_goal.add_argument("--max-steps", type=int, default=15, help="max observe/act cycles (default 15)")
-    p_goal.add_argument("--telos", action="store_true", help="guard the run with the telos-md drift-guard (record it; abort on a telos stop signal). Also on via $EMUX_TELOS")
-    p_goal.add_argument("--yolo", action="store_true", help="disable the destructive-action gate (also via $EMUX_ALLOW_DANGEROUS)")
+    p_goal.add_argument(
+        "-n", "--by-name", action="store_true", help="resolve target via the registry"
+    )
+    p_goal.add_argument(
+        "--max-steps", type=int, default=15, help="max observe/act cycles (default 15)"
+    )
+    p_goal.add_argument(
+        "--telos",
+        action="store_true",
+        help="guard the run with the telos-md drift-guard (record it; abort on a telos stop signal). Also on via $EMUX_TELOS",
+    )
+    p_goal.add_argument(
+        "--yolo",
+        action="store_true",
+        help="disable the destructive-action gate (also via $EMUX_ALLOW_DANGEROUS)",
+    )
 
-    p_login = sub.add_parser("login", help="drive a Claude Code login in a session: surface the OAuth URL, then finish with --code")
+    p_login = sub.add_parser(
+        "login",
+        help="drive a Claude Code login in a session: surface the OAuth URL, then finish with --code",
+    )
     p_login.add_argument("target", help="tmux session name (or registry name with -n)")
-    p_login.add_argument("-n", "--by-name", action="store_true", help="resolve target via the registry (works across hosts)")
-    p_login.add_argument("--code", default=None, help="finish the flow: paste this authorization code into the waiting prompt")
-    p_login.add_argument("--switch", action="store_true", help="change account: /logout first, then start the login sequence")
+    p_login.add_argument(
+        "-n",
+        "--by-name",
+        action="store_true",
+        help="resolve target via the registry (works across hosts)",
+    )
+    p_login.add_argument(
+        "--code",
+        default=None,
+        help="finish the flow: paste this authorization code into the waiting prompt",
+    )
+    p_login.add_argument(
+        "--switch",
+        action="store_true",
+        help="change account: /logout first, then start the login sequence",
+    )
     p_login.add_argument("--json", action="store_true", help="print structured result JSON")
 
-    p_web = sub.add_parser("web", help="start the web daemon — monitor sessions in a browser (grid/groups/activity/flow/chat)")
-    p_web.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1; no auth — keep it local)")
+    p_web = sub.add_parser(
+        "web",
+        help="start the web daemon — monitor sessions in a browser (grid/groups/activity/flow/chat)",
+    )
+    p_web.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="bind address (default 127.0.0.1; no auth — keep it local)",
+    )
     p_web.add_argument("--port", type=int, default=8689, help="port (default 8689)")
     p_web.add_argument("--open", action="store_true", help="open the browser after starting")
-    p_web.add_argument("--print-launchd", action="store_true",
-                       help="print a launchd plist that keeps the daemon running, then exit")
+    p_web.add_argument(
+        "--print-launchd",
+        action="store_true",
+        help="print a launchd plist that keeps the daemon running, then exit",
+    )
     p_watch = sub.add_parser("watch", help="watch registered + live sessions in one terminal")
     p_watch.add_argument("--once", action="store_true", help="render one snapshot and exit")
-    p_watch.add_argument("--no-clear", action="store_true", help="do not clear screen between refreshes")
-    p_watch.add_argument("--registered-only", action="store_true", help="hide live unregistered tmux sessions")
+    p_watch.add_argument(
+        "--no-clear", action="store_true", help="do not clear screen between refreshes"
+    )
+    p_watch.add_argument(
+        "--registered-only", action="store_true", help="hide live unregistered tmux sessions"
+    )
     p_watch.add_argument("--filter", default=None, help="only show sessions matching text")
     p_watch.add_argument("--lines", type=int, default=8, help="pane lines to show per session")
     p_watch.add_argument("--interval", type=float, default=2.0, help="refresh interval in seconds")
@@ -1115,33 +1391,125 @@ def main(argv: list[str] | None = None) -> int:
     p_reg.add_argument("session")
     p_reg.add_argument("-d", "--description", default=None)
     p_reg.add_argument("-t", "--tags", nargs="*")
-    p_reg.add_argument("-m", "--manages", nargs="*",
-                       help="other registered names (or session ids) this agent manages — drawn as arrows in `emux web` flow view")
+    p_reg.add_argument(
+        "-m",
+        "--manages",
+        nargs="*",
+        help="other registered names (or session ids) this agent manages — drawn as arrows in `emux web` flow view",
+    )
+    p_reg.add_argument(
+        "-c",
+        "--channels",
+        nargs="*",
+        help="explicit channel names; matcher inference still applies",
+    )
+    p_reg.add_argument("--linear-issue", help="Linear issue identifier or URL")
+    p_reg.add_argument("--linear-project")
+    p_reg.add_argument("--linear-team")
+    p_reg.add_argument("--acceptance", action="append", help="acceptance criterion; repeatable")
+
+    p_channel = sub.add_parser(
+        "channel", help="tiered topic memory over existing registry, logs, and signals"
+    )
+    channel_sub = p_channel.add_subparsers(dest="channel_cmd", required=True)
+    p_channel_list = channel_sub.add_parser("list")
+    p_channel_list.add_argument("--json", action="store_true")
+    p_channel_create = channel_sub.add_parser("create")
+    p_channel_create.add_argument("name")
+    p_channel_create.add_argument("--tier", type=int, required=True, choices=range(4))
+    p_channel_create.add_argument("--description", required=True)
+    p_channel_create.add_argument("--parent")
+    p_channel_create.add_argument("--match", dest="matchers", action="append")
+    p_channel_create.add_argument("--json", action="store_true")
+    p_channel_show = channel_sub.add_parser("show")
+    p_channel_show.add_argument("name")
+    p_channel_show.add_argument("--json", action="store_true")
+    p_channel_suggest = channel_sub.add_parser("suggest")
+    p_channel_suggest.add_argument("--json", action="store_true")
+    p_channel_refresh = channel_sub.add_parser("refresh")
+    p_channel_refresh.add_argument("--json", action="store_true")
+    p_channel_note = channel_sub.add_parser("note")
+    p_channel_note.add_argument("name")
+    p_channel_note.add_argument("kind", choices=sorted(channel_store.NOTE_KINDS))
+    p_channel_note.add_argument("text")
+    p_channel_note.add_argument("--source")
+    p_channel_note.add_argument("--json", action="store_true")
+
+    p_linear = sub.add_parser(
+        "linear", help="link workers to Linear contracts and reconcile evidence"
+    )
+    linear_sub = p_linear.add_subparsers(dest="linear_cmd", required=True)
+    p_linear_link = linear_sub.add_parser("link", help="link a registered session to an issue")
+    p_linear_link.add_argument("session")
+    p_linear_link.add_argument("issue")
+    p_linear_link.add_argument("--project")
+    p_linear_link.add_argument("--team")
+    p_linear_link.add_argument("--acceptance", action="append")
+    p_linear_link.add_argument("--json", action="store_true")
+    p_linear_evidence = linear_sub.add_parser("evidence", help="record verified acceptance proof")
+    p_linear_evidence.add_argument("session")
+    p_linear_evidence.add_argument(
+        "criterion", type=int, help="1-based acceptance criterion number"
+    )
+    p_linear_evidence.add_argument("proof")
+    p_linear_evidence.add_argument("--source")
+    p_linear_evidence.add_argument("--json", action="store_true")
+    p_linear_status = linear_sub.add_parser(
+        "status", help="reconcile linked workers without writing Linear"
+    )
+    p_linear_status.add_argument("session", nargs="?")
+    p_linear_status.add_argument("--channel")
+    p_linear_status.add_argument("--json", action="store_true")
 
     p_unreg = sub.add_parser("unregister", help="remove a session from the registry")
     p_unreg.add_argument("name")
 
-    p_log = sub.add_parser("log", help="print a session's durable character log (complete history, not a pane snapshot)")
+    p_log = sub.add_parser(
+        "log",
+        help="print a session's durable character log (complete history, not a pane snapshot)",
+    )
     p_log.add_argument("name", help="registered name (or log basename)")
     p_log.add_argument("--lines", type=int, default=None, help="last N lines only")
-    p_log.add_argument("--raw", action="store_true", help="raw stream incl ANSI (for exact replay); default strips ANSI")
+    p_log.add_argument(
+        "--raw",
+        action="store_true",
+        help="raw stream incl ANSI (for exact replay); default strips ANSI",
+    )
 
     p_send = sub.add_parser("send", help="send keys to a registered session")
     p_send.add_argument("target", help="registered name by default, or tmux session with --session")
     p_send.add_argument("keys", nargs="+", help="tmux keys or literal text to send")
-    p_send.add_argument("--no-enter", action="store_true", help="do not append Enter after the keys")
-    p_send.add_argument("--session", action="store_true", help="target a raw tmux session instead of a registry name")
+    p_send.add_argument(
+        "--no-enter", action="store_true", help="do not append Enter after the keys"
+    )
+    p_send.add_argument(
+        "--session",
+        action="store_true",
+        help="target a raw tmux session instead of a registry name",
+    )
     p_send.add_argument("--json", action="store_true", help="print structured result JSON")
 
     p_interrupt = sub.add_parser("interrupt", help="send C-c to a registered session")
-    p_interrupt.add_argument("target", help="registered name by default, or tmux session with --session")
-    p_interrupt.add_argument("--session", action="store_true", help="target a raw tmux session instead of a registry name")
+    p_interrupt.add_argument(
+        "target", help="registered name by default, or tmux session with --session"
+    )
+    p_interrupt.add_argument(
+        "--session",
+        action="store_true",
+        help="target a raw tmux session instead of a registry name",
+    )
     p_interrupt.add_argument("--json", action="store_true", help="print structured result JSON")
 
     p_capture = sub.add_parser("capture", help="capture a registered session pane")
-    p_capture.add_argument("target", help="registered name by default, or tmux session with --session")
+    p_capture.add_argument(
+        "target", help="registered name by default, or tmux session with --session"
+    )
     p_capture.add_argument("--lines", type=int, default=200, help="scrollback lines to capture")
-    p_capture.add_argument("--session", action="store_true", help="target a raw tmux session instead of a registry name")
+    p_capture.add_argument(
+        "--session",
+        action="store_true",
+        help="target a raw tmux session instead of a registry name",
+    )
     p_capture.add_argument("--json", action="store_true", help="print structured result JSON")
 
     p_run = sub.add_parser("run", help="send a command, wait, and capture the session")
@@ -1149,7 +1517,11 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("command", nargs="+", help="command text to send")
     p_run.add_argument("--wait", type=float, default=2.0, help="seconds to wait before capture")
     p_run.add_argument("--lines", type=int, default=200, help="scrollback lines to capture")
-    p_run.add_argument("--session", action="store_true", help="target a raw tmux session instead of a registry name")
+    p_run.add_argument(
+        "--session",
+        action="store_true",
+        help="target a raw tmux session instead of a registry name",
+    )
     p_run.add_argument("--json", action="store_true", help="print structured result JSON")
 
     p_signal = sub.add_parser(
@@ -1157,24 +1529,61 @@ def main(argv: list[str] | None = None) -> int:
         help="inject an up-channel signal for THIS session — call from a Claude Code Stop/Notification hook",
     )
     p_signal.add_argument("kind", help="IDLE | READY | DONE | NEED | PROGRESS | ERROR")
-    p_signal.add_argument("payload", nargs="?", default="", help="optional text (e.g. what a NEED is blocked on)")
-    p_signal.add_argument("--session", help="target session name (default: the current tmux session)")
-    p_signal.add_argument("--push", metavar="HOST", help="also PUSH this signal to HOST's inbox over ssh (the parent); the parent dedups push vs pull by id")
+    p_signal.add_argument(
+        "payload", nargs="?", default="", help="optional text (e.g. what a NEED is blocked on)"
+    )
+    p_signal.add_argument(
+        "--session", help="target session name (default: the current tmux session)"
+    )
+    p_signal.add_argument(
+        "--push",
+        metavar="HOST",
+        help="also PUSH this signal to HOST's inbox over ssh (the parent); the parent dedups push vs pull by id",
+    )
 
-    p_gates = sub.add_parser("gates", help="mine the gate ledger into auto-answer policy suggestions (counts, usual answers, ready-to-paste rules)")
-    p_gates.add_argument("--limit", type=int, default=20, help="show top N distinct gates (default 20)")
+    p_gates = sub.add_parser(
+        "gates",
+        help="mine the gate ledger into auto-answer policy suggestions (counts, usual answers, ready-to-paste rules)",
+    )
+    p_gates.add_argument(
+        "--limit", type=int, default=20, help="show top N distinct gates (default 20)"
+    )
 
-    p_doctor = sub.add_parser("doctor", help="diagnose a session's environment: liveness, capture, log, gate, and tmux-server vs fresh-process filesystem access")
-    p_doctor.add_argument("target", help="registered name by default, or tmux session with --session")
-    p_doctor.add_argument("--session", action="store_true", help="target a raw tmux session instead of a registry name")
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="diagnose a session's environment: liveness, capture, log, gate, and tmux-server vs fresh-process filesystem access",
+    )
+    p_doctor.add_argument(
+        "target", help="registered name by default, or tmux session with --session"
+    )
+    p_doctor.add_argument(
+        "--session",
+        action="store_true",
+        help="target a raw tmux session instead of a registry name",
+    )
     p_doctor.add_argument("--json", action="store_true", help="print structured result JSON")
 
     p_head = sub.add_parser("head", help="open a real terminal head for a registered session")
     p_head.add_argument("target", help="registered name by default, or tmux session with --session")
-    p_head.add_argument("--session", action="store_true", help="target a raw tmux session instead of a registry name")
-    p_head.add_argument("--terminal", choices=["auto", "iterm", "terminal"], default="auto", help="terminal app to open")
-    p_head.add_argument("--window", action="store_true", help="open a new iTerm window instead of a new tab")
-    p_head.add_argument("--print-command", action="store_true", help="print the tmux attach command without opening a terminal")
+    p_head.add_argument(
+        "--session",
+        action="store_true",
+        help="target a raw tmux session instead of a registry name",
+    )
+    p_head.add_argument(
+        "--terminal",
+        choices=["auto", "iterm", "terminal"],
+        default="auto",
+        help="terminal app to open",
+    )
+    p_head.add_argument(
+        "--window", action="store_true", help="open a new iTerm window instead of a new tab"
+    )
+    p_head.add_argument(
+        "--print-command",
+        action="store_true",
+        help="print the tmux attach command without opening a terminal",
+    )
 
     args = parser.parse_args(argv)
 
@@ -1187,9 +1596,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "web":
         if args.print_launchd:
             from .web import launchd_plist
+
             print(launchd_plist(host=args.host, port=args.port), end="")
             return 0
         from .web import run_web
+
         return run_web(host=args.host, port=args.port, open_browser=args.open)
     if args.cmd == "new":
         return cmd_new_mission()
@@ -1207,6 +1618,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_watch(args)
     if args.cmd == "register":
         return cmd_register(args)
+    if args.cmd == "channel":
+        return cmd_channel(args)
+    if args.cmd == "linear":
+        return cmd_linear(args)
     if args.cmd == "unregister":
         return cmd_unregister(args)
     if args.cmd == "log":

@@ -6,7 +6,7 @@
       "args": [
         "run",
         "--directory",
-        "/Users/dshanklin/repos-eidos-agi/emux",
+        "${CLAUDE_PLUGIN_ROOT}/.",
         "emux",
         "mcp"
       ],

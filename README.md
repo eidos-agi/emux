@@ -46,6 +46,8 @@ emux gates        → Mine the gate ledger: which gates recur, how they were
                     answered, ready-to-paste auto-answer policy rules.
 emux register     → Register a session under a friendly name.
 emux unregister   → Drop a registered name. Doesn't touch tmux.
+emux channel      → Tiered topic memory: create, list, show, suggest, note.
+emux linear       → Link workers to Linear contracts, record evidence, reconcile.
 ```
 
 The registry persists at `~/.config/emux/registry.json` (override via `$EMUX_REGISTRY`).
@@ -55,6 +57,54 @@ The registry persists at `~/.config/emux/registry.json` (override via `$EMUX_REG
 Two motivating problems, one tool:
 
 **For humans:** "Which tmux session was I working in?" After ten sessions accumulate, remembering which one had the long-running build, which one had the Claude Code chat with useful context, which one was a throwaway — that's the friction. emux's TUI shows the registered names with descriptions ("production claude session", "test-shell", "long backfill") and stale flags (sessions you registered but tmux has since reaped). Pick one, you're attached. No remembering tmux session ids.
+
+### Channels: durable domain memory without transcript replay
+
+Channels index existing sessions and logs by scope: T0 canon, T1 domain, T2
+workstream, T3 mission. Matchers auto-tag sessions; parents and canon are
+inherited. The first `tmux_ask` after channel knowledge changes injects the
+compact channel context, then stays silent until that context changes.
+
+```bash
+emux channel create canon --tier 0 --description "Daniel-wide rules"
+emux channel create tally --tier 1 --parent canon \
+  --description "Personal finance" --match tally --match personal-finance
+emux channel create bills --tier 2 --parent tally \
+  --description "Bills and recurring obligations" --match bills
+emux channel note tally policy "Financial writes require explicit approval" --source daniel
+emux channel show tally
+emux channel suggest
+```
+
+Raw chat stays in each session's durable log. Channel notes hold only compact
+decisions, outcomes, failures, policies, and facts; common financial identifiers
+are redacted before persistence. Every channel and subchannel also materializes
+as a conformant OKF v0.1 bundle at
+`~/.config/emux/channel-okf/<channel>/`: `channel.md` is the contract and
+`log.md` is its learned history. Agents receive that bundle path with channel
+context; `emux channel refresh` backfills existing channels.
+
+### Linear contracts: manage the work, let children execute it
+
+Linear owns commitments, recurrence, assignment, priority, and final status.
+Emux links one bounded issue to each child session, injects its acceptance
+criteria alongside channel context, and reconciles the child's signals against
+manager-recorded evidence. It never writes to Linear or closes an issue; the
+strongest recommendation it emits is `In Review`.
+
+```bash
+emux linear link rvs-worker RVS-42 --team RVS --project "Recurring Ops" \
+  --acceptance "tests pass" --acceptance "artifact exists"
+emux ask rvs-worker "work the linked issue" -n
+emux linear evidence rvs-worker 1 "pytest: 214 passed" --source manager
+emux linear evidence rvs-worker 2 "artifact URL verified" --source manager
+emux linear status --channel rvs
+```
+
+The same fields are available on `tmux_register` and `tmux_spawn` as
+`linear_issue`, `linear_project`, `linear_team`, and `acceptance_criteria`.
+Project/team/issue text participates in deterministic channel auto-tagging, so
+a Linear RVS issue can discover the RVS channel without one channel per ticket.
 
 **For agents:** When an agent in one Claude Code session needs to inspect, prompt, or steer a session running in another tmux pane — for handoff, debate, monitoring, or autonomous round-trip testing of marketplace installs — it needs structured access to send keys and read the result. emux's MCP server gives that without the agent owning session lifecycle.
 
