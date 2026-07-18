@@ -4005,6 +4005,9 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
     # The host the daemon was bound to, when non-localhost; lets a deliberate
     # --host 0.0.0.0 accept its own LAN address while still blocking foreign ones.
     extra_host: str | None = None
+    # Optional canonical browser origin when published through a trusted proxy.
+    # Default remains loopback-only.
+    public_origin: str | None = None
 
     def _json(self, payload: dict[str, Any], status: int = 200) -> None:
         body = json.dumps(payload).encode()
@@ -4019,7 +4022,10 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         loopback name (or the explicit bind host). A rebound attacker domain
         resolving to 127.0.0.1 carries its own name in Host and is rejected."""
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
-        return host in _LOCALHOSTS or (self.extra_host is not None and host == self.extra_host)
+        public_host = urlparse(self.public_origin).hostname if self.public_origin else None
+        return (host in _LOCALHOSTS
+                or (self.extra_host is not None and host == self.extra_host)
+                or (public_host is not None and host == public_host))
 
     def _origin_allowed(self) -> bool:
         """Block cross-site writes: a POST carrying an Origin from any non-local
@@ -4029,10 +4035,13 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         if not origin:
             return True
         try:
-            host = urlparse(origin).hostname
+            parsed = urlparse(origin)
+            host = parsed.hostname
         except ValueError:
             return False
-        return host in _LOCALHOSTS or (self.extra_host is not None and host == self.extra_host)
+        if host in _LOCALHOSTS or (self.extra_host is not None and host == self.extra_host):
+            return True
+        return self.public_origin is not None and origin.rstrip("/") == self.public_origin
 
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
         url = urlparse(self.path)
@@ -4288,11 +4297,21 @@ def launchd_plist(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
 """
 
 
-def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bool = False) -> int:
+def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bool = False,
+            public_origin: str | None = None) -> int:
     """Start the emux web daemon. Blocks until Ctrl-C."""
     if _server._resolve_tmux() is None:
         print("emux web: tmux not found on PATH — the UI will load but show nothing.", file=sys.stderr)
+    if public_origin:
+        parsed = urlparse(public_origin)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username or parsed.password or parsed.query or parsed.fragment
+                or parsed.path not in {"", "/"}):
+            print("emux web: --public-origin must be a bare http(s) origin.", file=sys.stderr)
+            return 2
+        public_origin = public_origin.rstrip("/")
     EmuxWebHandler.extra_host = host if host not in _LOCALHOSTS else None
+    EmuxWebHandler.public_origin = public_origin
     try:
         server = ThreadingHTTPServer((host, port), EmuxWebHandler)
     except OSError as e:

@@ -1386,6 +1386,11 @@ def main(argv: list[str] | None = None) -> int:
         help="bind address (default 127.0.0.1; no auth — keep it local)",
     )
     p_web.add_argument("--port", type=int, default=8689, help="port (default 8689)")
+    p_web.add_argument(
+        "--public-origin",
+        default=None,
+        help="single trusted reverse-proxy origin, e.g. https://emux.example.com",
+    )
     p_web.add_argument("--open", action="store_true", help="open the browser after starting")
     p_web.add_argument(
         "--print-launchd",
@@ -1619,7 +1624,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         from .web import run_web
 
-        return run_web(host=args.host, port=args.port, open_browser=args.open)
+        return run_web(host=args.host, port=args.port, open_browser=args.open,
+                       public_origin=args.public_origin)
     if args.cmd == "new":
         return cmd_new_mission()
     if args.cmd == "ls":

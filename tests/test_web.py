@@ -200,6 +200,7 @@ def daemon(monkeypatch):
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
     httpd.shutdown()
     httpd.server_close()
+    web.EmuxWebHandler.public_origin = None
 
 
 def _get(url: str) -> tuple[int, dict | str]:
@@ -287,6 +288,16 @@ def test_http_rejects_foreign_host(daemon):
         assert json.loads(e.read().decode())["error"] == "forbidden_host"
 
 
+def test_http_allows_explicit_public_host(daemon):
+    from emux import web
+    web.EmuxWebHandler.public_origin = "https://emux.e1.eidosagi.com"
+    req = urllib.request.Request(
+        daemon + "/api/sessions", headers={"Host": "emux.e1.eidosagi.com"}
+    )
+    with urllib.request.urlopen(req) as r:
+        assert json.loads(r.read().decode())["ok"]
+
+
 def test_http_send_rejects_cross_origin(daemon):
     # CSRF defense: a POST carrying a foreign Origin (forged by another site) is refused.
     req = urllib.request.Request(
@@ -314,6 +325,46 @@ def test_http_send_allows_same_origin(daemon):
     )
     with urllib.request.urlopen(req) as r:
         assert json.loads(r.read().decode())["ok"]
+
+
+def test_http_send_allows_explicit_public_origin(daemon):
+    from emux import web
+    web.EmuxWebHandler.public_origin = "https://emux.e1.eidosagi.com"
+    req = urllib.request.Request(
+        daemon + "/api/send",
+        data=json.dumps({"session": "main", "keys": "echo hi"}).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Host": "emux.e1.eidosagi.com",
+            "Origin": "https://emux.e1.eidosagi.com",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as r:
+        assert json.loads(r.read().decode())["ok"]
+
+
+def test_http_send_rejects_public_origin_lookalikes(daemon):
+    from emux import web
+    web.EmuxWebHandler.public_origin = "https://emux.e1.eidosagi.com"
+    for origin in (
+        "http://emux.e1.eidosagi.com",
+        "https://emux.e1.eidosagi.com.evil.example",
+        "https://emux.e1.eidosagi.com:444",
+    ):
+        req = urllib.request.Request(
+            daemon + "/api/send",
+            data=json.dumps({"session": "main", "keys": "echo hi"}).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Host": "emux.e1.eidosagi.com",
+                "Origin": origin,
+            },
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(req)
+        assert exc.value.code == 403
 
 
 def test_http_healthz_is_unguarded(daemon):
