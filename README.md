@@ -214,6 +214,8 @@ Tools exposed via `emux mcp`:
 | `tmux_register(name, session, description?, tags?)` | Save friendly-name → session mapping with metadata |
 | `tmux_unregister(name)` | Remove from registry; doesn't touch tmux |
 | `tmux_send(target, keys, enter, by_registry_name)` | Send keystrokes |
+| `tmux_gate(target, by_registry_name)` | Observe a live approval gate and issue a 60-second fingerprint |
+| `tmux_approve_gate(target, gate_fingerprint, action, ...)` | Approve or reject that exact gate once, with a redacted durable audit |
 | `tmux_capture(target, lines, by_registry_name)` | Read pane + scrollback |
 | `tmux_run(target, command, wait_seconds, ...)` | Convenience: send + sleep + capture |
 | `tmux_ask(target, prompt, ...)` | Send a prompt, wait for the reply to **settle**, return it |
@@ -221,6 +223,25 @@ Tools exposed via `emux mcp`:
 | `tmux_goal(target, goal, ...)` | Autonomous: pursue a whole task through a TUI |
 | `tmux_login(target, code?, switch?, ...)` | Drive a Claude Code login sequence; surfaces the OAuth URL |
 | `tmux_doctor(target, ...)` | Diagnose a session's environment (incl. tmux-server vs fresh-process fs access) |
+
+### Resolving an approval gate safely
+
+Ordinary `emux send` remains fail-closed while Claude Code or Codex is showing a
+trusted-workspace, MCP, command, hook, update, or confirmation gate. Resolve it
+as a two-step transaction:
+
+```bash
+emux gate worker --json
+emux approve worker --fingerprint <sha256> --action approve --json
+```
+
+Use `--session` on both commands for a raw tmux session instead of a registry
+name. `approve` sends exactly one `Enter`; `reject` sends exactly one `Escape`.
+The fingerprint expires after 60 seconds and is single-use. Approval recaptures
+the pane and fails closed if the session, gate, or screen changed. The durable
+gate audit contains operator/device identifiers when available, target, opaque
+fingerprint, gate type, action, outcome, timestamp, and request ID—never pane or
+prompt content.
 
 ### Driving another AI through its TUI
 
