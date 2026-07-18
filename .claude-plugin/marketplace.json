@@ -1,0 +1,16 @@
+{
+  "name": "emux",
+  "owner": {
+    "name": "Eidos AGI",
+    "url": "https://github.com/eidos-agi"
+  },
+  "plugins": [
+    {
+      "name": "emux",
+      "source": "./",
+      "description": "Eidos mux: TUI picker and MCP server for named tmux sessions.",
+      "version": "0.67.0",
+      "category": "agent-tools"
+    }
+  ]
+}
