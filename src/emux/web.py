@@ -2545,12 +2545,12 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
     <span id="title">grid</span>
     <span id="status">connecting…</span>
     <button id="attachbtn" class="act" style="display:none">⧉ copy attach</button>
+    <a id="docsbtn" class="act" href="/docs" title="Emux documentation and help">◇ DOCS</a>
     <button id="newbtn" class="act">+ NEW SESSION</button>
     <button id="feedbtn" class="act" title="live fleet activity">◫ FEED</button>
     <button id="hbtn" class="act" title="Hancock approvals" onclick="openHancock()">⧉ HANCOCK<span id="hbadge" style="display:none">0</span></button>
     <button id="refreshbtn" class="act">↻ refresh</button>
     <button id="setbtn" class="act" title="model routing settings" onclick="openSettings()">⚙ SETTINGS</button>
-    <a id="docsbtn" class="act" href="/docs" title="Emux documentation and help">◇ DOCS</a>
     <div id="tabs">
       <button class="tab" data-mode="grid">GRID</button>
       <button class="tab" data-mode="groups">GROUPS</button>
