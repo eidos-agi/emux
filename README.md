@@ -52,6 +52,9 @@ emux linear       → Link workers to Linear contracts, record evidence, reconci
 
 The registry persists at `~/.config/emux/registry.json` (override via `$EMUX_REGISTRY`).
 
+The full Hancock authorization product is pinned intact under
+`integrations/hancock`; see the [Hancock integration and WCS boundary](docs/hancock.md).
+
 ## Why it exists
 
 Two motivating problems, one tool:
