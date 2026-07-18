@@ -893,14 +893,32 @@ def _print_result(
     return 0 if result.get("ok") else 1
 
 
+# A single one of these is a NAMED KEY — a control/navigation keystroke, not a
+# command line — so it must never auto-submit (appending Enter would fire a stray
+# newline after e.g. an arrow key, or a second event after a bare Enter/C-c).
+# Ordinary literal text ("git status") keeps the normal auto-submit.
+_NAMED_KEYS = frozenset(
+    {
+        "Enter", "Escape", "Tab", "BTab", "Space", "BSpace",
+        "Up", "Down", "Left", "Right", "Home", "End",
+        "PageUp", "PageDown", "PPage", "NPage",
+        "Delete", "DC", "Insert", "IC",
+        "C-c", "C-d", "C-u", "C-k", "C-a", "C-e",
+    }
+)
+
+
 def cmd_send(args: argparse.Namespace) -> int:
     """Send tmux keys to a registered name by default."""
     keys = _joined_words(args.keys, "keys")
+    # A single recognized named key is a keystroke, not a command — don't submit
+    # it. Anything else (literal text) retains the normal auto-submit.
+    enter = not args.no_enter and keys not in _NAMED_KEYS
     result = asyncio.run(
         tmux_send(
             target=args.target,
             keys=keys,
-            enter=not args.no_enter,
+            enter=enter,
             by_registry_name=not args.session,
         )
     )

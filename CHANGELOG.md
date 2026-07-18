@@ -2,6 +2,12 @@
 
 All notable changes to Emux are documented here.
 
+## v0.67.1 - 2026-07-17
+
+- **Agent paste-settle is honored by ask/converse.** Before typing, emux asks the target pane which agent is running and uses that adapter's paste-settle delay, so Claude Code and Codex reliably ingest a prompt before `ask`/`converse` submits it — no more races where the newline lands before the paste settles.
+- **A lone named key sends exactly once.** A single recognized key like `Enter`, `Escape`, an arrow, or a control chord (`C-c`) IS the keystroke, so `emux send` no longer appends a second submitting Enter after it; ordinary literal text keeps its normal auto-submit.
+- Regression coverage for the auto-submit decision matrix, proven live against Claude Code.
+
 ## v0.67.0 - 2026-07-17
 
 - **Every channel is an OKF v0.1 bundle.** Channel and subchannel creation now writes a conformant `index.md`, typed `channel.md` contract, and reserved `log.md` learning history under `~/.config/emux/channel-okf/<channel>/`. Notes keep the learning log synchronized, refresh backfills existing channels, and agent context exposes the bundle path.

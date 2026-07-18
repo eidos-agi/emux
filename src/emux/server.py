@@ -1663,6 +1663,15 @@ def converse(
     if _run_tmux(["send-keys", "-t", session, "-l", prompt])[0] != 0:
         return {"ok": False, "error": "send_failed", "session": session}
     if submit:
+        # Same paste-detection quirk tmux_send handles: a paste-detecting TUI
+        # (Claude Code) reads a fast text+Enter as a multi-line PASTE and never
+        # submits it. Wait the pane agent's measured settle AFTER typing and
+        # BEFORE Enter; an agent we haven't measured (or a shell) gets 0.
+        from . import adapters
+
+        settle = adapters.settle_for(_pane_agent(session))
+        if settle > 0:
+            time.sleep(settle)
         _run_tmux(["send-keys", "-t", session, "Enter"])
 
     # Wait until the pane is unchanged for `settle_seconds` (or time out). If the

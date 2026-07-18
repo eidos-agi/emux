@@ -245,11 +245,56 @@ def test_converse_reports_session_gone(monkeypatch):
 
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
     monkeypatch.setattr(server, "_capture_text", lambda s, n: "before")
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10: (0, "", ""))
+    # host kw: converse now detects the pane agent (its paste-settle) on submit.
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "", ""))
     monkeypatch.setattr(server.time, "sleep", lambda _s: None)
     monkeypatch.setattr(server, "_session_alive", lambda s: False)  # dies immediately
     out = server.converse("sess", "hello", poll_interval=0.1, max_seconds=5)
     assert not out["ok"] and out["error"] == "session_gone"
+
+
+def _record_converse(monkeypatch, agent, prompt):
+    """Run converse against a fake pane whose agent is `agent`, returning the
+    ordered send/sleep events. The _run_tmux mock takes host= (converse threads
+    it through to detect the pane agent), matching the session-gone mock above."""
+    from emux import server
+
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_capture_text", lambda s, n: "idle prompt >")
+    monkeypatch.setattr(server, "_pane_agent", lambda session, host=None: agent)
+    monkeypatch.setattr(server, "_session_alive", lambda s: False)  # end the wait loop fast
+
+    events: list = []
+    monkeypatch.setattr(server, "_run_tmux",
+                        lambda args, timeout=10, host=None: events.append(("send", args)) or (0, "", ""))
+    monkeypatch.setattr(server.time, "sleep", lambda s: events.append(("sleep", s)))
+
+    server.converse("sess", prompt, settle_seconds=0.1, poll_interval=0.1, max_seconds=1)
+    return events
+
+
+def test_converse_claude_settles_between_text_and_enter(monkeypatch):
+    """converse types the prompt, then waits the claude adapter's measured
+    paste-settle BEFORE sending Enter — otherwise a paste-detecting TUI (Claude
+    Code) reads the fast text+Enter as a PASTE and swallows the newline, leaving
+    the prompt unsent."""
+    from emux import adapters
+
+    events = _record_converse(monkeypatch, "claude", "hello there")
+    typed = events.index(("send", ["send-keys", "-t", "sess", "-l", "hello there"]))
+    entered = events.index(("send", ["send-keys", "-t", "sess", "Enter"]))
+    # the claude adapter's measured paste-settle was slept between typing and Enter
+    assert ("sleep", adapters.CLAUDE.send_settle) in events[typed:entered]
+
+
+def test_converse_unknown_agent_adds_no_settle(monkeypatch):
+    """A pane whose agent we haven't measured (settle 0) gets the classic single
+    send — type, then Enter, with no paste-settle sleep inserted between them."""
+    events = _record_converse(monkeypatch, None, "list files")
+    typed = events.index(("send", ["send-keys", "-t", "sess", "-l", "list files"]))
+    entered = events.index(("send", ["send-keys", "-t", "sess", "Enter"]))
+    # settle_for(None) is 0 → nothing slept between typing and the submitting Enter
+    assert not [e for e in events[typed:entered] if e[0] == "sleep"]
 
 
 def _telos_env(monkeypatch, tick_return):
