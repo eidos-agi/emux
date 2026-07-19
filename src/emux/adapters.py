@@ -113,7 +113,8 @@ CLAUDE = Adapter(
     # a y/n confirm OR a selection menu ("Enter to select · ↑/↓ to navigate")
     # is the agent waiting on YOU to choose — a gate.
     approval_sigs=("do you want to proceed", "❯ 1. yes", "1. yes",
-                   "enter to select", "↑/↓ to navigate", "to navigate · esc"),
+                   "enter to select", "↑/↓ to navigate", "to navigate · esc",
+                   "allow the"),  # per-tool MCP approval, same modal shape as Codex
     launch_flags=("--dangerously-skip-permissions",),
     resume_fmt="claude --resume {id}",
     oneshot_fmt="claude -p {prompt}",

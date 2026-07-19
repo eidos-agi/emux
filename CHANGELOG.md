@@ -2,6 +2,19 @@
 
 All notable changes to Emux are documented here.
 
+## v0.68.1 - 2026-07-18
+
+- **Control-room UX fixes for Linux and narrow viewports (EID-789, EID-792).** macOS-only iTerm2 controls (the session modal's "⧉ iTerm2" button and the new-session "open an iTerm2 window" checkbox) are now hidden anywhere the daemon host isn't a Mac — the host OS is stamped onto `<html data-os=…>` per request and a CSS gate hides `.maconly` controls off Darwin; the gui checkbox is also unchecked on boot off-Mac so a Linux daemon never receives a `gui=true` it can't honor. A new `max-width:760px` breakpoint turns the fixed sidebar and live feed into on-demand overlays (a `☰` drawer + right rail) and reflows the tile grid to a single column, so the control room no longer clips sideways (~390px) or buries the main navigation; the feed no longer starts open on narrow screens and dismisses the drawer when a session is opened. Clicking a tag chip inside a session card now filters without also opening the card. The laptop control-room desktop layout is unchanged.
+
+## v0.68.0 - 2026-07-18
+
+- **Authoritative remote-control surface.** A new `emux.remote_control` package adds a versioned (`emux-remote/1.0`) API that is the only component allowed to execute a remote request: it fail-closes on identity, HMAC-authenticates a single revocable controller credential bound to one immutable `(human, device, controller)` identity, requires a fully-qualified `server/channel/workspace/session` target, and gates every action through Hancock before returning an operational receipt. A separate local controller gateway transports requests but never executes them; the controller client is decoupled from the Emux executor.
+- **The web daemon can sit behind one trusted reverse proxy.** `emux web --public-origin https://emux.example.com` names a single canonical origin that both the DNS-rebinding Host check and the cross-site Origin check accept, so a published deployment works without widening `--host` past loopback. The flag is validated up front — a bare `http(s)` origin (scheme + host only; no creds, path, query, or fragment) or the daemon refuses to start. With no `--public-origin`, behavior is unchanged: loopback-only.
+- **Self-hosted docs assistant.** The web daemon serves a built-in help corpus (`emux help_docs`) and a keyword-ranked in-app assistant, with the control room linking straight to the docs; layout fixes keep the docs link clear of the feed, un-crowd the control-room actions, and center the AI trees.
+- **Approval gates have an explicit transaction.** `emux gate` issues a short-lived opaque fingerprint for the currently visible trusted-workspace, MCP, Bash/command, hook, update, or confirmation gate. `emux approve --fingerprint … --action approve|reject` recaptures and re-fingerprints immediately, fails closed on stale/cleared/changed/missing/replayed gates, and sends exactly one allowlisted `Enter` or `Escape`.
+- **Gate approvals are durable and redacted.** A cross-process lock plus an fsynced JSONL audit makes fingerprints single-use across CLI invocations and records timestamp, subject/device when available, target, gate fingerprint/type, action, outcome, and request ID without pane or prompt content.
+- The deprecated `tmux_send(force=True)` no longer bypasses a detected gate. Ordinary send remains blocked and directs callers to the auditable two-step path.
+
 ## v0.67.1 - 2026-07-17
 
 - **Agent paste-settle is honored by ask/converse.** Before typing, emux asks the target pane which agent is running and uses that adapter's paste-settle delay, so Claude Code and Codex reliably ingest a prompt before `ask`/`converse` submits it — no more races where the newline lands before the paste settles.

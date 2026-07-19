@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import contextlib
 import difflib
+import fcntl
 import functools
 import hashlib
 import json
@@ -61,6 +63,9 @@ REGISTRY_PATH = Path(
 _STATE_DIR = Path(os.environ.get("EMUX_STATE") or (Path.home() / ".local" / "state" / "emux"))
 _LOG_DIR = _STATE_DIR / "logs"
 _AUDIT_PATH = _STATE_DIR / "audit.jsonl"
+_GATE_AUDIT_PATH = _STATE_DIR / "gate-approvals.jsonl"
+_GATE_LOCK_PATH = _STATE_DIR / "gate-approvals.lock"
+_GATE_FINGERPRINT_TTL = 60
 
 
 def _audit(op: str, args: dict[str, Any], result: Any = None) -> None:
@@ -1246,6 +1251,258 @@ def _pane_settle(session: str, host: str | None = None) -> float:
     return adapters.settle_for(_pane_agent(session, host))
 
 
+def _gate_type(agent: str | None, screen: str, signature: str) -> str:
+    """Classify a visible gate without returning its potentially sensitive text."""
+    low = screen.lower()
+    if "trust" in low and any(word in low for word in ("directory", "folder", "workspace")):
+        return "trusted_workspace"
+    if "mcp" in low and any(word in low for word in ("allow", "approve", "permission")):
+        return "mcp_approval"
+    if "bash" in low or "do you want to proceed" in low:
+        return "command_approval"
+    if "hooks need review" in low or "review hooks" in low:
+        return "hook_review"
+    if "update available" in low:
+        return "software_update"
+    if "press enter to confirm" in low:
+        return "confirmation"
+    return f"{agent or 'unknown'}_approval" if signature else "approval"
+
+
+def _gate_snapshot(session: str, host: str | None) -> dict[str, Any]:
+    """Capture and identify the current gate; pane content never leaves this helper."""
+    from . import adapters
+
+    if not _session_exists(session, host):
+        return {"ok": False, "error": "session_gone"}
+    code, screen, _err = _run_tmux(
+        ["capture-pane", "-t", session, "-p", "-S", "-20"], host=host
+    )
+    if code != 0:
+        return {"ok": False, "error": "tmux_capture_failed"}
+    clean = _strip_ansi(screen or "")
+    agent = _pane_agent(session, host)
+    signature = adapters.gated(agent, clean)
+    if not signature:
+        return {"ok": False, "error": "no_active_gate"}
+    # Whitespace normalization makes redraw-only changes stable. Target identity
+    # is included so two panes displaying the same menu never share a challenge.
+    normalized = "\n".join(" ".join(line.split()) for line in clean.splitlines()[-20:] if line.strip())
+    identity = json.dumps(
+        {"host": host or "local", "session": session, "agent": agent, "screen": normalized},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return {
+        "ok": True,
+        "fingerprint": hashlib.sha256(identity.encode()).hexdigest(),
+        "gate_type": _gate_type(agent, clean, signature),
+        "agent": agent,
+    }
+
+
+@contextlib.contextmanager
+def _gate_transaction_lock():
+    """Serialize observe/approve records across independent CLI processes."""
+    _GATE_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_GATE_LOCK_PATH, "a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _gate_records() -> list[dict[str, Any]]:
+    try:
+        records = []
+        for line in _GATE_AUDIT_PATH.read_text(errors="replace").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+        return records
+    except OSError:
+        return []
+
+
+def _write_gate_record(record: dict[str, Any]) -> None:
+    """Durably append a redacted gate record. Approval fails closed if this fails."""
+    _GATE_AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_GATE_AUDIT_PATH, "a", encoding="utf-8") as audit:
+        audit.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+        audit.flush()
+        os.fsync(audit.fileno())
+
+
+def _gate_audit_record(
+    *, request_id: str, subject: str, device: str, target: str,
+    session: str | None, host: str | None, fingerprint: str,
+    gate_type: str, action: str, outcome: str, error: str | None = None,
+) -> dict[str, Any]:
+    def label(value: str | None, fallback: str = "") -> str:
+        # Audit fields are identifiers/enums only. Never allow arbitrary prompt
+        # text to be smuggled into the durable record through MCP arguments.
+        clean = re.sub(r"[^A-Za-z0-9_.:@/+-]", "_", value or "")[:160]
+        return clean or fallback
+
+    record: dict[str, Any] = {
+        "t": int(time.time()), "op": "tmux_gate_approval",
+        "request_id": label(request_id, "unknown"),
+        "subject": label(subject), "device": label(device), "target": label(target),
+        "resolved_session": label(session), "host": label(host),
+        "gate_fingerprint": fingerprint if re.fullmatch(r"[0-9a-f]{64}", fingerprint) else "invalid",
+        "gate_type": label(gate_type, "unknown"),
+        "action": action if action in ("observe", "approve", "reject") else "unsupported",
+        "outcome": label(outcome, "unknown"),
+    }
+    if error:
+        record["error"] = error
+    return record
+
+
+@mcp.tool()
+async def tmux_gate(target: str, by_registry_name: bool = False) -> dict[str, Any]:
+    """Observe a live approval gate and issue a short-lived opaque fingerprint."""
+    session, host, err = _resolve_target(target, by_registry_name)
+    if err or session is None:
+        return {"ok": False, "error": err or "not_registered", "target": target}
+    snapshot = _gate_snapshot(session, host)
+    if not snapshot.get("ok"):
+        return {"ok": False, "error": snapshot["error"], "target": target,
+                "resolved_session": session, "host": host}
+    request_id = str(uuid.uuid4())
+    record = _gate_audit_record(
+        request_id=request_id, subject=os.environ.get("EMUX_SUBJECT") or os.environ.get("USER", ""),
+        device=os.environ.get("EMUX_DEVICE") or os.uname().nodename, target=target,
+        session=session, host=host, fingerprint=snapshot["fingerprint"],
+        gate_type=snapshot["gate_type"], action="observe", outcome="observed",
+    )
+    try:
+        with _gate_transaction_lock():
+            _write_gate_record(record)
+    except OSError:
+        return {"ok": False, "error": "gate_audit_failed", "target": target}
+    return {"ok": True, "target": target, "resolved_session": session, "host": host,
+            "gate_fingerprint": snapshot["fingerprint"], "gate_type": snapshot["gate_type"],
+            "allowed_actions": ["approve", "reject"], "expires_in": _GATE_FINGERPRINT_TTL,
+            "request_id": request_id}
+
+
+@mcp.tool()
+async def tmux_approve_gate(
+    target: str,
+    gate_fingerprint: str,
+    action: str = "approve",
+    key: str | None = None,
+    by_registry_name: bool = False,
+    subject: str | None = None,
+    device: str | None = None,
+    request_id: str | None = None,
+) -> dict[str, Any]:
+    """Resolve exactly the observed gate, once, with an allowlisted named key."""
+    request_id = request_id or str(uuid.uuid4())
+    subject = subject or os.environ.get("EMUX_SUBJECT") or os.environ.get("USER", "")
+    device = device or os.environ.get("EMUX_DEVICE") or os.uname().nodename
+    session, host, err = _resolve_target(target, by_registry_name)
+
+    def denial_record(error: str, gate_type: str = "unknown") -> dict[str, Any]:
+        return _gate_audit_record(
+            request_id=request_id, subject=subject, device=device, target=target,
+            session=session, host=host, fingerprint=gate_fingerprint,
+            gate_type=gate_type, action=action, outcome="denied", error=error,
+        )
+
+    if err or session is None:
+        try:
+            with _gate_transaction_lock():
+                _write_gate_record(denial_record(err or "not_registered"))
+        except OSError:
+            return {"ok": False, "error": "gate_audit_failed", "request_id": request_id}
+        return {"ok": False, "error": err or "not_registered", "request_id": request_id}
+    if not re.fullmatch(r"[0-9a-f]{64}", gate_fingerprint):
+        try:
+            with _gate_transaction_lock():
+                _write_gate_record(denial_record("invalid_gate_fingerprint"))
+        except OSError:
+            return {"ok": False, "error": "gate_audit_failed", "request_id": request_id}
+        return {"ok": False, "error": "invalid_gate_fingerprint", "request_id": request_id}
+    expected = {"approve": "Enter", "reject": "Escape"}
+    if action not in expected:
+        try:
+            with _gate_transaction_lock():
+                _write_gate_record(denial_record("unsupported_gate_action"))
+        except OSError:
+            return {"ok": False, "error": "gate_audit_failed", "request_id": request_id}
+        return {"ok": False, "error": "unsupported_gate_action", "request_id": request_id}
+    send_key = key or expected[action]
+    if send_key != expected[action]:
+        try:
+            with _gate_transaction_lock():
+                _write_gate_record(denial_record("unsupported_gate_key"))
+        except OSError:
+            return {"ok": False, "error": "gate_audit_failed", "request_id": request_id}
+        return {"ok": False, "error": "unsupported_gate_key", "request_id": request_id,
+                "allowed_key": expected[action]}
+    try:
+        with _gate_transaction_lock():
+            records = _gate_records()
+            now = int(time.time())
+            observations = [r for r in records
+                            if r.get("outcome") == "observed"
+                            and r.get("gate_fingerprint") == gate_fingerprint
+                            and r.get("target") == target
+                            and r.get("resolved_session") == session]
+            if not observations or now - int(observations[-1].get("t", 0)) > _GATE_FINGERPRINT_TTL:
+                _write_gate_record(denial_record("expired_or_unobserved_gate"))
+                return {"ok": False, "error": "expired_or_unobserved_gate",
+                        "request_id": request_id}
+            if any(r.get("gate_fingerprint") == gate_fingerprint
+                   and r.get("outcome") == "sent" for r in records):
+                _write_gate_record(denial_record("gate_replay"))
+                return {"ok": False, "error": "gate_replay", "request_id": request_id}
+            if any(r.get("request_id") == request_id and r.get("action") != "observe"
+                   for r in records):
+                _write_gate_record(denial_record("request_replay"))
+                return {"ok": False, "error": "request_replay", "request_id": request_id}
+            snapshot = _gate_snapshot(session, host)  # mandatory TOCTOU recapture
+            if not snapshot.get("ok"):
+                error = snapshot["error"]
+                _write_gate_record(_gate_audit_record(
+                    request_id=request_id, subject=subject, device=device, target=target,
+                    session=session, host=host, fingerprint=gate_fingerprint,
+                    gate_type="unknown", action=action, outcome="denied", error=error))
+                return {"ok": False, "error": error, "request_id": request_id}
+            if snapshot["fingerprint"] != gate_fingerprint:
+                _write_gate_record(_gate_audit_record(
+                    request_id=request_id, subject=subject, device=device, target=target,
+                    session=session, host=host, fingerprint=gate_fingerprint,
+                    gate_type=snapshot["gate_type"], action=action, outcome="denied",
+                    error="stale_gate"))
+                return {"ok": False, "error": "stale_gate", "request_id": request_id}
+            attempt = _gate_audit_record(
+                request_id=request_id, subject=subject, device=device, target=target,
+                session=session, host=host, fingerprint=gate_fingerprint,
+                gate_type=snapshot["gate_type"], action=action, outcome="attempted")
+            _write_gate_record(attempt)  # durable before the state-changing key
+            sent = _run_tmux(["send-keys", "-t", session, send_key], host=host)
+            outcome = "sent" if sent[0] == 0 else "failed"
+            _write_gate_record(_gate_audit_record(
+                request_id=request_id, subject=subject, device=device, target=target,
+                session=session, host=host, fingerprint=gate_fingerprint,
+                gate_type=snapshot["gate_type"], action=action, outcome=outcome,
+                error=None if sent[0] == 0 else "tmux_send_failed"))
+            if sent[0] != 0:
+                return {"ok": False, "error": "tmux_send_failed", "request_id": request_id}
+    except OSError:
+        return {"ok": False, "error": "gate_audit_failed", "request_id": request_id}
+    return {"ok": True, "target": target, "resolved_session": session, "host": host,
+            "gate_fingerprint": gate_fingerprint, "gate_type": snapshot["gate_type"],
+            "action": action, "sent_key": send_key, "request_id": request_id}
+
+
 @mcp.tool()
 @audited
 async def tmux_send(
@@ -1279,12 +1536,9 @@ async def tmux_send(
             it. DEFAULT (None) = ask the ADAPTER for the agent actually running in
             that pane — Claude gets its measured 0.4s, an agent we haven't measured
             gets 0. Pass a number to override; pass 0 for the classic single send.
-        force: Send even when the pane shows a modal GATE. OFF by default: typing
-            into a gate feeds the MENU, not the prompt. Measured the hard way — a
-            "2" inside the text "what is 2+2?" selected "Trust all and continue"
-            on Codex's hook gate and PERSISTED hook-trust to the user's config;
-            Codex's update gate defaults to "Update now (runs `brew upgrade`)".
-            Use force=True only to answer a gate with the exact key you intend.
+        force: Deprecated compatibility argument. It never bypasses a detected
+            gate. Use `tmux_gate` followed by `tmux_approve_gate` so approval is
+            explicit, fingerprint-bound, single-use, and durably audited.
 
     Returns:
         {ok, target, resolved_session, sent, submitted?, resubmitted?} on
@@ -1304,24 +1558,22 @@ async def tmux_send(
 
         settle = adapters.settle_for(agent)
     # A GATE on screen eats keystrokes and persists the answer — typing a prompt
-    # into a gated pane is a config write, not a no-op. Refuse unless forced.
-    if not force:
-        from . import adapters
+    # into a gated pane is a config write, not a no-op. Even the deprecated
+    # `force` argument cannot bypass this; use the fingerprint-bound transaction.
+    from . import adapters
 
-        code, screen, _ = _run_tmux(["capture-pane", "-t", session, "-p", "-S", "-12"], host=host)
-        gate = adapters.gated(agent, screen if code == 0 else "")
-        if gate:
-            return {
-                "ok": False,
-                "error": "blocked_on_gate",
-                "gate": gate,
-                "agent": agent,
-                "session": session,
-                "hint": "This pane is showing a modal gate. Typing into it feeds "
-                "the MENU, not the prompt — a digit can select an option "
-                "and persist it. Resolve the gate deliberately (tmux_send "
-                "with force=True and the exact key), then send your text.",
-            }
+    code, screen, _ = _run_tmux(["capture-pane", "-t", session, "-p", "-S", "-12"], host=host)
+    gate = adapters.gated(agent, screen if code == 0 else "")
+    if gate:
+        return {
+            "ok": False,
+            "error": "blocked_on_gate",
+            "gate": gate,
+            "agent": agent,
+            "session": session,
+            "hint": "This pane is showing a modal gate. Observe it with tmux_gate, "
+            "then resolve that exact fingerprint once with tmux_approve_gate.",
+        }
     key_args = keys if isinstance(keys, list) else [keys]
     if enter and settle and settle > 0:
         # Type the text, let the TUI leave paste-mode, THEN submit with a

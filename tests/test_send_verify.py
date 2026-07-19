@@ -62,7 +62,8 @@ def test_list_of_keys_sends_each_as_named_key(monkeypatch):
 def test_swallowed_enter_is_retried_and_reported(monkeypatch):
     text = "please rerun the failing tests now"
     # composer still holds the text after the first Enter, empties after retry
-    fake = FakeTmux([text, ""])
+    # blank pre-send gate check, then held composer, then empty after retry
+    fake = FakeTmux(["", text, ""])
     _wire(monkeypatch, fake)
     r = asyncio.run(tmux_send("w1", text, enter=True, force=True))
     assert r["ok"] and r.get("resubmitted") is True and r.get("submitted") is True
@@ -72,7 +73,7 @@ def test_swallowed_enter_is_retried_and_reported(monkeypatch):
 
 def test_clean_submit_reports_submitted_no_retry(monkeypatch):
     text = "list the open pull requests"
-    fake = FakeTmux([""])   # composer already empty on first check
+    fake = FakeTmux(["", ""])   # pre-send gate check, then empty verification
     _wire(monkeypatch, fake)
     r = asyncio.run(tmux_send("w1", text, enter=True, force=True))
     assert r["ok"] and r.get("submitted") is True and "resubmitted" not in r

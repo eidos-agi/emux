@@ -216,6 +216,50 @@ def test_http_serves_ui(daemon):
     status, body = _get(daemon + "/")
     assert status == 200
     assert "EMUX" in body and "control room" in body
+    assert 'id="help-panel"' in body and "/api/help?q=" in body
+    assert 'id="docsbtn"' in body and 'href="/docs"' in body
+
+
+def test_http_serves_docs_with_shared_help_client(daemon):
+    status, body = _get(daemon + "/docs")
+    assert status == 200
+    assert "Emux documentation" in body
+    assert 'id="help-panel"' in body and "/api/help?q=" in body
+    assert "Getting started" in body and "Product boundaries" in body
+
+
+def test_http_help_is_grounded_and_read_only(daemon):
+    status, body = _get(daemon + "/api/help?q=how%20do%20I%20register%20a%20session")
+    assert status == 200 and body["ok"] and body["found"]
+    assert body["sources"][0]["url"].startswith("/docs#")
+    assert "emux register" in body["answer"]
+
+
+def test_http_help_explains_memory_boundary(daemon):
+    status, body = _get(daemon + "/api/help?q=does%20emux%20store%20product%20memory")
+    assert status == 200 and body["found"]
+    assert "Fleet owns durable learning" in body["answer"]
+
+
+def test_http_help_does_not_fabricate_unknown_answers(daemon):
+    status, body = _get(daemon + "/api/help?q=quantum%20banana%20tax%20policy")
+    assert status == 200 and body["ok"] and not body["found"]
+    assert body["answer"] == "" and body["sources"] == []
+
+
+def test_http_help_requires_query(daemon):
+    status, body = _get(daemon + "/api/help")
+    assert status == 400 and body["error"] == "missing_query"
+
+
+def test_http_help_cannot_be_invoked_as_control_post(daemon):
+    req = urllib.request.Request(
+        daemon + "/api/help", data=b'{"query":"send keys"}',
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(req)
+    assert exc.value.code == 404
 
 
 def test_http_sessions(daemon):
@@ -1065,3 +1109,27 @@ def test_gui_checkbox_defaults_off_when_host_is_not_mac():
     from emux import web
     assert 'document.documentElement.dataset.os!=="Darwin"' in web.PAGE
     assert "g.checked=false" in web.PAGE
+
+
+def test_http_docs_lead_with_ai_tree_product_thesis(daemon):
+    status, body = _get(daemon + "/docs")
+    assert status == 200
+    assert "What Emux is" in body and "Your first AI tree" in body
+    assert "human control room for live trees of AIs" in body
+    assert body.index("What Emux is") < body.index("Getting started")
+
+
+def test_http_help_answers_what_emux_is_as_an_ai_tree_control_room(daemon):
+    status, body = _get(daemon + "/api/help?q=what%20is%20emux%20ai%20tree")
+    assert status == 200 and body["ok"] and body["found"]
+    assert "human control room for live trees of AIs" in body["answer"]
+    assert body["sources"][0]["url"] == "/docs#overview"
+
+
+def test_help_layout_reserves_desktop_space_and_replaces_mobile_content(daemon):
+    status, body = _get(daemon + "/")
+    assert status == 200
+    assert 'body.help-open{width:calc(100% - clamp(360px,32vw,480px))}' in body
+    assert 'body.help-open> :not(#help-panel)' in body
+    assert 'document.body.classList.add("help-open")' in body
+    assert 'document.body.classList.remove("help-open","help-expanded")' in body

@@ -1,0 +1,3 @@
+[submodule "integrations/hancock"]
+	path = integrations/hancock
+	url = https://github.com/eidos-agi/hancock.git

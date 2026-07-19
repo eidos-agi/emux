@@ -44,6 +44,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
+from . import help as _help
 from . import server as _server
 
 DEFAULT_HOST = "127.0.0.1"
@@ -1968,7 +1969,7 @@ body{
 .fev.fresh{animation:fevin .5s ease}
 @keyframes fevin{from{background:rgba(255,176,0,.18)}to{background:transparent}}
 #topbar{
-  flex:none;display:flex;align-items:center;gap:14px;
+  flex:none;display:flex;align-items:center;gap:14px;flex-wrap:wrap;
   padding:10px 22px;border-bottom:1px solid var(--line);background:var(--bg-raise);
 }
 #topbar #title{font-family:"VT323",monospace;font-size:26px;color:var(--amber);letter-spacing:1px}
@@ -2195,6 +2196,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .act{
   font:11px "IBM Plex Mono",monospace;color:var(--amber-dim);background:transparent;
   border:1px solid var(--line);padding:3px 9px;cursor:pointer;letter-spacing:1px;
+  text-decoration:none;white-space:nowrap;
 }
 .act:hover{color:var(--amber);border-color:var(--amber-dim)}
 /* word-wrap toggle off → horizontal scroll (#9) */
@@ -2581,6 +2583,7 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
     <span id="title">grid</span>
     <span id="status">connecting…</span>
     <button id="attachbtn" class="act" style="display:none">⧉ copy attach</button>
+    <a id="docsbtn" class="act" href="/docs" title="Emux documentation and help">◇ DOCS</a>
     <button id="newbtn" class="act">+ NEW SESSION</button>
     <button id="feedbtn" class="act" title="live fleet activity">◫ FEED</button>
     <button id="hbtn" class="act" title="Hancock approvals" onclick="openHancock()">⧉ HANCOCK<span id="hbadge" style="display:none">0</span></button>
@@ -4055,6 +4058,21 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
     # Optional canonical browser origin when published through a trusted proxy.
     # Default remains loopback-only.
     public_origin: str | None = None
+    # Disabled unless supplied by an embedding service with a trusted identity
+    # boundary. Never infer controller trust from localhost or browser headers.
+    remote_controller_api: Any = None
+
+    def _controller_error(self, exc: Exception) -> None:
+        from .remote_control.protocol import ProtocolError
+        if not isinstance(exc, ProtocolError):
+            raise exc
+        status = {"unauthorized": 401, "identity_mismatch": 403,
+                  "wrong_server": 409, "protocol_skew": 409, "replay": 409,
+                  "not_cancellable": 409, "unknown_request": 404}.get(exc.code, 400)
+        self._json({"ok": False, "error": exc.code}, status)
+
+    def _controller_headers(self) -> dict[str, str]:
+        return {str(k): str(v) for k, v in self.headers.items()}
 
     def _json(self, payload: dict[str, Any], status: int = 200) -> None:
         body = json.dumps(payload).encode()
@@ -4093,7 +4111,15 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
         url = urlparse(self.path)
         if url.path == "/" or url.path == "/index.html":
-            body = PAGE.replace("__VERSION__", __version__).replace("__OS__", _host_os()).encode()
+            body = _help.control_room_page(PAGE, __version__).replace("__OS__", _host_os()).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if url.path in ("/docs", "/docs/"):
+            body = _help.docs_page(__version__).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -4110,8 +4136,34 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             if not self._host_allowed():
                 self._json({"ok": False, "error": "forbidden_host"}, 403)
                 return
+        if url.path == "/api/controller/v1/capabilities":
+            if self.remote_controller_api is None:
+                self._json({"ok": False, "error": "controller_api_disabled"}, 503)
+                return
+            try:
+                self._json(self.remote_controller_api.capabilities(self._controller_headers()))
+            except Exception as exc:
+                self._controller_error(exc)
+            return
+        match = re.fullmatch(r"/api/controller/v1/requests/([^/]+)", url.path)
+        if match:
+            if self.remote_controller_api is None:
+                self._json({"ok": False, "error": "controller_api_disabled"}, 503)
+                return
+            try:
+                status, payload = self.remote_controller_api.status(
+                    self._controller_headers(), match.group(1))
+                self._json(payload, status)
+            except Exception as exc:
+                self._controller_error(exc)
+            return
         if url.path == "/api/sessions":
             self._json(sessions_payload())
+            return
+        if url.path == "/api/help":
+            query = (parse_qs(url.query).get("q") or [""])[0]
+            payload = _help.answer(query)
+            self._json(payload, 200 if payload.get("ok") else 400)
             return
         if url.path == "/api/grid":
             q = parse_qs(url.query)
@@ -4204,6 +4256,36 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         url = urlparse(self.path)
+        controller_submit = url.path == "/api/controller/v1/requests"
+        controller_cancel = re.fullmatch(
+            r"/api/controller/v1/requests/([^/]+)/cancel", url.path)
+        if controller_submit or controller_cancel:
+            if not self._host_allowed():
+                self._json({"ok": False, "error": "forbidden_host"}, 403)
+                return
+            if self.remote_controller_api is None:
+                self._json({"ok": False, "error": "controller_api_disabled"}, 503)
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                data = json.loads(self.rfile.read(length) or b"{}")
+                if not isinstance(data, dict):
+                    raise ValueError
+            except (ValueError, json.JSONDecodeError):
+                self._json({"ok": False, "error": "bad_json"}, 400)
+                return
+            try:
+                if controller_submit:
+                    status, payload = self.remote_controller_api.submit(
+                        self._controller_headers(), data)
+                else:
+                    assert controller_cancel is not None
+                    status, payload = self.remote_controller_api.cancel(
+                        self._controller_headers(), controller_cancel.group(1), data)
+                self._json(payload, status)
+            except Exception as exc:
+                self._controller_error(exc)
+            return
         if url.path not in ("/api/send", "/api/head", "/api/spawn", "/api/suggest",
                             "/api/adopt", "/api/reply",
                             "/api/hancock/approve", "/api/hancock/deny",
@@ -4344,6 +4426,59 @@ def launchd_plist(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
 """
 
 
+def _remote_controller_from_env() -> Any:
+    """Build the optional remote API from an explicit, fail-closed environment."""
+    token = os.environ.get("EMUX_REMOTE_CONTROLLER_TOKEN")
+    if not token:
+        return None
+    required = {
+        "EMUX_REMOTE_CONTROLLER_HUMAN_UID": os.environ.get("EMUX_REMOTE_CONTROLLER_HUMAN_UID"),
+        "EMUX_REMOTE_CONTROLLER_DEVICE_ID": os.environ.get("EMUX_REMOTE_CONTROLLER_DEVICE_ID"),
+        "EMUX_REMOTE_CONTROLLER_ID": os.environ.get("EMUX_REMOTE_CONTROLLER_ID"),
+        "EMUX_REMOTE_CONTROLLER_SERVER_ID": os.environ.get("EMUX_REMOTE_CONTROLLER_SERVER_ID"),
+        "EMUX_REMOTE_CONTROLLER_ALIASES": os.environ.get("EMUX_REMOTE_CONTROLLER_ALIASES"),
+        "EMUX_REMOTE_CONTROLLER_STATE": os.environ.get("EMUX_REMOTE_CONTROLLER_STATE"),
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise RuntimeError(
+            "remote controller is partially configured; missing " + ", ".join(missing)
+        )
+    from .remote_control.api import (
+        DenyConsequentialGate,
+        RemoteConfig,
+        RemoteControllerAPI,
+        StaticTokenBoundary,
+        TrustedIdentity,
+    )
+
+    identity = TrustedIdentity(
+        str(required["EMUX_REMOTE_CONTROLLER_HUMAN_UID"]),
+        str(required["EMUX_REMOTE_CONTROLLER_DEVICE_ID"]),
+        str(required["EMUX_REMOTE_CONTROLLER_ID"]),
+    )
+    aliases = frozenset(
+        value.strip()
+        for value in str(required["EMUX_REMOTE_CONTROLLER_ALIASES"]).split(",")
+        if value.strip()
+    )
+    return RemoteControllerAPI(
+        RemoteConfig(
+            str(required["EMUX_REMOTE_CONTROLLER_SERVER_ID"]),
+            aliases,
+            os.environ.get("EMUX_REMOTE_CONTROLLER_REVISION", "emux-0.67.2"),
+            Path(str(required["EMUX_REMOTE_CONTROLLER_STATE"])),
+        ),
+        StaticTokenBoundary(token, identity),
+        DenyConsequentialGate(),
+        _server._load_registry,
+        lambda session, lines: capture_payload(session, lines),
+        lambda session, text, literal, enter: send_payload(
+            session, text, literal=literal, enter=enter
+        ),
+    )
+
+
 def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bool = False,
             public_origin: str | None = None) -> int:
     """Start the emux web daemon. Blocks until Ctrl-C."""
@@ -4359,6 +4494,7 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
         public_origin = public_origin.rstrip("/")
     EmuxWebHandler.extra_host = host if host not in _LOCALHOSTS else None
     EmuxWebHandler.public_origin = public_origin
+    EmuxWebHandler.remote_controller_api = _remote_controller_from_env()
     try:
         server = ThreadingHTTPServer((host, port), EmuxWebHandler)
     except OSError as e:
