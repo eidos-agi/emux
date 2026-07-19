@@ -1021,6 +1021,96 @@ def test_hancock_browser_tab_ui_wired():
     assert 'id="hbanner"' not in page
 
 
+# ---------- EID-789 / EID-792: control-room UX regressions ----------
+
+def test_iterm_controls_are_gated_to_macos_hosts(monkeypatch):
+    """macOS-only iTerm2 controls (the modal '⧉ iTerm2' button and the
+    new-session 'open an iTerm2 window' checkbox) carry the `.maconly` class,
+    and the page ships a CSS rule that hides `.maconly` whenever the daemon
+    host isn't a Mac. The host OS is stamped onto <html data-os=…> per request."""
+    from emux import web
+    page = web.PAGE
+    # the two controls are tagged macOS-only
+    assert 'id="modaliterm" class="maconly"' in page
+    assert 'class="chk maconly"' in page
+    # the gate: non-Darwin hosts hide anything .maconly
+    assert 'html:not([data-os="Darwin"]) .maconly{display:none' in page
+    # the stamp point exists in the template
+    assert '<html lang="en" data-os="__OS__">' in page
+
+
+def test_page_stamps_host_os_and_hides_iterm_off_mac(monkeypatch):
+    """End-to-end substitution: a Linux daemon stamps data-os='Linux' (so the
+    CSS gate hides iTerm); a Mac daemon stamps 'Darwin' (so it shows)."""
+    from emux import web
+    monkeypatch.setattr(web, "_host_os", lambda: "Linux")
+    body = web.PAGE.replace("__VERSION__", "x").replace("__OS__", web._host_os())
+    assert '<html lang="en" data-os="Linux">' in body   # gate active → iTerm hidden
+    monkeypatch.setattr(web, "_host_os", lambda: "Darwin")
+    body = web.PAGE.replace("__VERSION__", "x").replace("__OS__", web._host_os())
+    assert '<html lang="en" data-os="Darwin">' in body   # Mac → iTerm shown
+
+
+def test_http_serves_page_with_os_stamp(daemon, monkeypatch):
+    """The served page never leaves the literal __OS__ placeholder in place —
+    it is substituted with the real host OS on every GET /."""
+    from emux import web
+    monkeypatch.setattr(web, "_host_os", lambda: "Linux")
+    status, body = _get(daemon + "/")
+    assert status == 200
+    assert "__OS__" not in body
+    assert 'data-os="Linux"' in body
+
+
+def test_responsive_layout_prevents_horizontal_clipping():
+    """Below the narrow breakpoint the fixed 3-column shell (280px side + 300px
+    feed) would push the main nav off-screen and clip sideways at ~390px. The
+    page ships a media query that turns side + feed into overlays and reflows
+    the tile grid to a single column, and a nav toggle to reach the drawer."""
+    from emux import web
+    page = web.PAGE
+    assert "@media (max-width:760px)" in page          # the breakpoint
+    assert 'id="navtoggle"' in page and 'id="scrim"' in page
+    assert "nav-open" in page                            # drawer open state
+    # side becomes an off-canvas drawer; feed an on-demand overlay
+    assert "translateX(-100%)" in page
+    assert ".tilegrid{grid-template-columns:1fr}" in page
+    # the laptop control room is untouched: the drawer chrome is inert on desktop
+    assert "#navtoggle{display:none}" in page
+
+
+def test_feed_does_not_cover_nav_on_narrow_screens():
+    """The live feed defaults OPEN on desktop but must NOT start open on a narrow
+    viewport, where it becomes a right-edge overlay that would bury the nav."""
+    from emux import web
+    page = web.PAGE
+    # feed start state is width-aware, not unconditional
+    assert 'setFeed(!isNarrow()&&localStorage.getItem("emux_feed")!=="0")' in page
+    # opening a session dismisses the mobile drawer so it can't linger over content
+    assert 'classList.remove("nav-open")' in page
+
+
+def test_nested_tag_click_does_not_open_the_card():
+    """Clicking a tag chip inside a session card filters by that tag — it must
+    NOT also open the card's modal. The card's own handler ignores clicks that
+    originate inside a `.tagjump`, so the guard holds regardless of child-handler
+    timing or sidebar re-render order."""
+    from emux import web
+    page = web.PAGE
+    assert 'd.onclick=ev=>{if(ev.target.closest(".tagjump"))return;openModal(s);};' in page
+    # the tag itself still filters (and stops propagation as a belt-and-suspenders)
+    assert 'document.querySelectorAll(".tagjump")' in page
+    assert "ev.stopPropagation()" in page
+
+
+def test_gui_checkbox_defaults_off_when_host_is_not_mac():
+    """Off macOS the iTerm2 gui checkbox is a no-op; the page unchecks it on boot
+    so a Linux daemon never receives gui=true it can't honor."""
+    from emux import web
+    assert 'document.documentElement.dataset.os!=="Darwin"' in web.PAGE
+    assert "g.checked=false" in web.PAGE
+
+
 def test_http_docs_lead_with_ai_tree_product_thesis(daemon):
     status, body = _get(daemon + "/docs")
     assert status == 200

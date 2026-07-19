@@ -2,6 +2,10 @@
 
 All notable changes to Emux are documented here.
 
+## v0.68.1 - 2026-07-18
+
+- **Control-room UX fixes for Linux and narrow viewports (EID-789, EID-792).** macOS-only iTerm2 controls (the session modal's "⧉ iTerm2" button and the new-session "open an iTerm2 window" checkbox) are now hidden anywhere the daemon host isn't a Mac — the host OS is stamped onto `<html data-os=…>` per request and a CSS gate hides `.maconly` controls off Darwin; the gui checkbox is also unchecked on boot off-Mac so a Linux daemon never receives a `gui=true` it can't honor. A new `max-width:760px` breakpoint turns the fixed sidebar and live feed into on-demand overlays (a `☰` drawer + right rail) and reflows the tile grid to a single column, so the control room no longer clips sideways (~390px) or buries the main navigation; the feed no longer starts open on narrow screens and dismisses the drawer when a session is opened. Clicking a tag chip inside a session card now filters without also opening the card. The laptop control-room desktop layout is unchanged.
+
 ## v0.68.0 - 2026-07-18
 
 - **Authoritative remote-control surface.** A new `emux.remote_control` package adds a versioned (`emux-remote/1.0`) API that is the only component allowed to execute a remote request: it fail-closes on identity, HMAC-authenticates a single revocable controller credential bound to one immutable `(human, device, controller)` identity, requires a fully-qualified `server/channel/workspace/session` target, and gates every action through Hancock before returning an operational receipt. A separate local controller gateway transports requests but never executes them; the controller client is decoupled from the Emux executor.
