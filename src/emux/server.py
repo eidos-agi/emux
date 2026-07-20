@@ -1254,16 +1254,27 @@ def _pane_settle(session: str, host: str | None = None) -> float:
 def _gate_type(agent: str | None, screen: str, signature: str) -> str:
     """Classify a visible gate without returning its potentially sensitive text."""
     low = screen.lower()
-    if "trust" in low and any(word in low for word in ("directory", "folder", "workspace")):
-        return "trusted_workspace"
-    if "mcp" in low and any(word in low for word in ("allow", "approve", "permission")):
-        return "mcp_approval"
+    # SECURITY (EID-874 audit): higher-risk / human-only gates are discriminated
+    # FIRST by their definitive prompt markers. gate_type gates the delegation
+    # allowlist, and the screen is agent-controlled, so an incidental
+    # 'trust'/'workspace' substring in a command or scrollback must never be able
+    # to launder a command/MCP/hook/update gate into the one grantable class
+    # (trusted_workspace). Order = precedence; keep the risky ones on top.
     if "bash" in low or "do you want to proceed" in low:
         return "command_approval"
+    if "mcp" in low and any(word in low for word in ("allow", "approve", "permission")):
+        return "mcp_approval"
     if "hooks need review" in low or "review hooks" in low:
         return "hook_review"
     if "update available" in low:
         return "software_update"
+    # trusted_workspace requires the actual trust QUESTION ('do you trust'), not
+    # any loose 'trust' substring — a command gate says 'do you want to proceed'
+    # (already caught above) and never contains this phrase.
+    if "do you trust" in low and any(
+        word in low for word in ("directory", "folder", "workspace", "files", "contents")
+    ):
+        return "trusted_workspace"
     if "press enter to confirm" in low:
         return "confirmation"
     return f"{agent or 'unknown'}_approval" if signature else "approval"
@@ -1513,18 +1524,25 @@ async def tmux_approve_gate(
 # not: we must VERIFY the highlighted option is the safe one before pressing
 # Enter, or a reordered/variant menu could land Enter on "No" (harmless) or,
 # worse, a differently-built gate on something destructive (EID-874).
-_HIGHLIGHT_LINE = re.compile(r"^\s*[❯›▶>]\s*\d+[.)]\s*(?P<label>.+?)\s*$")
+# SECURITY (EID-874 audit): the selector class excludes a bare ASCII '>' — that
+# is an ordinary shell/output prefix an agent can print, so allowing it let
+# scrollback pose as the cursor. Only the real TUI selector glyphs count.
+_HIGHLIGHT_LINE = re.compile(r"^\s*[❯›▶]\s*\d+[.)]\s*(?P<label>.+?)\s*$")
 _TRUST_AFFIRM = re.compile(r"trust|\byes\b|continue|proceed", re.IGNORECASE)
 _TRUST_DENY = re.compile(r"\bno\b|exit|don'?t|cancel|reject|deny|skip", re.IGNORECASE)
 
 
 def _highlighted_option(clean_screen: str) -> str | None:
-    """Label of the option the selector cursor (❯/›/▶/>) sits on, if any."""
-    for line in clean_screen.splitlines():
-        m = _HIGHLIGHT_LINE.match(line)
-        if m:
-            return m.group("label").strip()
-    return None
+    """Label of the UNIQUELY selected option, or None. Fail closed on ambiguity:
+    if zero or more-than-one lines look selected we cannot tell which option
+    Enter lands on (an agent can inject a decoy cursor line into scrollback), so
+    None ⇒ the caller freezes the gate for a human (EID-874 audit hole 3/5)."""
+    labels = [
+        m.group("label").strip()
+        for line in clean_screen.splitlines()
+        if (m := _HIGHLIGHT_LINE.match(line))
+    ]
+    return labels[0] if len(labels) == 1 else None
 
 
 def _affirms_trust(label: str | None) -> bool:
@@ -1557,42 +1575,49 @@ async def tmux_grant_answer(
     (single-use fingerprint, screen-unchanged recheck, receipt) is inherited."""
     from . import delegation
 
+    server_id = os.environ.get("EMUX_SERVER_ID") or os.uname().nodename
+
+    def deny(reason: str, workspace: str = "", gate_type: str = "", session: str = "", **extra):
+        # Every refusal is logged — the failure half of the success/failure
+        # record for learning and security audit (an attempt to answer a gate
+        # without authority is a signal, not a silent no-op).
+        delegation.log_decision("denied", reason, identity, server_id, workspace, gate_type, session)
+        return {"ok": False, "error": reason, **extra}
+
     if not (isinstance(identity, str) and identity):
-        return {"ok": False, "error": "no_identity"}
+        return deny("no_identity")
     obs = await tmux_gate(target, by_registry_name=by_registry_name)
     if not obs.get("ok"):
-        return obs
+        return deny(obs.get("error", "no_gate"))
     gate_type = obs["gate_type"]
     session = obs["resolved_session"]
     host = obs["host"]
 
     # 1) hard allowlist — some gate types are never grantable, whatever a grant says
     if gate_type not in delegation.GRANTABLE_GATE_TYPES:
-        return {"ok": False, "error": "gate_type_not_grantable", "gate_type": gate_type}
+        return deny("gate_type_not_grantable", gate_type=gate_type, session=session)
 
-    # 2) scope — this server + this session's workspace must have an exact grant
-    server_id = os.environ.get("EMUX_SERVER_ID") or os.uname().nodename
-    registry = _load_registry()
-    entry = (
-        registry.get(target, {})
-        if by_registry_name
-        else next((e for e in registry.values() if e.get("session") == session), {})
+    # 2) scope — bind to the LIVE, non-spoofable directory the gate is about,
+    # NOT the stale registration-time cwd (EID-874 audit hole 4/6).
+    # pane_current_path is tmux's real cwd, not agent stdout. Match on the
+    # absolute realpath so two dirs sharing a basename never collide.
+    code_p, path_out, _p = _run_tmux(
+        ["display-message", "-p", "-t", session, "#{pane_current_path}"], host=host
     )
-    workspace = str(entry.get("workspace") or Path(str(entry.get("cwd") or "")).name)
-    if not workspace:
-        return {"ok": False, "error": "no_workspace"}
+    if code_p != 0 or not path_out.strip():
+        return deny("no_live_cwd", gate_type=gate_type, session=session)
+    workspace = os.path.realpath(path_out.strip())
     if not delegation.may_answer_gate(identity, server_id, workspace, gate_type):
-        return {"ok": False, "error": "no_grant",
-                "identity": identity, "server": server_id, "workspace": workspace,
-                "gate_type": gate_type}
+        return deny("no_grant", workspace=workspace, gate_type=gate_type, session=session,
+                    identity=identity, server=server_id)
 
-    # 3) label verify — confirm the highlighted option is the safe answer
+    # 3) label verify — confirm a UNIQUE highlighted option that affirms the safe answer
     code, screen, _err = _run_tmux(
         ["capture-pane", "-t", session, "-p", "-S", "-20"], host=host
     )
     label = _highlighted_option(_strip_ansi(screen or "")) if code == 0 else None
     if not _affirms_trust(label):
-        return {"ok": False, "error": "unsafe_highlighted_option", "gate_type": gate_type}
+        return deny("unsafe_highlighted_option", workspace=workspace, gate_type=gate_type, session=session)
 
     # 4) delegate to the audited approve machinery, attributed to the identity
     result = await tmux_approve_gate(
@@ -1601,8 +1626,12 @@ async def tmux_grant_answer(
         request_id=request_id,
     )
     if result.get("ok"):
+        delegation.log_decision("allowed", "grant", identity, server_id, workspace, gate_type, session)
         result["answered_via"] = "grant"
         result["identity"] = identity
+    else:
+        delegation.log_decision("denied", f"approve:{result.get('error')}", identity,
+                                server_id, workspace, gate_type, session)
     return result
 
 
