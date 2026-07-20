@@ -966,6 +966,17 @@ def cmd_approve(args: argparse.Namespace) -> int:
     return _print_result(result, as_json=args.json)
 
 
+def cmd_grant_answer(args: argparse.Namespace) -> int:
+    """Answer a gate only if a scoped delegation grant pre-authorizes it (EID-874)."""
+    from .server import tmux_grant_answer
+
+    result = asyncio.run(tmux_grant_answer(
+        target=args.target, identity=args.identity,
+        by_registry_name=not args.session, request_id=args.request_id,
+    ))
+    return _print_result(result, as_json=args.json)
+
+
 def cmd_capture(args: argparse.Namespace) -> int:
     """Capture a registered name by default."""
     result = asyncio.run(
@@ -1556,6 +1567,13 @@ def main(argv: list[str] | None = None) -> int:
     p_approve.add_argument("--session", action="store_true", help="target a raw tmux session")
     p_approve.add_argument("--json", action="store_true", help="print structured result JSON")
 
+    p_grant = sub.add_parser("gate-grant", help="answer a gate ONLY if a delegation grant authorizes it (EID-874)")
+    p_grant.add_argument("target", help="registered name by default, or tmux session with --session")
+    p_grant.add_argument("--identity", required=True, help="who the grant authorizes (e.g. daniel)")
+    p_grant.add_argument("--request-id", help="caller request ID (must be unique)")
+    p_grant.add_argument("--session", action="store_true", help="target a raw tmux session")
+    p_grant.add_argument("--json", action="store_true", help="print structured result JSON")
+
     p_interrupt = sub.add_parser("interrupt", help="send C-c to a registered session")
     p_interrupt.add_argument(
         "target", help="registered name by default, or tmux session with --session"
@@ -1700,6 +1718,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_gate(args)
     if args.cmd == "approve":
         return cmd_approve(args)
+    if args.cmd == "gate-grant":
+        return cmd_grant_answer(args)
     if args.cmd == "interrupt":
         return cmd_interrupt(args)
     if args.cmd == "capture":

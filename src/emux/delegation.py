@@ -32,6 +32,15 @@ GRANTS_PATH = Path(
     or (Path.home() / ".config" / "emux" / "delegations.json")
 )
 
+# A HARD backstop independent of any grant: only these gate types may EVER be
+# answered by delegated authority, no matter what a grant lists. A grant is
+# necessary but not sufficient — the gate type must also be in here. Start with
+# only the trust-folder gate (accepting your own directory is not a consequential
+# act). Command approvals, MCP-trust, hook-review, and software-update are
+# deliberately absent and stay human-only. Widening this set is a founder
+# decision (EID-874), not a config change.
+GRANTABLE_GATE_TYPES = frozenset({"trusted_workspace"})
+
 
 def _load_grants() -> list[dict[str, Any]]:
     """Read the grant store fresh (so minting/revoking takes effect at once).

@@ -1507,6 +1507,105 @@ async def tmux_approve_gate(
             "action": action, "sent_key": send_key, "request_id": request_id}
 
 
+# The existing approve path only ever presses Enter — it accepts whatever option
+# is highlighted and never checks WHICH option that is. For a human pressing
+# approve that's fine (they read the screen). For a delegated auto-answer it is
+# not: we must VERIFY the highlighted option is the safe one before pressing
+# Enter, or a reordered/variant menu could land Enter on "No" (harmless) or,
+# worse, a differently-built gate on something destructive (EID-874).
+_HIGHLIGHT_LINE = re.compile(r"^\s*[❯›▶>]\s*\d+[.)]\s*(?P<label>.+?)\s*$")
+_TRUST_AFFIRM = re.compile(r"trust|\byes\b|continue|proceed", re.IGNORECASE)
+_TRUST_DENY = re.compile(r"\bno\b|exit|don'?t|cancel|reject|deny|skip", re.IGNORECASE)
+
+
+def _highlighted_option(clean_screen: str) -> str | None:
+    """Label of the option the selector cursor (❯/›/▶/>) sits on, if any."""
+    for line in clean_screen.splitlines():
+        m = _HIGHLIGHT_LINE.match(line)
+        if m:
+            return m.group("label").strip()
+    return None
+
+
+def _affirms_trust(label: str | None) -> bool:
+    """True only if the highlighted label clearly AFFIRMS trust and carries no
+    denial word — so a grant-driven Enter can never land on 'No'/'Skip'/'Exit'."""
+    if not label:
+        return False
+    return bool(_TRUST_AFFIRM.search(label)) and not _TRUST_DENY.search(label)
+
+
+@mcp.tool()
+async def tmux_grant_answer(
+    target: str,
+    identity: str,
+    by_registry_name: bool = False,
+    request_id: str | None = None,
+) -> dict[str, Any]:
+    """Answer a session's permission gate ONLY when a scoped delegation grant
+    pre-authorizes it — the authority-memory bridge (EID-874). Four independent
+    conditions, deny-by-default; any miss leaves the gate frozen for a human:
+
+      1. the gate type is in delegation.GRANTABLE_GATE_TYPES (hard allowlist);
+      2. an exact, unexpired grant authorizes <identity> for
+         {this server, this workspace, this gate type};
+      3. the highlighted option affirms the safe answer (label-verified —
+         never a blind Enter);
+      4. tmux_approve_gate's own fingerprint/TOCTOU/replay/audit all pass.
+
+    Reuses tmux_approve_gate for the actual keypress, so every guarantee there
+    (single-use fingerprint, screen-unchanged recheck, receipt) is inherited."""
+    from . import delegation
+
+    if not (isinstance(identity, str) and identity):
+        return {"ok": False, "error": "no_identity"}
+    obs = await tmux_gate(target, by_registry_name=by_registry_name)
+    if not obs.get("ok"):
+        return obs
+    gate_type = obs["gate_type"]
+    session = obs["resolved_session"]
+    host = obs["host"]
+
+    # 1) hard allowlist — some gate types are never grantable, whatever a grant says
+    if gate_type not in delegation.GRANTABLE_GATE_TYPES:
+        return {"ok": False, "error": "gate_type_not_grantable", "gate_type": gate_type}
+
+    # 2) scope — this server + this session's workspace must have an exact grant
+    server_id = os.environ.get("EMUX_SERVER_ID") or os.uname().nodename
+    registry = _load_registry()
+    entry = (
+        registry.get(target, {})
+        if by_registry_name
+        else next((e for e in registry.values() if e.get("session") == session), {})
+    )
+    workspace = str(entry.get("workspace") or Path(str(entry.get("cwd") or "")).name)
+    if not workspace:
+        return {"ok": False, "error": "no_workspace"}
+    if not delegation.may_answer_gate(identity, server_id, workspace, gate_type):
+        return {"ok": False, "error": "no_grant",
+                "identity": identity, "server": server_id, "workspace": workspace,
+                "gate_type": gate_type}
+
+    # 3) label verify — confirm the highlighted option is the safe answer
+    code, screen, _err = _run_tmux(
+        ["capture-pane", "-t", session, "-p", "-S", "-20"], host=host
+    )
+    label = _highlighted_option(_strip_ansi(screen or "")) if code == 0 else None
+    if not _affirms_trust(label):
+        return {"ok": False, "error": "unsafe_highlighted_option", "gate_type": gate_type}
+
+    # 4) delegate to the audited approve machinery, attributed to the identity
+    result = await tmux_approve_gate(
+        target, obs["gate_fingerprint"], action="approve",
+        by_registry_name=by_registry_name, subject=identity, device="grant",
+        request_id=request_id,
+    )
+    if result.get("ok"):
+        result["answered_via"] = "grant"
+        result["identity"] = identity
+    return result
+
+
 @mcp.tool()
 @audited
 async def tmux_send(
