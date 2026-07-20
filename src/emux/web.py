@@ -4476,6 +4476,7 @@ def _remote_controller_from_env() -> Any:
         lambda session, text, literal, enter: send_payload(
             session, text, literal=literal, enter=enter
         ),
+        gate_probe=lambda session: _server._gate_snapshot(session, None),
     )
 
 

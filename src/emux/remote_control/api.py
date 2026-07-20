@@ -77,7 +77,14 @@ class RemoteConfig:
 
 class RemoteControllerAPI:
     ACTIONS = frozenset({"session.capture", "session.send", "session.interrupt"})
-    CONSEQUENTIAL = frozenset({"session.send", "session.interrupt"})
+    # session.send is transport, not authorization: it is the paired human typing
+    # into their own authenticated session. Consequences are governed by the
+    # receiving agent's permission system, exactly as with local typing.
+    # Approval gates apply only to controller actions that themselves create
+    # consequences (answering a modal, killing sessions, deploys, credential or
+    # permission changes, external publishing). Decision:
+    # cockpit-eidos/decisions/2026-07-20-send-is-transport-not-authorization.md
+    CONSEQUENTIAL = frozenset({"session.interrupt"})
 
     def __init__(
         self,
@@ -88,11 +95,15 @@ class RemoteControllerAPI:
         capture: Callable[[str, int], dict[str, Any]],
         send: Callable[[str, str, bool, bool], dict[str, Any]],
         clock: Callable[[], float] = time.time,
+        gate_probe: Callable[[str], dict[str, Any]] | None = None,
     ):
         if not config.server_id or not config.aliases:
             raise ValueError("server identity and at least one explicit alias are required")
         self.config, self.boundary, self.gate = config, boundary, gate
         self.registry, self.capture, self.send, self.clock = registry, capture, send, clock
+        # Production wiring MUST pass the real gate probe (_gate_snapshot):
+        # transport never answers or bypasses a visible permission gate.
+        self.gate_probe = gate_probe or (lambda session: {"ok": False, "error": "no_active_gate"})
         self._lock = threading.Lock()
         self._state = self._load()
 
@@ -271,6 +282,16 @@ class RemoteControllerAPI:
             text = params.get("text")
             if not isinstance(text, str) or not text:
                 raise ProtocolError("invalid_parameters", "text is required")
+            # Never inspect or classify the text itself — delivery is content-blind.
+            # But a visible permission gate must never be answered or bypassed by
+            # transport, and ambiguity (gone session, failed probe) fails closed.
+            probe = self.gate_probe(target.session)
+            if probe.get("ok"):
+                return self._finish(rid, "denied", {"ok": False, "error": "gated_session"})
+            if probe.get("error") != "no_active_gate":
+                return self._finish(
+                    rid, "denied", {"ok": False, "error": str(probe.get("error") or "gate_probe_failed")}
+                )
             result = self.send(target.session, text, True, bool(params.get("enter", True)))
         else:
             result = self.send(target.session, "C-c", False, False)

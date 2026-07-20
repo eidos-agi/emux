@@ -73,7 +73,10 @@ def request(rid="request-1", nonce="nonce-1234567890123456", action="session.sen
         "device_id": "device-laptop",
         "target": {**FIXTURE["target"], "server": server},
         "action": action,
-        "parameters": {"text": "do the work"} if action == "session.send" else {"lines": 20},
+        "parameters": {
+            "session.send": {"text": "do the work"},
+            "session.capture": {"lines": 20},
+        }.get(action, {}),
     }
 
 
@@ -135,9 +138,10 @@ def test_version_identity_unknown_action_and_target_fail_closed(rig):
 
 
 def test_hancock_pending_cancellation_and_denial(rig):
+    # Gate flows apply to consequential actions only — session.interrupt here.
     api, gate, calls, _ = rig
     gate.decision = "pending"
-    status, pending = api.submit(HEADERS, request())
+    status, pending = api.submit(HEADERS, request(action="session.interrupt"))
     assert status == 202 and pending["status"] == "pending" and not calls
     status, cancelled = api.cancel(
         HEADERS,
@@ -146,8 +150,40 @@ def test_hancock_pending_cancellation_and_denial(rig):
     )
     assert status == 200 and cancelled["status"] == "cancelled"
     gate.decision = "deny"
-    _, denied = api.submit(HEADERS, request("request-2", "nonce-2234567890123456"))
+    _, denied = api.submit(
+        HEADERS, request("request-2", "nonce-2234567890123456", action="session.interrupt")
+    )
     assert denied["status"] == "denied" and not calls
+
+
+def test_send_is_transport_not_authorization(rig):
+    # decision: cockpit-eidos/decisions/2026-07-20-send-is-transport-not-authorization.md
+    # An ordinary authenticated send to an exact live target never consults the
+    # approval gate — it is the paired human typing into their own session.
+    api, gate, calls, _ = rig
+    gate.decision = "deny"  # would block any consequential action
+    status, done = api.submit(HEADERS, request())
+    assert status == 200 and done["status"] == "completed"
+    assert calls == [("same-name", "do the work", True, True)]
+
+
+def test_send_fails_closed_on_visible_gate_and_probe_ambiguity(rig, tmp_path):
+    # Transport must never answer or bypass a visible permission gate, and
+    # ambiguity (gone session, failed capture) fails closed.
+    api, _, calls, _ = rig
+    probes = {"state": {"ok": True, "fingerprint": "f" * 64, "gate_type": "menu"}}
+    api.gate_probe = lambda session: probes["state"]
+    _, denied = api.submit(HEADERS, request())
+    assert denied["status"] == "denied" and denied["result"]["error"] == "gated_session"
+    assert not calls
+    probes["state"] = {"ok": False, "error": "session_gone"}
+    _, gone = api.submit(HEADERS, request("request-2", "nonce-2234567890123456"))
+    assert gone["status"] == "denied" and gone["result"]["error"] == "session_gone"
+    assert not calls
+    probes["state"] = {"ok": False, "error": "no_active_gate"}
+    _, sent = api.submit(HEADERS, request("request-3", "nonce-3234567890123456"))
+    assert sent["status"] == "completed"
+    assert calls == [("same-name", "do the work", True, True)]
 
 
 def test_receipt_state_redacts_parameters_and_semantic_memory(rig):
