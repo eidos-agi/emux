@@ -178,6 +178,22 @@ def test_quota_text_flags_possible_exhaustion():
     assert "possible_exhaustion" in r["flags"]
 
 
+def test_claude_session_limit_is_waiting_external_not_stuck():
+    cap = (
+        "You've hit your session limit · resets 4pm (America/Los_Angeles)\n"
+        "/usage-credits to finish what you’re working on.\n"
+        "❯ \n"
+    )
+    r = classify(
+        cap,
+        _samples([cap, cap], [False, False]),
+        _meta(agent="claude", pane_command="claude", last_change_age=2915.0),
+    )
+    assert r["state"] == "waiting_external"
+    assert "possible_exhaustion" in r["flags"]
+    assert "quota" in r["summary"].lower()
+
+
 def test_login_method_picker_is_login_gate():
     cap = (
         "Select login method:\n"

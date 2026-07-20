@@ -159,6 +159,9 @@ _GIT_CONFLICT_RE = re.compile(
 )
 _QUOTA_RE = re.compile(
     r"rate limit"
+    r"|session limit"
+    r"|hit your (?:session|usage|token) limit"
+    r"|/usage-credits"
     r"|context (?:length|window) exceeded"
     r"|token limit"
     r"|usage limit"
@@ -406,6 +409,14 @@ def classify(capture_text: str, activity: list[dict], meta: dict) -> dict:
                    "Waiting on a human — approval/login/confirmation prompt is up.")
         return _result("waiting_human", _confidence(len(sig)), summary,
                        "; ".join(sig), flags)
+
+    # A hard provider quota is an external wait, not a stuck agent. Check this
+    # before the activity/thrashing/error cascade: the quota banner can coexist
+    # with stale spinner or command text from work that already finished.
+    if has_quota:
+        return _result("waiting_external", _confidence(2),
+                       "Waiting for provider quota or context capacity.",
+                       "explicit quota/context exhaustion text on screen", flags)
 
     # 2. thrashing — busy, but cycling with no net progress. Checked BEFORE error:
     #    a command re-run producing the SAME failure over and over is thrash (more
