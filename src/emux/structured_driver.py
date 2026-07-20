@@ -151,3 +151,27 @@ def drive_in_bounded_worker(
         task, project_dir, identity=identity, server_id=server_id,
         python=python, **kwargs,
     )
+
+
+class StructuredClaudeAdapter:
+    """ONE of Claude's several drive adapters (EID-875): the `claude -p` JSON
+    surface with a PreToolUse permission hook. Good for bounded, resumable
+    task-steps. NOT the way Claude is driven — a sibling to claude-sdk (long
+    runs), claude-terminal (observe / universal), etc."""
+
+    name = "claude-structured"
+    agent = "claude"
+    traits = frozenset({"structured", "resumable", "permission_hook", "bounded_step"})
+
+    def drive(self, task: str, cwd: str, **kwargs: Any) -> DriveResult:
+        return drive(task, cwd, **kwargs)
+
+
+# Register as one Claude adapter among many; adapters_for("claude") returns a
+# LIST, so adding claude-sdk / claude-terminal later needs no change here.
+try:  # keep import-time failures from taking down the module
+    from . import drive_adapter as _da
+
+    _da.register(StructuredClaudeAdapter())
+except Exception:  # noqa: BLE001
+    pass
