@@ -237,12 +237,27 @@ def gated(agent_key: str | None, content: str) -> str | None:
     must resolve it deliberately — never type through it.
     """
     a = BY_KEY.get(agent_key or "")
-    if not a or not a.approval_sigs:
-        return None
     low = (content or "").lower()
-    for sig in a.approval_sigs:
-        if sig in low:
-            return sig
+    if a and a.approval_sigs:
+        for sig in a.approval_sigs:
+            if sig in low:
+                return sig
+        return None
+    # Agent unidentified (e.g. codex/claude running under a `node`/`python`
+    # wrapper, so pane_current_command isn't the agent name). A gate is a
+    # safety-critical thing to miss, so fall back to matching EVERY known
+    # agent's signatures against the screen. Better a false "gated" (send
+    # refused, human retries) than typing a prompt through a live modal.
+    return any_gate(low)
+
+
+def any_gate(content: str) -> str | None:
+    """Agent-agnostic gate scan: does the screen show ANY known agent's gate?"""
+    low = (content or "").lower()
+    for adapter in ADAPTERS:
+        for sig in adapter.approval_sigs:
+            if sig in low:
+                return sig
     return None
 
 

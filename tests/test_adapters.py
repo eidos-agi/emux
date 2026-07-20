@@ -129,6 +129,27 @@ def test_codex_gates_are_known_and_typing_through_them_is_refused():
     assert adapters.gated("codex", "› write some code\n  gpt-5.5 high") is None
 
 
+def test_gate_detected_even_when_agent_is_unidentified():
+    # MEASURED LIVE (2026-07-20): codex runs under a `node` wrapper, so
+    # pane_current_command is "node" and _pane_agent returns None. With the old
+    # code, gated(None, screen) returned None → a real trust gate was missed →
+    # session.send typed through it. The fix: unknown agent falls back to an
+    # agent-agnostic scan of every known signature. Fail closed, not open.
+    trust_gate = (
+        "Do you trust the contents of this directory? Working with untrusted\n"
+        "› 1. Yes, continue"
+    )
+    assert adapters.gated(None, trust_gate) is not None
+    assert adapters.gated("", trust_gate) is not None
+    # any known signature matching is enough to refuse — here both the codex
+    # trust phrase and the generic "1. yes" selector are present.
+    assert adapters.any_gate(trust_gate) is not None
+    assert adapters.any_gate("do you trust the contents of this directory") is not None
+    # a benign screen with no known gate signature stays sendable
+    assert adapters.any_gate("$ ls -la\ntotal 4\ndrwxr-xr-x") is None
+    assert adapters.gated(None, "just a normal shell prompt $ ") is None
+
+
 def test_both_subscribed_agents_now_have_a_proven_done_signal():
     # Codex has a NATIVE Stop hook, same JSON shape as Claude's — proven live:
     # it fired `emux signal IDLE` into the inbox and the judge read done_idle.
