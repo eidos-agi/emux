@@ -719,6 +719,14 @@ def cmd_register(args: argparse.Namespace) -> int:
     entry["channels"] = channel_store.resolve_channels(
         args.name, {**entry, "channels": args.channels or []}
     )
+    if not entry["channels"]:
+        # Remote targeting (emux-remote/1.0) requires >=1 channel; a bare
+        # registration must stay reachable (EID-869).
+        entry["channels"] = ["default"]
+    code, out, _err = _run_tmux(
+        ["display-message", "-p", "-t", args.session, "#{pane_current_path}"]
+    )
+    entry["cwd"] = (out.strip() if code == 0 else "") or os.getcwd()
     registry[args.name] = entry
     _save_registry(registry)
     _start_stream_log(args.session, args.name)  # arm durable logging on register

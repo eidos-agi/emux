@@ -3093,6 +3093,16 @@ def doctor(target: str, by_registry_name: bool = False) -> dict[str, Any]:
         live,
         f"tmux has-session {session}" + (f" on {host}" if host else " locally"),
     )
+    if by_registry_name:
+        entry = _load_registry().get(target) or {}
+        targetable = bool(entry.get("cwd")) and bool(entry.get("channels"))
+        check(
+            "remote_target",
+            targetable if entry else None,
+            "cwd + channels present"
+            if targetable
+            else "missing cwd/channels — unreachable via emux-remote/1.0; re-register to stamp (EID-869)",
+        )
     if not live:
         return {
             "ok": False,

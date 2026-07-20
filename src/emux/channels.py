@@ -166,7 +166,10 @@ def resolve_channels(
 ) -> list[str]:
     """Explicit channels + deterministic matcher hits + canon, with parents inherited."""
     definitions = definitions if definitions is not None else load_channels()
-    found = {c for c in entry.get("channels") or [] if c in definitions}
+    # Explicit channels survive even without a definition — remote targeting
+    # (emux-remote/1.0) matches on entry channels, so silently dropping an
+    # explicit channel makes the session unreachable (EID-869).
+    found = set(entry.get("channels") or [])
     text = _haystack(name, entry)
     for channel, spec in definitions.items():
         if spec.get("tier") == 0 or any(m in text for m in spec.get("matchers") or []):
@@ -177,7 +180,7 @@ def resolve_channels(
         if parent and parent in definitions and parent not in found:
             found.add(parent)
             pending.append(parent)
-    return sorted(found, key=lambda c: (definitions[c].get("tier", 9), c))
+    return sorted(found, key=lambda c: (definitions.get(c, {}).get("tier", 9), c))
 
 
 def suggest_channels(registry: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
