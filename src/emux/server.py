@@ -1282,8 +1282,10 @@ def _gate_snapshot(session: str, host: str | None) -> dict[str, Any]:
         return {"ok": False, "error": "tmux_capture_failed"}
     clean = _strip_ansi(screen or "")
     agent = _pane_agent(session, host)
-    signature = adapters.gated(agent, clean)
-    if not signature:
+    # Signature match first (instant); ML fallback only for suspicious-but-
+    # unmatched screens, fail-closed (EID-871).
+    kind, signature = adapters.detect_gate(agent, clean)
+    if kind is None:
         return {"ok": False, "error": "no_active_gate"}
     # Whitespace normalization makes redraw-only changes stable. Target identity
     # is included so two panes displaying the same menu never share a challenge.
@@ -1293,10 +1295,12 @@ def _gate_snapshot(session: str, host: str | None) -> dict[str, Any]:
         sort_keys=True,
         separators=(",", ":"),
     )
+    gate_type = "ml_detected" if kind == "ml" else _gate_type(agent, clean, signature or "")
     return {
         "ok": True,
         "fingerprint": hashlib.sha256(identity.encode()).hexdigest(),
-        "gate_type": _gate_type(agent, clean, signature),
+        "gate_type": gate_type,
+        "detected_by": kind,
         "agent": agent,
     }
 

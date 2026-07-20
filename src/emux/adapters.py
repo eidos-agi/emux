@@ -22,9 +22,12 @@ An adapter that lies is worse than one that admits it doesn't know — a wrong
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import shlex
 import shutil
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -259,6 +262,124 @@ def any_gate(content: str) -> str | None:
             if sig in low:
                 return sig
     return None
+
+
+# --------------------------------------------------------------------------- #
+# ML gate detection — the net under the signature list
+# --------------------------------------------------------------------------- #
+#
+# `gated()`/`any_gate()` match a hardcoded signature list. That list will ALWAYS
+# lag: new agents, reworded prompts, locales, partial redraws. And here the
+# failure direction is dangerous — a missed gate means a prompt gets typed into
+# a live modal that persists the answer (measured: codex under a `node` wrapper
+# went unidentified and a real trust gate was nearly typed through — EID-871).
+#
+# So: a learned fallback. Signatures stay the instant first check. Only when a
+# screen is *suspicious but unmatched* (unidentified agent, or structurally
+# gate-shaped) do we pay for a local-model classification. Fail CLOSED: a gate,
+# an uncertain answer, or an unreachable model all count as gated. A local model
+# only (Ollama / claude -p) — never a raw cloud API (fixed-cost tools only).
+
+# Structural pre-filter: strong decision phrases, or a numbered menu behind an
+# interactive selector glyph. Deliberately tighter than "any numbered list" so
+# ordinary output doesn't pay for inference.
+_GATE_LIKE = re.compile(
+    r"do you (?:want|trust)"
+    r"|press enter to (?:continue|confirm|select)"
+    r"|\(y/n\)|\[y/n\]|\byes/no\b"
+    r"|need review"
+    r"|update available"
+    r"|type ['\"]?yes['\"]? to confirm"
+    # a numbered option BEHIND a selector glyph — the shape of a menu, not a
+    # bare ❯/› composer or shell prompt (those use the same glyphs).
+    r"|[❯›▶]\s*\d+[.)]\s+\S",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+_GATE_ML_URL = os.environ.get("EMUX_GATE_ML_URL", "http://127.0.0.1:11434/api/generate")
+# llama3.2:3b scored 12/12 on the gate/clear eval at ~1s warm; the 1.5b model
+# over-triggered (fail-safe but useless). Few-shot is load-bearing — the same
+# models are near-random zero-shot (EID-871 eval, 2026-07-20).
+_GATE_ML_MODEL = os.environ.get("EMUX_GATE_ML_MODEL", "llama3.2:3b")
+
+_GATE_ML_PROMPT = (
+    "You are a strict binary classifier for terminal screens. Reply with exactly "
+    "one word: GATE or CLEAR.\n"
+    "GATE = the screen is BLOCKED waiting for a human to choose/confirm before "
+    "anything else can happen (permission, trust, update, y/n, numbered options "
+    "behind a > selector, press enter to continue).\n"
+    "CLEAR = ordinary output, a shell prompt ready for input, a running/finished "
+    "program, or a text composer. Not blocked on a decision.\n\n"
+    "Examples:\n"
+    "SCREEN: Do you trust this directory?\n> 1. Yes  2. No\nANSWER: GATE\n"
+    "SCREEN: eidos@host:~$ ls\nfile.txt  build/\nANSWER: CLEAR\n"
+    "SCREEN: 393 passed in 49s\neidos@host:~$\nANSWER: CLEAR\n"
+    "SCREEN: Overwrite file? (y/n)\nANSWER: GATE\n"
+    "SCREEN: * Building wheel... done\nANSWER: CLEAR\n\n"
+)
+
+
+def looks_gate_like(content: str) -> bool:
+    """Cheap structural pre-filter: does this screen have the SHAPE of a modal
+    awaiting a human decision? Decides whether an unmatched screen is worth an
+    ML classification — keeps inference off the ordinary-output fast path."""
+    return bool(_GATE_LIKE.search(content or ""))
+
+
+def ml_is_gate(content: str, timeout: float = 3.0) -> bool | None:
+    """Local-model classification of whether a pane shows a gate awaiting a human.
+
+    Returns True (gate), False (clear), or None (unreachable/unparseable). Local
+    Ollama only — never a raw cloud API. The caller fails closed on True/None."""
+    screen = "\n".join((content or "").splitlines()[-20:])[:2000]
+    prompt = _GATE_ML_PROMPT + f"SCREEN: {screen}\nANSWER:"
+    body = json.dumps(
+        {
+            "model": _GATE_ML_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "keep_alive": "10m",  # keep the model resident so escalations stay ~1s, not cold-load
+            "options": {"temperature": 0, "num_predict": 3},
+        }
+    ).encode()
+    try:
+        req = urllib.request.Request(
+            _GATE_ML_URL, data=body, headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            out = str(json.load(resp).get("response", ""))
+    except Exception:  # noqa: BLE001 — any failure ⇒ None ⇒ caller fails closed
+        return None
+    up = out.strip().upper()
+    if "GATE" in up:
+        return True
+    if "CLEAR" in up:
+        return False
+    return None
+
+
+def detect_gate(agent_key: str | None, content: str, ml: Any = ml_is_gate) -> tuple[str | None, str | None]:
+    """Layered gate detection. Returns (kind, detail):
+    kind == "signature" — a known signature matched (instant path);
+    kind == "ml"        — ML/uncertain fallback fired (fail-closed);
+    kind is None        — clear, safe to send.
+
+    ML is skipped entirely when EMUX_GATE_ML is off (signatures-only, the legacy
+    behavior) — an escape hatch if the local model is unavailable/unreliable."""
+    sig = gated(agent_key, content)
+    if sig:
+        return ("signature", sig)
+    if os.environ.get("EMUX_GATE_ML", "on").strip().lower() in ("off", "0", "false", "no"):
+        return (None, None)
+    # Escalate only when we have reason to distrust the fast path: an
+    # unidentified agent (signatures can't be trusted at all) or a gate-shaped
+    # screen. Everything else is taken as clear without paying for inference.
+    if agent_key and not looks_gate_like(content):
+        return (None, None)
+    verdict = ml(content)
+    if verdict is False:
+        return (None, None)  # the model confidently cleared it
+    return ("ml", "ml-gate" if verdict is True else "ml-uncertain")
 
 
 def settle_for(agent_key: str | None) -> float:

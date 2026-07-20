@@ -150,6 +150,68 @@ def test_gate_detected_even_when_agent_is_unidentified():
     assert adapters.gated(None, "just a normal shell prompt $ ") is None
 
 
+def test_looks_gate_like_pre_filter():
+    # Real gate shapes escalate; ordinary output does not.
+    for gate in [
+        "Do you want to proceed?\n❯ 1. Yes\n  2. No",
+        "Do you trust the contents of this directory?",
+        "Overwrite file? (y/n)",
+        "✨ Update available! 0.1 -> 0.2",
+        "Hooks need review",
+        "Press enter to continue",
+        "› 2. Skip",
+    ]:
+        assert adapters.looks_gate_like(gate), gate
+    for clear in [
+        "$ ls -la\ntotal 8\ndrwxr-xr-x 2 me me 4096 file.txt",
+        "Successfully built emux-0.68.2-py3-none-any.whl",
+        "393 passed, 2 warnings in 49.07s",
+        "eidos@host:~/repo$ ",
+    ]:
+        assert not adapters.looks_gate_like(clear), clear
+
+
+def test_detect_gate_layers_signature_then_ml_and_fails_closed():
+    # 1. Known signature → instant path, ML never consulted.
+    calls = []
+    def ml_spy(content):
+        calls.append(content); return False
+    kind, detail = adapters.detect_gate("codex", "do you trust the contents of this directory", ml=ml_spy)
+    assert kind == "signature" and not calls
+
+    # 2. Identified agent, clear + not gate-shaped → clear, ML skipped.
+    kind, _ = adapters.detect_gate("claude", "$ ls\nfile.txt", ml=ml_spy)
+    assert kind is None and not calls
+
+    # 3. Gate-shaped, no signature, model says CLEAR → allowed.
+    kind, _ = adapters.detect_gate("claude", "Overwrite? (y/n)", ml=lambda c: False)
+    assert kind is None
+
+    # 4. Gate-shaped, no signature, model says GATE → gated via ML.
+    kind, detail = adapters.detect_gate("claude", "Proceed with deploy? (y/n)", ml=lambda c: True)
+    assert kind == "ml" and detail == "ml-gate"
+
+    # 5. Model UNCERTAIN / unreachable on a suspicious screen → FAIL CLOSED.
+    kind, detail = adapters.detect_gate("claude", "Some novel modal (y/n)", ml=lambda c: None)
+    assert kind == "ml" and detail == "ml-uncertain"
+
+    # 6. Unidentified agent escalates to ML even when not obviously gate-shaped
+    #    (we can't trust the signature path at all for an unknown agent).
+    kind, _ = adapters.detect_gate(None, "weird screen with no known signature", ml=lambda c: True)
+    assert kind == "ml"
+
+
+def test_detect_gate_ml_escape_hatch(monkeypatch):
+    # EMUX_GATE_ML=off ⇒ signatures only, ML never runs (ops escape hatch).
+    monkeypatch.setenv("EMUX_GATE_ML", "off")
+    called = []
+    kind, _ = adapters.detect_gate("claude", "Proceed? (y/n)", ml=lambda c: called.append(1) or True)
+    assert kind is None and not called
+    # signatures still work with the hatch on
+    kind, _ = adapters.detect_gate("codex", "update available", ml=lambda c: called.append(1) or True)
+    assert kind == "signature" and not called
+
+
 def test_both_subscribed_agents_now_have_a_proven_done_signal():
     # Codex has a NATIVE Stop hook, same JSON shape as Claude's — proven live:
     # it fired `emux signal IDLE` into the inbox and the judge read done_idle.
