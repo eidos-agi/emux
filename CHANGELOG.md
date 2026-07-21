@@ -1,6 +1,11 @@
 # Changelog
 
 
+## v0.68.5
+
+### Features
+- **Drive-vs-observe badges (EID-880 stretch):** each live session card now shows whether `send` is the right action right now — `▶ send-ok` (idle, safe to dispatch) vs `◉ observe` (at a human gate / running / stuck / waiting-external / failed), per the send-is-transport rubric. Turns the honest fleet-state view into an action guide; tooltip explains why.
+
 ## v0.68.4
 
 ### Features
