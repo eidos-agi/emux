@@ -35,7 +35,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import worker_env
+from . import mgmt_ledger, worker_env
 
 
 @dataclass
@@ -71,6 +71,35 @@ def _hook_settings(python: str) -> str:
 
 
 def drive(
+    task: str,
+    cwd: str,
+    *,
+    identity: str,
+    ledger: mgmt_ledger.Ledger | None = None,
+    receipt_task: str | None = None,
+    **kw: Any,
+) -> DriveResult:
+    """Structured drive + optional lifecycle receipts (EID-881).
+
+    When a ``ledger`` and ``receipt_task`` (the session/registry name) are given,
+    emit the receipt chain — ``dispatch`` → ``worker_started`` → ``outcome_verified``
+    (ok) or ``failed`` (error) — so the fleet-state grid can prefer authoritative
+    ledger state for driven work. Best-effort: receipt bookkeeping never breaks the
+    drive. All other args pass through to the core driver unchanged."""
+    def _rec(stage: str, **rk: Any) -> None:
+        if ledger is not None and receipt_task:
+            try:
+                ledger.record(receipt_task, stage, **rk)
+            except Exception:
+                pass  # receipts are best-effort — bookkeeping must not break the drive
+    _rec("dispatch")
+    _rec("worker_started")
+    result = _drive_impl(task, cwd, identity=identity, **kw)
+    _rec("outcome_verified" if result.ok else mgmt_ledger.FAILED, component="drive")
+    return result
+
+
+def _drive_impl(
     task: str,
     cwd: str,
     *,

@@ -24,6 +24,7 @@ this same ledger — do not build them here (YAGNI until the shadow trial clears
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -167,3 +168,38 @@ class Ledger:
 
     def close(self) -> None:
         self.db.close()
+
+
+# ---------------------------------------------------------------------------
+# EID-881 — session-lifecycle integration. The drive path (structured_driver)
+# writes receipts here; the fleet-state view (web grid) prefers ledger state for
+# sessions that have them. Honest boundary: the ledger only speaks for work it
+# actually dispatched — observed-only tmux has no receipts and stays on the
+# classifier.
+# ---------------------------------------------------------------------------
+
+def default_ledger_path() -> str:
+    """Canonical emux management-ledger db, shared by the drive path (writer) and
+    the web grid (reader). Creates the directory; the Ledger() ctor creates the db."""
+    d = os.path.join(os.path.expanduser("~"), ".config", "emux")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "ledger.db")
+
+
+def ui_state(st: TaskState) -> str | None:
+    """Map a session's ledger receipt-state to a live UI state for the grid, or
+    None to defer to the classifier.
+
+    The ledger only asserts state while a driven task is IN FLIGHT — a dispatched
+    worker turn that hasn't verified or failed is authoritatively ``running`` even
+    if the pane looks static (the whole point: the ledger knows, the screen guesses).
+    Once ``outcome_verified`` the ledger steps aside (returns None) so the classifier
+    reads the session's post-drive state. Honest per the safety invariant: absence of
+    liveness is never surfaced as ``failed`` here — only an explicit failure is."""
+    if st.failed:
+        return "failed"
+    if not st.stages:
+        return None                       # no receipts → classifier
+    if "outcome_verified" in st.stages:
+        return None                       # task complete → defer to the classifier
+    return "running"                      # a worker turn is executing (authoritative)

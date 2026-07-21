@@ -85,3 +85,30 @@ def test_timeout_and_empty_and_unparseable_fail_closed(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", _fake_run("not json"))
     assert sd.drive("x", "/w", identity="d").error == "unparseable_output"
+
+
+# EID-881 — the drive wrapper emits lifecycle receipts to the ledger (opt-in).
+
+def test_drive_emits_lifecycle_receipts(monkeypatch):
+    from emux import mgmt_ledger as ml
+    lg = ml.Ledger()
+    monkeypatch.setattr(sd, "_drive_impl", lambda *a, **k: sd.DriveResult(ok=True, result="done"))
+    sd.drive("task", "/w", identity="d", ledger=lg, receipt_task="sess-1")
+    st = lg.state("sess-1")
+    assert {"dispatch", "worker_started", "outcome_verified"} <= st.stages and not st.failed
+    assert ml.ui_state(st) is None                       # complete → defer to classifier
+
+
+def test_drive_records_failure_receipt(monkeypatch):
+    from emux import mgmt_ledger as ml
+    lg = ml.Ledger()
+    monkeypatch.setattr(sd, "_drive_impl", lambda *a, **k: sd.DriveResult(ok=False, error="boom"))
+    sd.drive("task", "/w", identity="d", ledger=lg, receipt_task="sess-2")
+    st = lg.state("sess-2")
+    assert st.failed and ml.ui_state(st) == "failed"
+
+
+def test_drive_without_ledger_is_transparent(monkeypatch):
+    monkeypatch.setattr(sd, "_drive_impl", lambda *a, **k: sd.DriveResult(ok=True, result="ok"))
+    r = sd.drive("task", "/w", identity="d")             # no ledger → no receipts, unchanged
+    assert r.ok and r.result == "ok"
