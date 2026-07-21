@@ -1931,7 +1931,7 @@ body{
   color:var(--amber);text-shadow:0 0 18px rgba(255,176,0,.45),0 0 2px rgba(255,176,0,.9);
 }
 #brand small{color:var(--text-dim);font-size:11px;letter-spacing:3px;text-transform:uppercase}
-#tagbar{display:flex;flex-wrap:wrap;gap:4px;padding:4px 8px 0}
+#tagbar{display:flex;flex-wrap:wrap;gap:4px;padding:4px 8px 0;max-height:26vh;overflow-y:auto}  /* EID-880: cap tag noise so the session list isn't buried */
 #tagbar:empty{display:none}
 .tagchip{font-size:10px;letter-spacing:.5px;padding:2px 7px;border:1px solid var(--line);
   border-radius:10px;color:var(--text-dim);cursor:pointer;user-select:none;white-space:nowrap}
@@ -1947,6 +1947,9 @@ body{
 .cco{font-size:9px;font-weight:700;letter-spacing:.3px;padding:1px 6px;border-radius:8px;
   color:var(--on-accent);white-space:nowrap}
 #sessions{flex:1;overflow-y:auto;padding:8px}
+.deadtoggle{font-size:11px;color:var(--text-dim);padding:8px 12px 4px;cursor:pointer;user-select:none;
+  letter-spacing:.5px;text-transform:uppercase;border-top:1px dashed var(--line);margin-top:6px}
+.deadtoggle:hover{color:var(--amber)}
 .card{
   border:1px solid var(--line);border-left:3px solid var(--amber-faint);
   background:var(--bg-card);padding:10px 12px;margin-bottom:8px;cursor:pointer;
@@ -2986,11 +2989,10 @@ async function poll(){
   }catch(e){$("#status").textContent="daemon unreachable";$("#status").className="err";}
 }
 
+let showDead=false;   // EID-880 declutter: dead/offline registry rows collapse by default
 function renderSidebar(){
   const box=$("#sessions");box.innerHTML="";
-  // live first (offline/dead sink to the bottom), then registry order — so the
-  // fleet's active work is grouped at the top, dead registry rows out of the way.
-  shown().slice().sort((a,b)=>(b.live?1:0)-(a.live?1:0)).forEach(s=>{
+  const mkCard=s=>{
     const d=document.createElement("div");
     d.className="card"+(current&&current.name===s.name?" active":"")+(needsYou(s)?" needy":"")+(costHit(s)?" costcap":"")+(s.live?"":" gone");
     d.dataset.name=s.name;
@@ -3009,7 +3011,20 @@ function renderSidebar(){
     // at the card so this holds regardless of child-handler timing/re-render order.
     d.onclick=ev=>{if(ev.target.closest(".tagjump"))return;openModal(s);};
     box.appendChild(d);
-  });
+  };
+  // Live work first, always visible. Dead/offline (live=false) registry rows collapse
+  // behind one toggle by default — so state pips + drive/observe badges aren't buried
+  // under 10-of-15 dead rows. Toggle reveals them (state persists across polls).
+  const _items=shown();
+  _items.filter(s=>s.live).forEach(mkCard);
+  const _dead=_items.filter(s=>!s.live);
+  if(_dead.length){
+    const t=document.createElement("div");t.className="deadtoggle";
+    t.textContent=(showDead?"▾ hide ":"▸ show ")+_dead.length+" offline / dead";
+    t.onclick=()=>{showDead=!showDead;renderSidebar();};
+    box.appendChild(t);
+    if(showDead)_dead.forEach(mkCard);
+  }
   document.querySelectorAll(".tagjump").forEach(el=>el.onclick=ev=>{   // click a card's tag → filter to it
     ev.stopPropagation();const tag=el.dataset.tag;
     activeTag=tag===activeTag?"":tag;
