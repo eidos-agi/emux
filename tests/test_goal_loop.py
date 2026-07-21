@@ -10,7 +10,8 @@ from emux import structured_driver as sd
 def _driver(monkeypatch, results):
     calls = {"n": 0}
     def fake_drive(prompt, cwd, **kw):
-        i = calls["n"]; calls["n"] += 1
+        i = calls["n"]
+        calls["n"] += 1
         r = results[min(i, len(results) - 1)]
         return sd.DriveResult(ok=True, result="ok", stop_reason="end_turn",
                               session_id="s", cost_usd=r.get("cost", 0.01),
@@ -22,7 +23,8 @@ def _driver(monkeypatch, results):
 def _verifier(monkeypatch, passes_on, tail_seq=None):
     state = {"n": 0}
     def fake_verify(cmd, cwd, timeout=120.0):
-        i = state["n"]; state["n"] += 1
+        i = state["n"]
+        state["n"] += 1
         tail = (tail_seq[min(i, len(tail_seq)-1)] if tail_seq else f"fail-{i}")
         return (i + 1 >= passes_on, tail)
     monkeypatch.setattr(gl, "_verify", fake_verify)

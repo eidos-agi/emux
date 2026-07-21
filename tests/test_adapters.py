@@ -175,7 +175,8 @@ def test_detect_gate_layers_signature_then_ml_and_fails_closed():
     # 1. Known signature → instant path, ML never consulted.
     calls = []
     def ml_spy(content):
-        calls.append(content); return False
+        calls.append(content)
+        return False
     kind, detail = adapters.detect_gate("codex", "do you trust the contents of this directory", ml=ml_spy)
     assert kind == "signature" and not calls
 
