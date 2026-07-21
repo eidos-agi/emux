@@ -1,6 +1,12 @@
 # Changelog
 
 
+## v0.68.3
+
+### Features
+- **Durable management ledger (EID-877):** event-sourced receipt-chain core for central verification (last-confirmed / first-missing, intervention_allowed). Observation API for fleet-state to prefer ledger over screen scrape once sessions emit receipts.
+
+
 ## v0.68.2
 
 ### Features
