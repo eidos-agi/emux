@@ -2106,6 +2106,11 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .spip{font-size:8.5px;letter-spacing:.5px;text-transform:uppercase;padding:1px 5px;border-radius:7px;
   white-space:nowrap;font-weight:700;border:1px solid currentColor}
 .spip .lsrc{font-size:7px;opacity:.75;margin-left:1px;vertical-align:top}  /* EID-881: ledger-sourced marker */
+/* EID-880 stretch: is `send` the right move now? drive (send-ok) vs observe */
+.sbadge{font-size:8px;letter-spacing:.3px;text-transform:uppercase;padding:0 4px;border-radius:6px;
+  white-space:nowrap;border:1px solid currentColor;opacity:.85;margin-left:2px}
+.sbadge.sb-drive{color:var(--live)}
+.sbadge.sb-observe{color:var(--amber)}
 .spip.st-running{color:var(--live)}
 .spip.st-idle{color:var(--text-dim)}
 .spip.st-error{color:var(--stale)}
@@ -2997,7 +3002,7 @@ function renderSidebar(){
     const cobadge=companyHTML(s);
     const badges=(s.registered?"<span>registered</span>":"<span>unregistered</span>")
       +cobadge+agspan+(s.attached?"<span>attached</span>":"")+tagspans;
-    d.innerHTML='<div class="nm"><span class="dot '+(s.live?"live":"stale")+'"></span>'+s.name+' '+statePip(s)+att+'</div>'
+    d.innerHTML='<div class="nm"><span class="dot '+(s.live?"live":"stale")+'"></span>'+s.name+' '+statePip(s)+sendBadge(s)+att+'</div>'
       +'<div class="sub">→ '+s.session+(up?" · "+up:"")+(s.description?" — "+s.description:"")+'</div>'
       +'<div class="badges">'+badges+'</div>';
     // a click on a nested tag chip filters — it must NOT also open the card. Guard
@@ -3023,6 +3028,22 @@ function statePip(s){const st=pipState(s);const tip=(s.summary||st).replace(/"/g
   // driven work) vs the classifier — so the source is distinguishable at a glance.
   const src=s.state_source==="ledger"?'<sup class="lsrc" title="authoritative — from the durable receipt ledger">L</sup>':"";
   return '<span class="spip st-'+st+'" title="'+tip+'">'+(STLABEL[st]||st)+src+'</span>';}
+// EID-880 stretch: is `send` the right action for this session RIGHT NOW? The
+// send-is-transport rubric — drive an autonomous worker with a verifiable done-condition
+// that is NOT at a gate; observe anything gated / busy / stuck / failed (send fails closed
+// on a visible gate anyway). Live sessions only.
+function sendVerdict(s){
+  if(!s.live)return null;
+  const st=pipState(s);
+  if(st==="idle")return{cls:"drive",label:"▶ send-ok",tip:"idle — safe to dispatch a task"};
+  const why={running:"a task is in flight — don't interrupt",waiting_human:"at a human gate — send fails closed",
+    asking:"asking you — a human decision",stuck:"stuck — unstick, don't blind-send",
+    waiting_external:"blocked on build/network — sending won't help",failed:"failed — needs attention"}[st]
+    ||("state="+st+" — observe");
+  return{cls:"observe",label:"◉ observe",tip:why};
+}
+function sendBadge(s){const v=sendVerdict(s);
+  return v?' <span class="sbadge sb-'+v.cls+'" title="'+v.tip.replace(/"/g,"'")+'">'+v.label+'</span>':"";}
 // a session waiting on YOU — a formal gate, it asked a question, OR its gist reads
 // like it's parked on a human action (authorize / approve / on your desk / until you…).
 // deliberately CONSERVATIVE — only phrases that mean "parked, waiting on the human",
