@@ -87,9 +87,47 @@ def test_capabilities_require_boundary_and_match_shared_fixture(rig):
         "protocol": FIXTURE["protocol"],
         "revision": "test-revision",
         "actions": FIXTURE["actions"],
+        "queries": ["session.list"],
     }
     with pytest.raises(ProtocolError, match="bad controller"):
         api.capabilities({})
+
+
+def test_session_list_discovers_targetable_sessions(rig):
+    # controller sufficiency: enumerate local sessions WITHOUT prior knowledge of names,
+    # returning exactly the fields needed to build a Target (session/workspace/channels).
+    api, *_ = rig
+    out = api.sessions(HEADERS)
+    assert out["server_id"] == "srv-alpha"
+    assert out["sessions"] == [{
+        "name": "logical-name",
+        "session": "same-name",
+        "workspace": "emux",
+        "channels": ["engineering"],
+        "description": None,
+    }]
+    # same trusted boundary as capabilities — discovery still requires auth
+    with pytest.raises(ProtocolError, match="bad controller"):
+        api.sessions({})
+
+
+def test_session_list_excludes_remote_host_sessions(tmp_path):
+    # a session on another host belongs to THAT server's discovery, not this one
+    def registry():
+        return {
+            "local-one": {"session": "s-local", "workspace": "w", "cwd": "/w",
+                          "channels": ["c"], "host": None},
+            "remote-one": {"session": "s-remote", "workspace": "w", "cwd": "/w",
+                           "channels": ["c"], "host": "other-host"},
+        }
+    api = RemoteControllerAPI(
+        RemoteConfig("srv-alpha", frozenset({"alpha"}), "rev", tmp_path / "r.json"),
+        Boundary(), Gate(), registry,
+        lambda s, lines: {"ok": True},
+        lambda s, text, literal, enter: {"ok": True},
+        clock=lambda: 1000.0,
+    )
+    assert [s["name"] for s in api.sessions(HEADERS)["sessions"]] == ["local-one"]
 
 
 def test_execute_exact_target_and_idempotent_duplicate(rig):

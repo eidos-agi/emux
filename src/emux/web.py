@@ -4215,6 +4215,17 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._controller_error(exc)
             return
+        if url.path == "/api/controller/v1/sessions":
+            # Read-only server-scoped discovery: enumerate targetable local sessions so a
+            # remote controller/MCP can list without prior knowledge (controller sufficiency).
+            if self.remote_controller_api is None:
+                self._json({"ok": False, "error": "controller_api_disabled"}, 503)
+                return
+            try:
+                self._json(self.remote_controller_api.sessions(self._controller_headers()))
+            except Exception as exc:
+                self._controller_error(exc)
+            return
         match = re.fullmatch(r"/api/controller/v1/requests/([^/]+)", url.path)
         if match:
             if self.remote_controller_api is None:

@@ -114,6 +114,39 @@ class RemoteControllerAPI:
             "protocol": REMOTE_PROTOCOL,
             "revision": self.config.revision,
             "actions": sorted(self.ACTIONS),
+            "queries": ["session.list"],   # read-only discovery, GET .../sessions
+        }
+
+    def sessions(self, headers: Mapping[str, str]) -> dict[str, Any]:
+        """Server-scoped discovery — list the LOCAL sessions a caller can target,
+        WITHOUT prior knowledge of names (the controller-sufficiency gap: today you can
+        capture/send only a session you already know). Read-only, like capabilities():
+        no target, nonce, request record, or gate. Each entry carries exactly the fields
+        needed to build a Target — server alias + session + workspace + channels — so a
+        remote controller/MCP can enumerate, then capture/send. Remote-host entries are
+        excluded (they belong to their own server), matching _validate_target."""
+        self.boundary.authenticate(headers)
+        sessions = []
+        for name, entry in self.registry().items():
+            if entry.get("host"):
+                continue                                   # remote sessions → their own server
+            session = str(entry.get("session") or "")
+            if not session:
+                continue
+            workspace = str(entry.get("workspace") or Path(str(entry.get("cwd") or "")).name)
+            channels = sorted(str(x) for x in entry.get("channels") or [])
+            sessions.append({
+                "name": name,
+                "session": session,
+                "workspace": workspace,
+                "channels": channels,
+                "description": entry.get("description"),
+            })
+        sessions.sort(key=lambda s: s["name"])
+        return {
+            "server_id": self.config.server_id,
+            "protocol": REMOTE_PROTOCOL,
+            "sessions": sessions,
         }
 
     def submit(
