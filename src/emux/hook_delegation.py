@@ -35,7 +35,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-from pathlib import Path
 
 # Import policy from the installed emux package if available; fall back to a
 # vendored deny-by-default so the hook is safe even standalone.

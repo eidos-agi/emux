@@ -1,5 +1,11 @@
 # Changelog
 
+
+## v0.68.2
+
+### Features
+- **Honest fleet-state in the control room (EID-880 v1):** session list shows per-session state inline (OFFLINE / FAILED / STUCK / WAITING_EXTERNAL / WAITING_HUMAN / IDLE) with distinct colors, live-first ordering, and tooltip summaries. Classifier-backed via existing `/api/grid` (no N round-trips). `stale ≠ stuck ≠ failed` — absence of liveness is OFFLINE, never failed.
+
 All notable changes to Emux are documented here.
 
 ## v0.68.1 - 2026-07-18
