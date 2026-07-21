@@ -1,6 +1,11 @@
 # Changelog
 
 
+## v0.68.6
+
+### Features
+- **Registry declutter (EID-880):** the session list no longer buries live work. Dead/offline (`live=false`) registry rows collapse behind one `▸ show N offline / dead` toggle by default (10-of-15 were dead-but-listed); the tag-chip bar is height-capped with its own scroll so it can't push the list off-screen. State pips + drive/observe badges are now visible without scrolling past ~60 tags.
+
 ## v0.68.5
 
 ### Features
