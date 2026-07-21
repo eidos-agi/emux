@@ -39,9 +39,9 @@ import sys
 # Import policy from the installed emux package if available; fall back to a
 # vendored deny-by-default so the hook is safe even standalone.
 try:
-    from emux import delegation  # type: ignore
+    from emux import delegation
 except Exception:  # noqa: BLE001
-    delegation = None  # type: ignore
+    delegation = None
 
 
 def _identity() -> str:
