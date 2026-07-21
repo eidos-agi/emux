@@ -94,3 +94,29 @@ def test_explicit_failure_authorizes_intervention():
     st = lg.state("t1")
     assert st.failed is True
     assert st.intervention_allowed() is True
+
+
+# EID-881 — ledger → grid state mapping.
+
+def test_ui_state_maps_receipts_to_grid_state():
+    lg = ml.Ledger()
+    assert ml.ui_state(lg.state("none")) is None            # no receipts → classifier
+    # dispatched + in flight → running (authoritative, even if the pane looks static)
+    lg.record("run", "dispatch")
+    lg.record("run", "worker_started")
+    assert ml.ui_state(lg.state("run")) == "running"
+    # completed (outcome_verified recorded) → defer to the classifier
+    lg.record("run", "outcome_verified")
+    assert ml.ui_state(lg.state("run")) is None
+    # explicit failure → failed (never inferred from silence)
+    lg.record("fail", "worker_started")
+    lg.record("fail", ml.FAILED)
+    assert ml.ui_state(lg.state("fail")) == "failed"
+
+
+def test_default_ledger_path_creates_dir(tmp_path, monkeypatch):
+    import os
+    monkeypatch.setenv("HOME", str(tmp_path))
+    p = ml.default_ledger_path()
+    assert p.endswith(os.path.join(".config", "emux", "ledger.db"))
+    assert os.path.isdir(os.path.dirname(p))

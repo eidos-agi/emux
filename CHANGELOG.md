@@ -1,6 +1,12 @@
 # Changelog
 
 
+## v0.68.4
+
+### Features
+- **Session lifecycle → ledger receipts (EID-881):** the structured drive path emits receipt-chain events (`dispatch` / `worker_started` / `outcome_verified` on success, `failed` on error) to the management ledger when one is passed, and the fleet-state grid **prefers authoritative ledger state for sessions that have receipts** (driven work) — falling back to the classifier for observed-only tmux. A driven turn reads `running` from the ledger even when the pane looks static; ledger-sourced state is marked in the UI. Closes EID-880's deferred ledger-backed source. Best-effort: receipt bookkeeping never breaks a drive.
+
+
 ## v0.68.3
 
 ### Features

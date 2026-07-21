@@ -1759,6 +1759,12 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
     if not base["ok"]:
         return base
     now = time.time()
+    # EID-881: prefer the durable ledger for sessions it has receipts for (driven
+    # work) — the ledger knows a task is running even when the pane looks static.
+    # Read-only: only open it if a writer (the drive path) has created it.
+    from . import mgmt_ledger
+    _lpath = os.path.join(os.path.expanduser("~"), ".config", "emux", "ledger.db")
+    _led = mgmt_ledger.Ledger(_lpath) if os.path.exists(_lpath) else None
     # capture every stale/missing live pane IN PARALLEL (remotes are ssh hops).
     misses = []
     for item in base["sessions"]:
@@ -1780,17 +1786,29 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
             item["cost"] = bool((ce or {}).get("cost"))
             item["state"] = (ce or {}).get("state") or "idle"
             item["summary"] = (ce or {}).get("summary") or ""
+            item["state_source"] = "classifier"
+            if _led is not None:
+                try:
+                    _ls = mgmt_ledger.ui_state(_led.state(item["name"]))
+                    if _ls is not None:               # ledger only speaks for driven work
+                        item["state"] = _ls
+                        item["state_source"] = "ledger"
+                except Exception:
+                    pass                              # ledger read is best-effort
             item.update(_meta(item["session"]))
         else:
             item["content"] = ""
             item["needs_human"] = False
             item["cost"] = False
             item["state"] = "dead"
+            item["state_source"] = "classifier"
             item["summary"] = ""
             item["changed"] = False
             item["last_change_age"] = None
             item["activity"] = []
             item["agent"] = {"agent": "gone", "label": "", "glyph": ""}
+    if _led is not None:
+        _led.close()
     return base
 
 
@@ -2087,6 +2105,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
    the manager (and human) tracks all agents + their subs without opening them. */
 .spip{font-size:8.5px;letter-spacing:.5px;text-transform:uppercase;padding:1px 5px;border-radius:7px;
   white-space:nowrap;font-weight:700;border:1px solid currentColor}
+.spip .lsrc{font-size:7px;opacity:.75;margin-left:1px;vertical-align:top}  /* EID-881: ledger-sourced marker */
 .spip.st-running{color:var(--live)}
 .spip.st-idle{color:var(--text-dim)}
 .spip.st-error{color:var(--stale)}
@@ -3000,7 +3019,10 @@ const STLABEL={running:"run",idle:"idle",error:"failed",failed:"failed",asking:"
 // from FAILED. stale ≠ stuck ≠ failed, never conflated.
 function pipState(s){if(!s.live)return"offline";const st=s.state||"idle";return st==="error"?"failed":st;}
 function statePip(s){const st=pipState(s);const tip=(s.summary||st).replace(/"/g,"'");
-  return '<span class="spip st-'+st+'" title="'+tip+'">'+(STLABEL[st]||st)+'</span>';}
+  // EID-881: mark state that came from the durable receipt ledger (authoritative for
+  // driven work) vs the classifier — so the source is distinguishable at a glance.
+  const src=s.state_source==="ledger"?'<sup class="lsrc" title="authoritative — from the durable receipt ledger">L</sup>':"";
+  return '<span class="spip st-'+st+'" title="'+tip+'">'+(STLABEL[st]||st)+src+'</span>';}
 // a session waiting on YOU — a formal gate, it asked a question, OR its gist reads
 // like it's parked on a human action (authorize / approve / on your desk / until you…).
 // deliberately CONSERVATIVE — only phrases that mean "parked, waiting on the human",
