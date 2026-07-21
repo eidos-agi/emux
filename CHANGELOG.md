@@ -1,6 +1,11 @@
 # Changelog
 
 
+## v0.68.7
+
+### Features
+- **Controller session discovery (`session.list`):** the remote-control API gains a read-only, server-scoped `sessions()` query (peer of `capabilities()`) exposed at `GET /api/controller/v1/sessions`, and advertised in capabilities under `queries`. A remote controller / MCP can now **enumerate targetable local sessions without prior knowledge of names** — each entry carries `session`/`workspace`/`channels` so you can list, then capture/send. Remote-host entries are excluded (they belong to their own server). Closes the controller-sufficiency discovery gap on the emux side; the gateway allowlist + MCP tool are the remaining end-to-end pieces (separate repos).
+
 ## v0.68.6
 
 ### Features
