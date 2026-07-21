@@ -2093,6 +2093,11 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .spip.st-waiting_human{color:var(--amber);animation:orb 1.8s ease-in-out infinite}
 .spip.st-dead{color:var(--text-dim);opacity:.5}
 .spip.st-asking{color:var(--amber);animation:orb 1.6s ease-in-out infinite}
+/* EID-880 honest states — each visually distinct so stale ≠ stuck ≠ failed */
+.spip.st-waiting_external{color:#3b6ea5}                 /* blocked on build/network — blue */
+.spip.st-stuck{color:#c9761f;font-weight:800}            /* no change, not at a prompt — orange (needs unstick, NOT failed) */
+.spip.st-failed{color:#c0392b;font-weight:800}           /* explicit failure — red */
+.spip.st-offline{color:var(--text-dim);opacity:.55}      /* registered but not running — grey (stale, NOT failed) */
 /* it's asking YOU — a pulsing question mark in place of the heartbeat */
 .qmark{display:inline-flex;align-items:center;justify-content:center;
   width:14px;height:14px;margin-right:6px;border-radius:50%;
@@ -2959,7 +2964,9 @@ async function poll(){
 
 function renderSidebar(){
   const box=$("#sessions");box.innerHTML="";
-  shown().forEach(s=>{
+  // live first (offline/dead sink to the bottom), then registry order — so the
+  // fleet's active work is grouped at the top, dead registry rows out of the way.
+  shown().slice().sort((a,b)=>(b.live?1:0)-(a.live?1:0)).forEach(s=>{
     const d=document.createElement("div");
     d.className="card"+(current&&current.name===s.name?" active":"")+(needsYou(s)?" needy":"")+(costHit(s)?" costcap":"")+(s.live?"":" gone");
     d.dataset.name=s.name;
@@ -2971,7 +2978,7 @@ function renderSidebar(){
     const cobadge=companyHTML(s);
     const badges=(s.registered?"<span>registered</span>":"<span>unregistered</span>")
       +cobadge+agspan+(s.attached?"<span>attached</span>":"")+tagspans;
-    d.innerHTML='<div class="nm"><span class="dot '+(s.live?"live":"stale")+'"></span>'+s.name+att+'</div>'
+    d.innerHTML='<div class="nm"><span class="dot '+(s.live?"live":"stale")+'"></span>'+s.name+' '+statePip(s)+att+'</div>'
       +'<div class="sub">→ '+s.session+(up?" · "+up:"")+(s.description?" — "+s.description:"")+'</div>'
       +'<div class="badges">'+badges+'</div>';
     // a click on a nested tag chip filters — it must NOT also open the card. Guard
@@ -2986,9 +2993,14 @@ function renderSidebar(){
   });
 }
 
-const STLABEL={running:"run",idle:"idle",error:"err",asking:"asks you",waiting_human:"needs you",dead:"gone"};
-function statePip(s){const st=s.live?(s.state||"idle"):"dead";
-  return '<span class="spip st-'+st+'">'+(STLABEL[st]||st)+'</span>';}
+const STLABEL={running:"run",idle:"idle",error:"failed",failed:"failed",asking:"asks you",waiting_human:"needs you",waiting_external:"ext wait",stuck:"stuck",offline:"offline",dead:"offline"};
+// Honest fleet state (EID-880): absence of liveness → OFFLINE (never "failed"); an
+// explicit classifier error → FAILED; STUCK (no change, not at a prompt) and
+// WAITING_EXTERNAL (blocked on build/network) are distinct from WAITING_HUMAN and
+// from FAILED. stale ≠ stuck ≠ failed, never conflated.
+function pipState(s){if(!s.live)return"offline";const st=s.state||"idle";return st==="error"?"failed":st;}
+function statePip(s){const st=pipState(s);const tip=(s.summary||st).replace(/"/g,"'");
+  return '<span class="spip st-'+st+'" title="'+tip+'">'+(STLABEL[st]||st)+'</span>';}
 // a session waiting on YOU — a formal gate, it asked a question, OR its gist reads
 // like it's parked on a human action (authorize / approve / on your desk / until you…).
 // deliberately CONSERVATIVE — only phrases that mean "parked, waiting on the human",
@@ -3155,8 +3167,8 @@ function updateFlowPanes(){
     if(!d||!pre)return;
     d.className="fbox"+(hot(s)?" hot":"")+(needsYou(s)?" needy":"")+(s.live?"":" dead");
     const ag=d.querySelector(".ag");if(ag)ag.innerHTML=agentHTML(s);
-    const sp=d.querySelector(".spip");if(sp){const st=s.live?(s.state||"idle"):"dead";
-      sp.className="spip st-"+st;sp.textContent=STLABEL[st]||st;}
+    const sp=d.querySelector(".spip");if(sp){const st=pipState(s);
+      sp.className="spip st-"+st;sp.textContent=STLABEL[st]||st;sp.title=(s.summary||st).replace(/"/g,"'");}
     const li=d.querySelector(".lind");if(li)li.innerHTML=liveDot(s);   // idle↔run swaps dot↔heartbeat
     const rl=d.querySelector(".rail");if(rl)rl.outerHTML=railHTML(s);   // refresh the summary rail
     const txt=paneText(s);
