@@ -39,7 +39,17 @@ async function loop() {
   let backoff = 250;
   for (;;) {
     try {
-      const cmd = await (await fetch(PULL, { headers: FK })).json();
+      const r = await fetch(PULL, { headers: FK });
+      // A 4xx means this document is talking a protocol the daemon no longer accepts —
+      // an offscreen document that outlived an extension reload, retrying a URL shape the
+      // bridge rejects. Retrying forever looks identical to "extension not responding",
+      // which cost a live debugging session. Close instead: the worker's alarm rebuilds a
+      // fresh one within 30s, running the current code.
+      if (r.status >= 400 && r.status < 500) {
+        console.error('fleetkick offscreen: bridge rejected this client (' + r.status + '); closing so the worker rebuilds it');
+        return window.close();
+      }
+      const cmd = await r.json();
       backoff = 250; // the daemon answered, so it's up
       if (!cmd || !cmd.op) continue; // long-poll expired with nothing to do
 

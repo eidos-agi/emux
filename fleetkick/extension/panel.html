@@ -47,6 +47,17 @@
   #list .row.gone .name { color: var(--dim); text-decoration: line-through; }
   #list .empty { padding: 8px; color: var(--dim); }
 
+  /* Split controls. Direction is a toggle rather than two buttons per role, so adding a
+     manager and adding a worker stay one click each. */
+  #panes { flex: none; display: flex; align-items: center; gap: 4px; padding: 4px 8px;
+           background: var(--chrome); border-bottom: 1px solid var(--line); }
+  #panes button, #panes select { background: #232323; border: 1px solid var(--line);
+           color: var(--fg); font: inherit; padding: 2px 7px; border-radius: 3px; cursor: pointer; }
+  #panes button:hover:not(:disabled) { background: #2d2d2d; border-color: #3d3d3d; }
+  #panes button:disabled { opacity: .4; cursor: default; }
+  #panes .grow { margin-left: auto; color: var(--dim); }
+  #dir.on { color: var(--blue); border-color: var(--blue); }
+
   iframe { border: 0; width: 100%; flex: 1; }
 </style>
 </head>
@@ -63,6 +74,20 @@
     <span class="chev">▾</span>
   </button>
   <div id="list"></div>
+</div>
+
+<div id="panes">
+  <select id="agent" title="which agent the new pane runs">
+    <option value="grok">grok</option>
+    <option value="claude" selected>claude</option>
+    <option value="codex">codex</option>
+    <option value="gemini">gemini</option>
+  </select>
+  <button id="add-manager" type="button" title="New pane above that manages this one">+ manager</button>
+  <button id="add-worker" type="button" title="New pane below that reports to this one">+ worker</button>
+  <button id="dir" type="button" title="Stacked or side by side">⬍</button>
+  <button id="fork" type="button" title="Break the active pane out into its own window">fork</button>
+  <span class="grow" id="panes-count"></span>
 </div>
 
 <iframe id="term"></iframe>

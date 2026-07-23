@@ -4,6 +4,38 @@ Version lives in `extension/manifest.json` and is the single source of truth. Th
 footer and the `version` tool both report the **loaded** version, so a stale extension is
 visible instead of being something you have to deduce.
 
+## 0.8.0
+
+- Splits, with roles. tmux already is the window manager, so `split-window`, `join-pane`
+  and `break-pane` give unlimited splits, joins and forks for free and the panel renders
+  whatever tmux shows. The only thing built here is what tmux doesn't know: which pane is a
+  manager, which is a worker, and who reports to whom.
+- That model lives in tmux as per-pane user options (`@fk_role`, `@fk_manager`,
+  `@fk_agent`) — no database, no state file, and it survives a daemon restart because tmux
+  outlives the daemon.
+- Role picks direction, so each is one click: a **manager** opens above and adopts the pane
+  it was created over; a **worker** opens below and reports to the pane that spawned it. A
+  direction toggle switches stacked/side-by-side. Panes can run claude, grok, codex or
+  gemini; grok gets the same tools via `grok mcp add` plus `--rules`.
+- New tools: `whoami`, `panes`, `send_to_pane`, `spawn`, `fork_pane`, `join_pane`. A manager
+  drives its worker by typing into it (`send-keys -l`, literal, so a prompt can never be
+  read as tmux key names). Verified end to end: grok manager above, claude worker below,
+  instruction sent, executed and answered.
+- **The terminal no longer parks on "Press ⏎ to Reconnect".** ttyd's `reconnect=1` only
+  covers a *dropped* socket; what actually happened was a *clean process exit* — `boot.sh`
+  exec'd `tmux new-session -A`, so any detach (a kill-session, another client taking the
+  session) ended the process and closed the socket normally. No client setting can fix
+  that, so the server refuses to end: it re-attaches in a loop, backing off after five
+  consecutive failures rather than spinning. tmux holds the session, so it resumes rather
+  than starting a new conversation.
+- A stale offscreen document now closes itself when the bridge rejects it (4xx) instead of
+  retrying forever. An offscreen document that outlived an extension reload kept polling a
+  URL shape the daemon no longer accepts, which was indistinguishable from "extension not
+  responding" and cost a live debugging session. The worker's alarm rebuilds it within 30s.
+- Fixed: `switchTo` had dropped `--inner`, so bridge-created sessions ran boot.sh's outer
+  wrapper, which calls `tmux new-session` from inside tmux, fails on nesting, and takes the
+  session down with it. `/switch` said ok and the session was gone moments later.
+
 ## 0.7.0
 
 - Per-install identity. Every extension install mints an 8-hex `installId` (owned by the

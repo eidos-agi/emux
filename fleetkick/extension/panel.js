@@ -236,6 +236,69 @@ function keepWorkerAlive() {
 }
 keepWorkerAlive();
 
+// --- splits ---------------------------------------------------------------------------
+// tmux does the splitting; these buttons only say what kind of pane to make. Role picks the
+// direction on its own — a manager appears above what it manages, a worker below whoever
+// spawned it — so each is one click rather than a direction question every time.
+let splitDir = 'v';
+const post = (path, payload) => fetch(BRIDGE + path, {
+  method: 'POST', headers: { ...FK, 'content-type': 'application/json' },
+  body: JSON.stringify(payload),
+}).then((r) => r.json());
+
+$('dir').addEventListener('click', () => {
+  splitDir = splitDir === 'v' ? 'h' : 'v';
+  $('dir').textContent = splitDir === 'v' ? '⬍' : '⬌';
+  $('dir').classList.toggle('on', splitDir === 'h');
+});
+
+const paneButtons = () => document.querySelectorAll('#panes button, #panes select');
+
+async function addPane(role) {
+  if (!current) return;
+  paneButtons().forEach((b) => (b.disabled = true));
+  try {
+    const r = await post('/split', {
+      install: INSTALL, tabId: current.id, role, agent: $('agent').value, dir: splitDir,
+    });
+    // Surface the daemon's reason in the bar rather than failing silently — a split that
+    // quietly does nothing is the same trap /switch used to set.
+    if (r && r.error) $('panes-count').textContent = r.error;
+  } catch {
+    $('panes-count').textContent = 'bridge down';
+  } finally {
+    paneButtons().forEach((b) => (b.disabled = false));
+    refreshPanes();
+  }
+}
+
+$('add-manager').addEventListener('click', () => addPane('manager'));
+$('add-worker').addEventListener('click', () => addPane('worker'));
+
+async function listPanes() {
+  if (!current || !INSTALL) return [];
+  try {
+    const r = await (await fetch(`${BRIDGE}/panes?install=${INSTALL}&tabId=${current.id}`, { headers: FK })).json();
+    return Array.isArray(r) ? r : [];
+  } catch {
+    return [];
+  }
+}
+
+async function refreshPanes() {
+  const list = await listPanes();
+  $('fork').disabled = list.length < 2;
+  // Reads as the org chart: m=manager, w=worker, * is the pane you're typing in.
+  $('panes-count').textContent = list.length < 2 ? ''
+    : `${list.map((p) => (p.role || '?')[0] + (p.active ? '*' : '')).join(' ')} · ${list.length} panes`;
+}
+
+$('fork').addEventListener('click', async () => {
+  const active = (await listPanes()).find((p) => p.active);
+  if (active) await post('/break', { pane: active.pane });
+  refreshPanes();
+});
+
 // Shows the version actually loaded, so "did my reload take?" is a glance, not a guess.
 $('build').textContent = 'fleetkick ' + chrome.runtime.getManifest().version;
 
@@ -250,5 +313,6 @@ $('build').textContent = 'fleetkick ' + chrome.runtime.getManifest().version;
     if (current) markSeen(current.id); // whatever is on screen is by definition seen
     checkRestart();
     refresh();
+    refreshPanes();
   }, 2000);
 })();

@@ -43,13 +43,19 @@ async function switchTo(install, tabId) {
   if (!digits(tabId)) return { error: 'bad tabId' };
   const target = sessionName(install, tabId);
   if ((await tmux(['has-session', '-t', target])) === null) {
-    await tmux(['new-session', '-d', '-s', target, BOOT, install, String(tabId)]);
+    // --inner matters: without it boot.sh runs its OUTER wrapper, which calls tmux
+    // new-session from inside tmux, fails on nesting, and takes the session down with it.
+    // ttyd calls boot.sh without --inner on purpose; the bridge must not.
+    await tmux(['new-session', '-d', '-s', target, BOOT, '--inner', install, String(tabId)]);
     // new-session exits 0 even when its command dies a millisecond later, and tmux then
     // discards the session — which is how a daemon that could not create a single session
     // still answered ok:true to every /switch. Confirm it exists before saying so.
     if ((await tmux(['has-session', '-t', target])) === null) {
       return { error: `session ${target} died immediately — is claude on the daemon's PATH?` };
     }
+    // Record what this pane is running, so a later split can show a complete org chart
+    // instead of a worker whose agent reads as null.
+    await tmux(['set-option', '-p', '-t', target, '@fk_agent', 'claude']);
   }
   // Only ever switch clients belonging to THIS install, or one browser's tab change would
   // yank the terminal out from under another browser's panel.
@@ -83,6 +89,89 @@ async function sessions(install) {
       attached: attached === '1',
       running: now - Number(activity) < 3,
     }));
+}
+
+// --- panes: splits, roles, and who manages whom -------------------------------------
+//
+// tmux already is the window manager — split-window, join-pane and break-pane give
+// unlimited splits, joins and forks for free, and the panel renders whatever tmux shows.
+// So the only thing worth building is the part tmux doesn't know: which pane is a manager,
+// which is a worker, and who reports to whom.
+//
+// That model lives in tmux too, as per-pane user options (@fk_role, @fk_manager,
+// @fk_agent). No database, no state file, and it survives a daemon restart because tmux
+// outlives the daemon. ponytail: if roles ever need history rather than current state,
+// that is when they earn a real store.
+const AGENTS = ['claude', 'grok', 'codex', 'gemini'];
+const ROLES = ['manager', 'worker'];
+const PANE = /^%[0-9]+$/;
+
+async function panes(install, tabId) {
+  if (!IID.test(String(install || '')) || !digits(tabId)) return [];
+  const F = ['#{pane_id}', '#{@fk_role}', '#{@fk_manager}', '#{@fk_agent}',
+    '#{pane_active}', '#{pane_width}x#{pane_height}'].join(SEP);
+  const out = await tmux(['list-panes', '-t', sessionName(install, tabId), '-F', F]);
+  if (out === null) return [];
+  return out.split('\n').filter(Boolean).map((l) => {
+    const [id, role, manager, agent, active, size] = l.split(SEP);
+    return {
+      pane: id, role: role || null, manager: manager || null, agent: agent || null,
+      active: active === '1', size,
+    };
+  });
+}
+
+const setOpt = (pane, k, v) => tmux(['set-option', '-p', '-t', pane, k, v]);
+
+// role decides direction, which is the whole trick: a manager appears ABOVE the pane it
+// takes over (and adopts it), a worker appears BELOW the pane that spawned it.
+async function split(install, tabId, opts = {}) {
+  const { dir = 'v', agent = 'claude', role = 'worker' } = opts;
+  if (!IID.test(String(install || ''))) return { error: 'bad install id' };
+  if (!digits(tabId)) return { error: 'bad tabId' };
+  if (!AGENTS.includes(agent)) return { error: `agent must be one of ${AGENTS.join(', ')}` };
+  if (!ROLES.includes(role)) return { error: `role must be one of ${ROLES.join(', ')}` };
+  if (dir !== 'v' && dir !== 'h') return { error: "dir must be 'v' or 'h'" };
+
+  const target = sessionName(install, tabId);
+  if ((await tmux(['has-session', '-t', target])) === null) return { error: 'no such session' };
+
+  const before = role === 'manager';   // managers sit above/left of what they manage
+  const existing = await panes(install, tabId);
+  const incumbent = (existing.find((p) => p.active) || existing[0] || {}).pane || '';
+
+  const args = ['split-window', dir === 'h' ? '-h' : '-v'];
+  if (before) args.push('-b');
+  args.push('-t', target, '-P', '-F', '#{pane_id}',
+    BOOT, '--pane', install, String(tabId), role, agent, before ? '' : incumbent);
+  const pane = await tmux(args);
+  if (pane === null || !PANE.test(pane)) return { error: 'split failed' };
+
+  await setOpt(pane, '@fk_role', role);
+  await setOpt(pane, '@fk_agent', agent);
+  if (before) {
+    // A new manager adopts the pane it was created over, so the relationship is recorded
+    // from both sides rather than inferred from geometry later.
+    await setOpt(pane, '@fk_manager', '');
+    if (incumbent) {
+      await setOpt(incumbent, '@fk_manager', pane);
+      await setOpt(incumbent, '@fk_role', 'worker');
+    }
+  } else {
+    await setOpt(pane, '@fk_manager', incumbent);
+    if (incumbent) await setOpt(incumbent, '@fk_role', 'manager');
+  }
+  return { ok: true, pane, role, agent, manager: before ? null : incumbent };
+}
+
+// A manager drives its worker by typing into it. -l sends the text literally, so a
+// worker's prompt can never be interpreted as tmux key names.
+async function paneSend(pane, text, enter = true) {
+  if (!PANE.test(String(pane || ''))) return { error: 'bad pane id' };
+  if (typeof text !== 'string') return { error: 'text must be a string' };
+  if ((await tmux(['send-keys', '-t', pane, '-l', text])) === null) return { error: 'send failed' };
+  if (enter) await tmux(['send-keys', '-t', pane, 'Enter']);
+  return { ok: true, pane };
 }
 
 let nextId = 1;
@@ -170,6 +259,42 @@ http.createServer(async (req, res) => {
     const r = resolveInstall(install);
     if (r.error) return send(res, 200, r);
     return send(res, 200, await switchTo(r.install, tabId));
+  }
+
+  if (req.method === 'GET' && url.pathname === '/panes') {
+    const tabId = url.searchParams.get('tabId');
+    const r = resolveInstall(qInstall);
+    if (r.error) return send(res, 200, r);
+    return send(res, 200, await panes(r.install, tabId));
+  }
+
+  if (req.method === 'POST' && url.pathname === '/split') {
+    const { tabId, install, dir, agent, role } = await body(req);
+    const r = resolveInstall(install);
+    if (r.error) return send(res, 200, r);
+    return send(res, 200, await split(r.install, tabId, { dir, agent, role }));
+  }
+
+  if (req.method === 'POST' && url.pathname === '/pane_send') {
+    const { pane, text, enter } = await body(req);
+    return send(res, 200, await paneSend(pane, text, enter !== false));
+  }
+
+  // fork: pull a pane out into its own window. join: put one back beside another.
+  if (req.method === 'POST' && url.pathname === '/break') {
+    const { pane } = await body(req);
+    if (!PANE.test(String(pane || ''))) return send(res, 200, { error: 'bad pane id' });
+    const r2 = await tmux(['break-pane', '-d', '-s', pane]);
+    return send(res, 200, r2 === null ? { error: 'break failed' } : { ok: true, pane });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/join') {
+    const { src, dst, dir } = await body(req);
+    if (!PANE.test(String(src || '')) || !PANE.test(String(dst || ''))) {
+      return send(res, 200, { error: 'bad pane id' });
+    }
+    const r2 = await tmux(['join-pane', dir === 'h' ? '-h' : '-v', '-s', src, '-t', dst]);
+    return send(res, 200, r2 === null ? { error: 'join failed' } : { ok: true, src, dst });
   }
 
   if (req.method === 'GET' && url.pathname === '/pull') {

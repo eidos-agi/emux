@@ -39,7 +39,32 @@ async function exec({ op, tabId, args = {} }) {
     case 'read':
       return (await chrome.scripting.executeScript({
         target: { tabId },
-        func: () => ({ title: document.title, url: location.href, text: document.body.innerText.slice(0, 30000) }),
+        // ponytail: landmark + visibility filter, not real content extraction. The right
+        // answer is an a11y-tree snapshot (chrome.debugger + Accessibility.getFullAXTree),
+        // which also gives clickable refs — deferred, it costs a permanent "being debugged"
+        // banner on every tab.
+        func: () => {
+          const DROP = 'nav,header,footer,aside,script,style,noscript,svg,[aria-hidden="true"],'
+            + '[role="navigation"],[role="banner"],[role="contentinfo"],[role="menu"],[role="listbox"]';
+          // checkVisibility needs layout, which a detached clone doesn't have — so mark the
+          // hidden nodes on the LIVE tree first, then clone and drop them by marker.
+          const marked = [];
+          for (const el of document.body.querySelectorAll('*')) {
+            if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) {
+              el.setAttribute('data-fk-hide', '');
+              marked.push(el);
+            }
+          }
+          const body = document.body.cloneNode(true);
+          for (const el of marked) el.removeAttribute('data-fk-hide'); // never mutate the user's page
+          for (const el of body.querySelectorAll('[data-fk-hide],' + DROP)) el.remove();
+          const t = (body.innerText || '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+          return {
+            title: document.title, url: location.href, chars: t.length,
+            // A silent slice reads as a complete page — mark it or it lies.
+            text: t.length > 30000 ? t.slice(0, 30000) + '\n…[TRUNCATED]' : t,
+          };
+        },
       }))[0].result;
     case 'click':
       return (await chrome.scripting.executeScript({
