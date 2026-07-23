@@ -23,4 +23,12 @@ ttyd_up || { echo "FAIL: ttyd never came back"; exit 1; }
 after=$(launchctl print "gui/$UID/$LABEL" | awk '/^\tpid =/{print $3}')
 [ "$before" != "$after" ] || { echo "FAIL: pid unchanged ($before) — nothing actually restarted"; exit 1; }
 
-echo "PASS: killed -9, launchd rebuilt it ($before -> $after)"
+# Regression: tmux sanitizes control chars to '_' when it has no tty, which is exactly
+# the launchd case — a \t separator collapsed and every field parsed as null. This must
+# run against the daemon, because an interactive shell has a tty and hides the bug.
+s=$(curl -s -m 5 -H 'x-fleetkick: 1' http://127.0.0.1:7682/sessions)
+if grep -q '"name"' <<< "$s"; then
+  grep -q '"tabId":null' <<< "$s" && { echo "FAIL: /sessions has unparsed rows: $(head -c 200 <<< "$s")"; exit 1; }
+fi
+
+echo "PASS: killed -9, launchd rebuilt it ($before -> $after); /sessions parses"

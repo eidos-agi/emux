@@ -3,7 +3,7 @@
   "name": "Fleetkick",
   "version": "0.3.0",
   "description": "Sidekick for the fleet: a live claude code session in the side panel, paired per-tab, with its own tab-control tools.",
-  "permissions": ["sidePanel", "tabs", "scripting", "alarms", "offscreen"],
+  "permissions": ["sidePanel", "tabs", "scripting", "alarms", "offscreen", "storage"],
   "host_permissions": ["<all_urls>", "http://127.0.0.1/*"],
   "side_panel": { "default_path": "panel.html" },
   "action": { "default_title": "Open Fleetkick" },

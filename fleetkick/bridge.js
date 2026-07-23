@@ -12,6 +12,11 @@ const { execFile } = require('child_process');
 const PORT = Number(process.env.FLEETKICK_PORT) || 7682;
 const BOOT = path.join(__dirname, 'boot.sh');
 const PREFIX = 'fleetkick-tab-';
+// NOT a tab. With no controlling terminal (i.e. under launchd, which is how this
+// actually runs) tmux sanitizes control characters in list output to '_', so a \t
+// separator silently collapses into the field values. Interactive tests never show
+// it, because there tmux has a tty and emits the tab intact.
+const SEP = '|';
 
 // execFile, never exec — no shell, so a tabId can't smuggle shell syntax. Belt and
 // braces with the digits-only check at every call site.
@@ -29,9 +34,9 @@ async function switchTo(tabId) {
   if ((await tmux(['has-session', '-t', target])) === null) {
     await tmux(['new-session', '-d', '-s', target, BOOT, '--inner', String(tabId)]);
   }
-  const clients = (await tmux(['list-clients', '-F', '#{client_tty}\t#{client_session}'])) || '';
+  const clients = (await tmux(['list-clients', '-F', `#{client_tty}${SEP}#{client_session}`])) || '';
   const ttys = clients.split('\n').filter(Boolean)
-    .map((l) => l.split('\t'))
+    .map((l) => l.split(SEP))
     .filter(([, session]) => session && session.startsWith(PREFIX))
     .map(([tty]) => tty);
   for (const tty of ttys) await tmux(['switch-client', '-c', tty, '-t', target]);
@@ -41,10 +46,11 @@ async function switchTo(tabId) {
 // session_activity is a unix ts that bumps on output, so "still running" is just
 // "produced output very recently" — no process introspection needed.
 async function sessions() {
-  const out = (await tmux(['list-sessions', '-F', '#{session_name}\t#{session_activity}\t#{session_attached}'])) || '';
+  const out = (await tmux(['list-sessions', '-F',
+    `#{session_name}${SEP}#{session_activity}${SEP}#{session_attached}`])) || '';
   const now = Date.now() / 1000;
   return out.split('\n').filter(Boolean)
-    .map((l) => l.split('\t'))
+    .map((l) => l.split(SEP))
     .filter(([name]) => name.startsWith(PREFIX))
     .map(([name, activity, attached]) => ({
       name,
