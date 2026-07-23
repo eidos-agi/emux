@@ -54,6 +54,80 @@ function scope() {
   });
 }
 
+// --- page palette ---------------------------------------------------------------------
+//
+// Agents take their colour from the page they're working on, so a glance tells you which
+// site a terminal belongs to. The manager gets the page's own accent; each worker is the
+// same hue rotated a little, so they read as a family rather than as unrelated colours.
+//
+// Sampled from computed CSS, not from a screenshot: brand colour lives in the stylesheet,
+// while averaging pixels on a page like Wikipedia just returns white.
+let palette = null;
+let paletteFor = null;
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+function rgbToHsl(str) {
+  const m = /rgba?\(([^)]+)\)/.exec(str || '');
+  if (!m) return null;
+  const [r, g, b, a] = m[1].split(',').map((x) => parseFloat(x));
+  if (a !== undefined && a < 0.5) return null; // transparent tells us nothing
+  const R = r / 255, G = g / 255, B = b / 255;
+  const max = Math.max(R, G, B), min = Math.min(R, G, B);
+  const l = (max + min) / 2;
+  let h = 0, s = 0;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === R) h = ((G - B) / d + (G < B ? 6 : 0));
+    else if (max === G) h = (B - R) / d + 2;
+    else h = (R - G) / d + 4;
+    h *= 60;
+  }
+  return { h, s: s * 100, l: l * 100 };
+}
+
+async function readPalette(tabId) {
+  try {
+    const [hit] = await chrome.scripting.executeScript({
+      target: { tabId },
+      // ponytail: area-weighted sample of the first 1200 sizeable elements. Good enough to
+      // find an accent; a real quantiser would cost far more than this is worth.
+      func: () => {
+        const counts = new Map();
+        const add = (c, w) => { if (c) counts.set(c, (counts.get(c) || 0) + w); };
+        let n = 0;
+        for (const el of document.body.querySelectorAll('*')) {
+          if (n++ > 1200) break;
+          const r = el.getBoundingClientRect();
+          if (r.width < 6 || r.height < 6) continue;
+          const st = getComputedStyle(el);
+          add(st.backgroundColor, r.width * r.height);
+          add(st.color, r.width * r.height * 0.2); // text carries brand too, but weighs less
+        }
+        return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14).map(([c]) => c);
+      },
+    });
+    const hsl = (hit && hit.result ? hit.result : []).map(rgbToHsl).filter(Boolean);
+    // Neutrals are the page, not its identity: skip greys and near black/white and take the
+    // most colourful thing left as the seed.
+    const seed = hsl.filter((c) => c.s > 22 && c.l > 18 && c.l < 82)
+      .sort((a, b) => b.s - a.s)[0];
+    return seed || null;
+  } catch {
+    return null; // chrome:// pages and the like can't be scripted; fall back to defaults
+  }
+}
+
+// Manager sits closest to the page's own colour; each worker steps around the wheel.
+function shade(seed, i) {
+  if (!seed) return i === 0 ? '#4a9eff' : '#5a5a5a';
+  const h = (seed.h + i * 32) % 360;
+  const s = clamp(seed.s - i * 3, 30, 85);
+  const l = clamp(52 + i * 4, 38, 70);
+  return `hsl(${Math.round(h)} ${Math.round(s)}% ${Math.round(l)}%)`;
+}
+
 // --- the stack ------------------------------------------------------------------------
 //
 // One terminal per agent, laid out by the panel. Each slot is its own ttyd client attached
@@ -70,6 +144,8 @@ function slotEl(tabId, s) {
   wrap.className = 'slot';
 
   const head = document.createElement('header');
+  const swatch = document.createElement('span');
+  swatch.className = 'swatch';
   const who = document.createElement('span');
   who.className = 'who';
   const role = document.createElement('span');
@@ -83,7 +159,7 @@ function slotEl(tabId, s) {
   const del = document.createElement('button');
   del.textContent = '✕';
   del.title = 'close this agent';
-  head.append(who, role, mail, grow, ren, del);
+  head.append(swatch, who, role, mail, grow, ren, del);
 
   const frame = document.createElement('iframe');
   const q = new URLSearchParams();
@@ -93,12 +169,25 @@ function slotEl(tabId, s) {
   frame.src = `${TTYD}/?${q.toString()}`;
   wrap.append(head, frame);
 
-  ren.addEventListener('click', async () => {
-    const name = prompt(`Rename ${s.label} to:`, s.label);
-    if (!name) return;
+  // Inline edit rather than prompt(): a modal dialog blocks the page and can wedge
+  // extension messaging while it is open.
+  ren.addEventListener('click', () => {
+    who.contentEditable = 'true';
+    who.focus();
+    document.getSelection().selectAllChildren(who);
+  });
+  const commitName = async () => {
+    who.contentEditable = 'false';
+    const name = who.textContent.trim();
+    if (!name || name === s.label) { who.textContent = s.label; return; }
     const r = await post('/rename', { install: INSTALL, tabId, slot: s.slot, name });
-    if (r.error) $('roster').textContent = r.error;
+    if (r && r.error) { $('roster').textContent = r.error; who.textContent = s.label; }
     refreshGroup();
+  };
+  who.addEventListener('blur', commitName);
+  who.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); who.blur(); }
+    if (e.key === 'Escape') { who.textContent = s.label; who.blur(); }
   });
   del.addEventListener('click', async () => {
     const r = await post('/remove', { install: INSTALL, tabId, slot: s.slot });
@@ -148,6 +237,8 @@ async function refreshGroup() {
   const list = await get(`/group?install=${INSTALL}&tabId=${tabId}`);
   if (!Array.isArray(list)) return;
   const counts = (await get(`/inbox?install=${INSTALL}&tabId=${tabId}`)) || {};
+  // Recompute only on a tab change — the page's colours don't move while you sit on it.
+  if (paletteFor !== tabId) { paletteFor = tabId; palette = await readPalette(tabId); }
 
   // A different tab is a different group of agents, so its terminals are different
   // sessions. ponytail: this reloads the iframes on tab switch. tmux holds every session,
@@ -163,12 +254,19 @@ async function refreshGroup() {
     if (!wanted.has(k)) { el.remove(); slots.delete(k); }
   }
 
+  // Manager is index 0 so it lands closest to the page's own colour; workers step away
+  // from it in slot order.
+  const order = [...list].sort((a, b) =>
+    (a.role === 'manager' ? -1 : b.role === 'manager' ? 1 : 0) || a.slot - b.slot);
+
   for (const s of list) {
     const key = `${tabId}:${s.slot}`;
     let el = slots.get(key);
     if (!el) { el = slotEl(tabId, s); slots.set(key, el); }
     const { who, role, mail } = el._parts;
-    who.textContent = s.label;
+    const tint = shade(palette, order.findIndex((x) => x.slot === s.slot));
+    el.style.setProperty('--tint', tint);
+    if (who.contentEditable !== 'true') who.textContent = s.label;
     role.textContent = `${s.role === 'manager' ? 'manager' : s.role === 'worker' ? 'worker' : 'solo'} · ${s.agent}`;
     const n = counts[s.label] || 0;
     mail.textContent = n ? `✉ ${n}` : '';
@@ -179,11 +277,11 @@ async function refreshGroup() {
   // Rebuild the ordering with dividers between, reusing the existing elements so no
   // terminal reloads.
   const stack = $('stack');
-  const order = list.map((s) => slots.get(`${tabId}:${s.slot}`)).filter(Boolean);
+  const rendered = list.map((s) => slots.get(`${tabId}:${s.slot}`)).filter(Boolean);
   const desired = [];
-  order.forEach((el, i) => { if (i) desired.push(null); desired.push(el); });
+  rendered.forEach((el, i) => { if (i) desired.push(null); desired.push(el); });
   const currentEls = [...stack.children].filter((c) => !c.classList.contains('divider'));
-  if (currentEls.length !== order.length || currentEls.some((c, i) => c !== order[i])) {
+  if (currentEls.length !== rendered.length || currentEls.some((c, i) => c !== rendered[i])) {
     stack.textContent = '';
     desired.forEach((el) => stack.appendChild(el || divider()));
   }

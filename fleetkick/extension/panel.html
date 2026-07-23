@@ -61,8 +61,11 @@
   .slot { display: flex; flex-direction: column; min-height: 60px; flex: 1 1 0; }
   .slot > header { flex: none; display: flex; align-items: center; gap: 6px; padding: 2px 8px;
                    background: #171717; border-bottom: 1px solid var(--line); color: var(--dim); }
-  .slot.mgr > header { border-left: 3px solid var(--blue); }
-  .slot.wkr > header { border-left: 3px solid #5a5a5a; }
+  /* --tint is derived from the page's own colours; manager closest, workers stepped. */
+  .slot > header { border-left: 3px solid var(--tint, #5a5a5a); }
+  .slot.mgr > header { border-left-width: 5px; }
+  .slot > header .swatch { width: 7px; height: 7px; border-radius: 2px;
+                           background: var(--tint, #5a5a5a); flex: none; }
   .slot > header .who { color: var(--fg); font-weight: 600; }
   .slot > header .grow { margin-left: auto; }
   .slot > header .mail { color: var(--blue); }

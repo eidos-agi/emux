@@ -4,6 +4,20 @@ Version lives in `extension/manifest.json` and is the single source of truth. Th
 footer and the `version` tool both report the **loaded** version, so a stale extension is
 visible instead of being something you have to deduce.
 
+## 0.13.0
+
+- **Agents take their colour from the page.** The manager gets the page's own accent and
+  each worker is that hue stepped 32° around the wheel, so a group reads as a family and a
+  glance tells you which site a terminal belongs to. Shown as the header's left border and
+  a swatch beside the name.
+- Sampled from computed CSS, not from a screenshot: brand colour lives in the stylesheet,
+  whereas averaging pixels on a page like Wikipedia just returns white. Area-weighted over
+  the first 1200 sizeable elements, neutrals and transparents discarded, most saturated
+  survivor wins. Pages that can't be scripted (`chrome://`) fall back to the old blue/grey.
+  Measured: CNBC's `rgb(0,92,158)` → manager `hsl(205 85% 52%)`, workers 237°, 269°, 301°.
+- Renaming is inline rather than `prompt()` — a modal dialog blocks the page and can wedge
+  extension messaging while it is open.
+
 ## 0.12.0
 
 - **One terminal per agent, laid out by the panel.** Splitting inside a single ttyd iframe
