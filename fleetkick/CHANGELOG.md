@@ -4,6 +4,16 @@ Version lives in `extension/manifest.json` and is the single source of truth. Th
 footer and the `version` tool both report the **loaded** version, so a stale extension is
 visible instead of being something you have to deduce.
 
+## 0.15.0
+
+- Names are drawn at **random** from a 362-name pool in `names.txt`, not indexed by slot.
+  Indexing meant slot 0 was always `todd`, so every manager in every tab had the same name.
+  Uniqueness only has to hold within one tab group (at most 6), so a few hundred names is
+  already far past sufficient — and repetition across different tabs is fine, arguably
+  better, since a familiar name is easier to talk about than a fresh one every time.
+- `boot.sh` picks the same way when ttyd creates a session directly, so a slot never falls
+  back to `agent0`.
+
 ## 0.14.0
 
 - **The whole terminal is themed, not a header strip.** `/theme` sets tmux `window-style`,

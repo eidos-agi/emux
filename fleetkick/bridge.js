@@ -51,11 +51,27 @@ const digits = (v) => /^[0-9]+$/.test(String(v));
 const AGENTS = ['claude', 'grok', 'codex', 'gemini'];
 const ROLES = ['manager', 'worker', 'solo'];
 
-// Agents get names, not just slot numbers. "tell Sally to check the earnings page" is how
-// you actually think about a team; "send_to_pane %53" is not. The name is also what the
-// agent is told it is called, so teammates can address each other.
-// ponytail: a fixed pool cycled by slot. Renaming is one call away when a name fits badly.
-const NAME_POOL = ['todd', 'sally', 'marcus', 'nina', 'omar', 'wren'];
+// Agents get names, not slot numbers. "tell sally to check the earnings page" is how you
+// actually think about a team; "send_to_pane %53" is not.
+//
+// Picked at RANDOM, not by slot index — indexing meant slot 0 was always todd, so every
+// manager everywhere had the same name. Uniqueness only has to hold within one tab group
+// (at most MAX_SLOTS), so a few hundred names is already far past sufficient; repetition
+// across different tabs is fine and arguably better, since familiar names are easier to
+// talk about.
+const NAME_POOL = (() => {
+  try {
+    return require('fs').readFileSync(path.join(__dirname, 'names.txt'), 'utf8')
+      .split('\n').map((n) => n.trim().toLowerCase()).filter(Boolean);
+  } catch {
+    return ['todd', 'sally', 'marcus', 'nina', 'omar', 'wren'];
+  }
+})();
+const pickName = (taken) => {
+  const free = NAME_POOL.filter((n) => !taken.has(n));
+  if (!free.length) return null;
+  return free[Math.floor(Math.random() * free.length)];
+};
 const OK_NAME = /^[a-z0-9][a-z0-9_-]{0,23}$/i;
 
 const getOpt = async (target, k) => (await tmux(['show-options', '-v', '-t', target, k])) || '';
@@ -105,7 +121,7 @@ async function group(install, tabId) {
       ...s,
       role: (await getOpt(s.name, '@fk_role')) || 'solo',
       agent: (await getOpt(s.name, '@fk_agent')) || 'claude',
-      label: (await getOpt(s.name, '@fk_name')) || NAME_POOL[s.slot % NAME_POOL.length],
+      label: (await getOpt(s.name, '@fk_name')) || `agent${s.slot}`,
     });
   }
   return out;
@@ -140,7 +156,7 @@ async function addAgent(install, tabId, opts = {}) {
   // Pick a name nobody in this group is already using, so two agents are never both Todd.
   const taken = new Set(existing.map((s) => String(s.label || '').toLowerCase()));
   let label = String(opts.name || '').toLowerCase();
-  if (!label) label = NAME_POOL.find((n) => !taken.has(n)) || `agent${slot}`;
+  if (!label) label = pickName(taken) || `agent${slot}`;
   if (taken.has(label)) return { error: `${label} is already in this group` };
 
   // --inner matters: without it boot.sh runs its OUTER wrapper, which calls tmux
@@ -216,7 +232,7 @@ async function switchTo(install, tabId) {
     }
     await setOpt(target, '@fk_agent', 'claude');
     await setOpt(target, '@fk_role', 'solo');
-    await setOpt(target, '@fk_name', NAME_POOL[0]);
+    await setOpt(target, '@fk_name', pickName(new Set()) || 'todd');
   }
   await applyStyle(target);
   return { ok: true, session: target };
