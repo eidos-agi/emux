@@ -14,11 +14,32 @@ const FK = { 'x-fleetkick': '1' };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Identity of THIS run of the extension. The install id says which browser; this says which
+// execution of it, so a stale duplicate still polling after a reload is visible on /health
+// instead of silently competing for the same commands.
+const EXEC = crypto.randomUUID().replace(/-/g, '').slice(0, 8);
+
+// The worker mints and owns the install id; asking it (rather than reading storage here)
+// means offscreen and panel can never race to create two different ones.
+async function installId() {
+  for (;;) {
+    try {
+      const r = await chrome.runtime.sendMessage({ fkInstall: true });
+      if (r && r.install) return r.install;
+    } catch {
+      // worker not up yet — it is revived by the very act of messaging it, so retry
+    }
+    await sleep(250);
+  }
+}
+
 async function loop() {
+  const install = await installId();
+  const PULL = `${BRIDGE}/pull?install=${install}&exec=${EXEC}`;
   let backoff = 250;
   for (;;) {
     try {
-      const cmd = await (await fetch(BRIDGE + '/pull', { headers: FK })).json();
+      const cmd = await (await fetch(PULL, { headers: FK })).json();
       backoff = 250; // the daemon answered, so it's up
       if (!cmd || !cmd.op) continue; // long-poll expired with nothing to do
 

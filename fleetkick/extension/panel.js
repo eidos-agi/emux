@@ -5,6 +5,10 @@ const FK = { 'x-fleetkick': '1' };
 
 let current = null;
 let attached = false; // the iframe src is set ONCE, ever
+// Which browser profile this panel belongs to. The worker owns it; everything the panel
+// asks the daemon is scoped by it, so several Chromium browsers can share one daemon
+// without seeing each other's sessions or stealing each other's commands.
+let INSTALL = null;
 
 // Shared with the service worker via chrome.storage.local, not localStorage — the
 // worker computes the toolbar badge from this same "seen" map, and localStorage isn't
@@ -16,6 +20,10 @@ const hydrate = async () => {
   const o = await chrome.storage.local.get(['fk-seen', 'fk-titles']);
   seen = o['fk-seen'] || {};
   titles = o['fk-titles'] || {};
+  // Must resolve before the first attach: the install id is the terminal's first ttyd arg,
+  // and it namespaces every session this panel can see.
+  const r = await chrome.runtime.sendMessage({ fkInstall: true });
+  INSTALL = r && r.install;
 };
 const save = (k, v) => chrome.storage.local.set({ [k]: v });
 const markSeen = (tabId) => { seen['fleetkick-tab-' + tabId] = Date.now() / 1000; save('fk-seen', seen); };
@@ -39,8 +47,10 @@ function scope() {
 // Reloading the iframe drops ttyd's websocket, which makes it fire beforeunload —
 // the "Leave site?" prompt on every tab change. Attach once; after that only ever ask
 // tmux to swap which session this same live client is showing.
+// ttyd passes each `arg` through to boot.sh positionally: $1=install, $2=tabId.
 function attach(tabId) {
   const q = new URLSearchParams();
+  q.append('arg', INSTALL);
   q.append('arg', tabId);
   attached = true;
   $('term').src = TTYD + '/?' + q.toString();
@@ -53,7 +63,7 @@ async function show(tabId) {
     await fetch(BRIDGE + '/switch', {
       method: 'POST',
       headers: { ...FK, 'content-type': 'application/json' },
-      body: JSON.stringify({ tabId }),
+      body: JSON.stringify({ tabId, install: INSTALL }),
     });
   } catch {
     // bridge down; the terminal keeps showing whatever it had
@@ -189,7 +199,7 @@ async function checkRestart() {
 
 async function refresh() {
   try {
-    const got = await (await fetch(BRIDGE + '/sessions', { headers: FK })).json();
+    const got = await (await fetch(`${BRIDGE}/sessions?install=${INSTALL}`, { headers: FK })).json();
     if (Array.isArray(got)) sessions = got;
   } catch {
     return; // bridge down — keep the last list rather than blanking the UI

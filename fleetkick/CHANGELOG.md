@@ -4,6 +4,25 @@ Version lives in `extension/manifest.json` and is the single source of truth. Th
 footer and the `version` tool both report the **loaded** version, so a stale extension is
 visible instead of being something you have to deduce.
 
+## 0.7.0
+
+- Per-install identity. Every extension install mints an 8-hex `installId` (owned by the
+  worker, kept in `chrome.storage.local`), and every offscreen run mints an `executionId`.
+  This fixes a live bug, not a hypothetical one: tab ids are unique only *within* a browser
+  profile, so two Chromium browsers holding the same tab id mapped to the **same tmux
+  session**, each believing it was alone. The bridge's single global queue had the matching
+  flaw — it handed each command to whichever browser polled first, so you could type in one
+  browser and watch it act in another.
+- Sessions are now `fleetkick-<install>-<tabId>`; `/pull` requires an install id; `/cmd` and
+  `/switch` route by one, and refuse with the list of connected browsers when it's ambiguous
+  rather than guessing. `/sessions` filters by install, so a browser only sees its own.
+- `switch-client` only moves clients belonging to the same install — otherwise one browser's
+  tab change would yank the terminal out from under another browser's panel.
+- `/health` reports per-install `pullers`, `lastPullAt`, `queued` and `exec`. "The extension
+  isn't responding" used to be indistinguishable from a dead daemon, an unloaded extension,
+  a sleeping worker, or a missing offscreen document. Measured with it: the extension
+  re-registers its long-poll 159ms after a daemon restart, and round-trips run 3-7ms.
+
 ## 0.6.0
 
 - Version is now verifiable at runtime, not just declared: the panel footer shows it, and

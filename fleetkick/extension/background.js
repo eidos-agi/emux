@@ -101,7 +101,28 @@ async function ensureConnection() {
   }
 }
 
+// One id per extension install, minted once and kept in storage. Tab ids are unique only
+// within a browser profile, so this is what stops two Chromium browsers from colliding on
+// the same tmux session and from stealing each other's commands off a shared queue.
+// The worker is the single owner: offscreen and panel ask it, so two of them can never
+// race to mint different ids.
+let installIdCache = null;
+async function installId() {
+  if (installIdCache) return installIdCache;
+  let id = await store.get('fk-install-id', null);
+  if (!/^[0-9a-f]{8}$/.test(id || '')) {
+    id = crypto.randomUUID().replace(/-/g, '').slice(0, 8);
+    await store.set('fk-install-id', id);
+  }
+  installIdCache = id;
+  return id;
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg && msg.fkInstall) {
+    installId().then((id) => sendResponse({ install: id }), (e) => sendResponse({ error: String(e) }));
+    return true;
+  }
   if (!msg || !msg.fkCmd) return;
   exec(msg.fkCmd).then(sendResponse, (e) => sendResponse({ error: String(e) }));
   return true; // keep the channel open for the async reply
@@ -131,7 +152,9 @@ async function rememberTab(tab) {
 async function updateBadge() {
   let list = [];
   try {
-    list = await (await fetch(BRIDGE + '/sessions', { headers: FK })).json();
+    // Scoped to this install: another browser's finished sessions are not our badge.
+    const id = await installId();
+    list = await (await fetch(`${BRIDGE}/sessions?install=${id}`, { headers: FK })).json();
   } catch {
     return chrome.action.setBadgeText({ text: '' }); // bridge down — claim nothing
   }

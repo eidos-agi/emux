@@ -5,6 +5,9 @@
 const http = require('http');
 const PORT = Number(process.env.FLEETKICK_PORT) || 7682;
 const TAB = Number(process.env.FLEETKICK_TAB) || undefined;
+// Which browser profile this session drives. boot.sh sets it. Omitted only when a session
+// is started by hand, in which case the bridge picks the sole connected browser or refuses.
+const INSTALL = process.env.FLEETKICK_INSTALL || undefined;
 
 const TOOLS = [
   { name: 'read',       description: 'Read the tab: title, url, and visible text.', props: {} },
