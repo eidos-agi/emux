@@ -4,6 +4,30 @@ Version lives in `extension/manifest.json` and is the single source of truth. Th
 footer and the `version` tool both report the **loaded** version, so a stale extension is
 visible instead of being something you have to deduce.
 
+## 0.12.0
+
+- **One terminal per agent, laid out by the panel.** Splitting inside a single ttyd iframe
+  was the wrong architecture: every agent shared one xterm, and the divider lived inside a
+  cross-origin iframe the panel cannot reach — which is why it was neither visible nor
+  draggable, and why focus had to be delegated to tmux mouse mode. Each agent now has its
+  own tmux session, its own ttyd client and its own iframe, with dividers drawn in panel
+  HTML. Clicking a terminal focuses it natively; dragging a divider resizes it.
+- Sessions gained a slot: `fleetkick-<install>-<tabId>[-<slot>]`. Slot 0 is the tab's
+  original session, 1+ are teammates. Up to 6 per tab.
+- **Agents have names.** `mgr-todd` and `wkr-sally`, not `%48` and `%53`. Each is told its
+  own name, teammates are addressed by name, and names can be edited in the header. A name
+  is never reused within a group.
+- **Messaging is a mailbox, not keystrokes.** Delivering a worker's report with `send-keys`
+  was wrong three ways: it arrived as if the *human* had typed it, so provenance was lost;
+  it was unbounded, so one report could eat the manager's context; and it typed into an
+  input line the human may have been using. Messages now sit on the recipient's session and
+  are read on its own turn via `inbox`, with sender and timestamp, capped at 20 messages and
+  4000 chars each. The panel shows an ✉ badge per agent.
+- Tools are now `whoami`, `group`, `send_to_agent`, `inbox`, `spawn`, `dismiss` — the
+  pane-based set is gone rather than left alongside as a second, contradictory model.
+- ponytail: switching tabs reloads the terminals, since a different tab is a different set
+  of sessions. tmux holds every session, so nothing is lost — only the websocket reconnects.
+
 ## 0.11.0
 
 - **The separator is now visible and labelled.** tmux's default pane border is a thin

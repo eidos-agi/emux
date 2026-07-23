@@ -11,8 +11,8 @@ const INSTALL = process.env.FLEETKICK_INSTALL || undefined;
 // Set only for panes spawned with a role. A solo session leaves these empty and simply
 // never sees itself as part of a team.
 const ROLE = process.env.FLEETKICK_ROLE || '';
-const MANAGER = process.env.FLEETKICK_MANAGER || '';
-const PANE = process.env.FLEETKICK_PANE || '';
+const SLOT = process.env.FLEETKICK_SLOT || '';
+const ME = process.env.FLEETKICK_NAME || '';
 const SESSION_TAB = process.env.FLEETKICK_SESSION_TAB || '';
 
 const TOOLS = [
@@ -25,12 +25,12 @@ const TOOLS = [
   { name: 'tabs_list',  description: 'List EVERY open tab across all windows (id, windowId, index, title, url, active, pinned). Use it to find a tab, then pass its tabId to any other tool.', props: {} },
   { name: 'refresh',    description: 'Reload the page. Set hard for a cache-bypassing reload.', props: { hard: { type: 'boolean' } } },
   { name: 'version',    description: 'Version of the Fleetkick extension the browser currently has loaded. Check this before concluding a change did not work — it may simply not be running yet.', props: {} },
-  { name: 'whoami',     description: 'Your own identity in this pane group: pane id, role (manager/worker/solo), your manager, browser install, and the tab this session belongs to.', props: {} },
-  { name: 'panes',      description: 'Every pane in this session with its role, manager, agent and size. This is the org chart of the split.', props: {} },
-  { name: 'send_to_pane', description: 'Type text into another pane and press Enter. This is how a manager gives its worker a task.', props: { pane: { type: 'string' }, text: { type: 'string' }, enter: { type: 'boolean' } }, required: ['pane', 'text'] },
-  { name: 'spawn',      description: "Split this session and start another agent in the new pane. role 'worker' opens below and reports to you; role 'manager' opens above and takes you over. dir 'h' splits side by side instead.", props: { role: { type: 'string' }, agent: { type: 'string' }, dir: { type: 'string' } } },
-  { name: 'fork_pane',  description: 'Break a pane out into its own window.', props: { pane: { type: 'string' } }, required: ['pane'] },
-  { name: 'join_pane',  description: 'Bring a pane back alongside another one.', props: { src: { type: 'string' }, dst: { type: 'string' }, dir: { type: 'string' } }, required: ['src', 'dst'] },
+  { name: 'whoami',     description: 'Who you are: your name, role (manager/worker/solo), slot, browser install, and the tab this group works on.', props: {} },
+  { name: 'group',      description: 'Your teammates on this tab: name, role, agent and slot. This is the roster — address people by name.', props: {} },
+  { name: 'send_to_agent', description: 'Send a message to a teammate by name. It lands in their mailbox and they read it on their next turn — it does NOT type into their prompt, so it cannot interrupt or impersonate the human.', props: { to: { type: 'string' }, text: { type: 'string' } }, required: ['to', 'text'] },
+  { name: 'inbox',      description: 'Read messages teammates sent you, oldest first. Reading clears them unless peek is true. Check this when you are waiting on someone.', props: { peek: { type: 'boolean' } } },
+  { name: 'spawn',      description: "Add a teammate on this tab, in its own terminal beside yours. role 'worker' reports to the manager; 'manager' takes charge (only one allowed). Optionally give it a name.", props: { role: { type: 'string' }, agent: { type: 'string' }, name: { type: 'string' } } },
+  { name: 'dismiss',    description: 'Close a teammate by slot number.', props: { slot: { type: 'number' } }, required: ['slot'] },
 ].map(t => ({
   name: t.name,
   description: t.description + ' Targets whichever tab is currently active unless tabId is given.',
@@ -56,21 +56,27 @@ function call(path, method, payload) {
 
 const bridge = (cmd) => call('/cmd', 'POST', { ...cmd, install: INSTALL });
 
-// Pane tools go straight to the daemon, not through the extension — they are about the
-// tmux side of the world, so routing them through the browser would be a detour.
-const PANE_TOOLS = {
+// Team tools go straight to the daemon, not through the extension — they are about the
+// terminal side of the world, so routing them through the browser would be a detour.
+const TEAM_TOOLS = {
   whoami: async () => ({
-    pane: PANE, role: ROLE || 'solo', manager: MANAGER || null,
+    name: ME || null, role: ROLE || 'solo', slot: SLOT === '' ? null : Number(SLOT),
     install: INSTALL || null, tabId: SESSION_TAB || null,
   }),
-  panes: () => call(`/panes?install=${INSTALL}&tabId=${SESSION_TAB}`, 'GET'),
-  send_to_pane: (a) => call('/pane_send', 'POST', { pane: a.pane, text: a.text, enter: a.enter !== false }),
-  spawn: (a) => call('/split', 'POST', {
-    install: INSTALL, tabId: SESSION_TAB,
-    role: a.role || 'worker', agent: a.agent || 'claude', dir: a.dir || 'v',
+  group: () => call(`/group?install=${INSTALL}&tabId=${SESSION_TAB}`, 'GET'),
+  // Posts to a mailbox instead of typing into the recipient's prompt. Typing would arrive
+  // as if the human wrote it, is unbounded, and corrupts whatever they were mid-way through
+  // typing. The recipient reads this on its own turn.
+  send_to_agent: (a) => call('/post', 'POST', {
+    install: INSTALL, tabId: SESSION_TAB, to: a.to, from: ME, text: a.text,
   }),
-  fork_pane: (a) => call('/break', 'POST', { pane: a.pane }),
-  join_pane: (a) => call('/join', 'POST', { src: a.src, dst: a.dst, dir: a.dir || 'v' }),
+  inbox: (a) => call(
+    `/inbox?install=${INSTALL}&tabId=${SESSION_TAB}&slot=${SLOT}${a && a.peek ? '&peek=1' : ''}`, 'GET'),
+  spawn: (a) => call('/add', 'POST', {
+    install: INSTALL, tabId: SESSION_TAB,
+    role: a.role || 'worker', agent: a.agent || 'claude', name: a.name,
+  }),
+  dismiss: (a) => call('/remove', 'POST', { install: INSTALL, tabId: SESSION_TAB, slot: a.slot }),
 };
 
 const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n');
@@ -96,8 +102,8 @@ process.stdin.on('data', async (chunk) => {
     } else if (msg.method === 'tools/call') {
       const { name, arguments: args = {} } = msg.params || {};
       try {
-        const result = PANE_TOOLS[name]
-          ? await PANE_TOOLS[name](args)
+        const result = TEAM_TOOLS[name]
+          ? await TEAM_TOOLS[name](args)
           : await bridge({ op: name, tabId: args.tabId ?? TAB, args });
         if (name === 'screenshot' && result.dataUrl) {
           reply(msg.id, { content: [{ type: 'image', data: result.dataUrl.split(',')[1], mimeType: 'image/png' }] });

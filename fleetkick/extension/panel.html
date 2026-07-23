@@ -6,7 +6,7 @@
   :root { --bg: #1e1e1e; --chrome: #141414; --line: #2b2b2b; --fg: #d4d4d4; --dim: #8a8a8a;
           --blue: #4a9eff; --green: #4caf50; --red: #f44336; }
   html, body { margin: 0; height: 100%; background: var(--bg); }
-  body { display: flex; flex-direction: column;
+  body { display: flex; flex-direction: column; overflow: hidden;
          font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--fg); }
 
   .bar { height: 24px; flex: none; display: flex; align-items: center; gap: 6px;
@@ -23,7 +23,6 @@
   .dot.running { background: var(--green); animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .25; } }
 
-  /* Native <select> can't color individual options, and its emoji fallback looked awful. */
   #picker { flex: none; position: relative; border-bottom: 1px solid var(--line); background: var(--chrome); }
   #trigger { display: flex; align-items: center; gap: 7px; width: 100%; box-sizing: border-box;
              padding: 5px 8px; background: none; border: 0; color: var(--fg);
@@ -34,7 +33,7 @@
   #picker.open #trigger .chev { transform: rotate(180deg); }
   #count { color: var(--dim); }
 
-  #list { display: none; position: absolute; z-index: 10; left: 0; right: 0; top: 100%;
+  #list { display: none; position: absolute; z-index: 30; left: 0; right: 0; top: 100%;
           max-height: 320px; overflow-y: auto; background: #191919;
           border: 1px solid var(--line); border-top: 0;
           box-shadow: 0 8px 20px rgba(0,0,0,.55); }
@@ -47,31 +46,41 @@
   #list .row.gone .name { color: var(--dim); text-decoration: line-through; }
   #list .empty { padding: 8px; color: var(--dim); }
 
-  /* Split controls. Direction is a toggle rather than two buttons per role, so adding a
-     manager and adding a worker stay one click each. */
-  #panes { flex: none; display: flex; align-items: center; gap: 4px; padding: 4px 8px;
+  #tools { flex: none; display: flex; align-items: center; gap: 4px; padding: 4px 8px;
            background: var(--chrome); border-bottom: 1px solid var(--line); }
-  #panes button, #panes select { background: #232323; border: 1px solid var(--line);
+  #tools button, #tools select { background: #232323; border: 1px solid var(--line);
            color: var(--fg); font: inherit; padding: 2px 7px; border-radius: 3px; cursor: pointer; }
-  #panes button:hover:not(:disabled) { background: #2d2d2d; border-color: #3d3d3d; }
-  #panes button:disabled { opacity: .4; cursor: default; }
-  #panes .grow { margin-left: auto; color: var(--dim); }
-  #dir.on { color: var(--blue); border-color: var(--blue); }
+  #tools button:hover:not(:disabled) { background: #2d2d2d; border-color: #3d3d3d; }
+  #tools button:disabled { opacity: .4; cursor: default; }
+  #tools .grow { margin-left: auto; color: var(--dim); }
 
-  #rail { flex: none; display: flex; gap: 4px; padding: 4px 8px; background: var(--chrome);
-          border-bottom: 1px solid var(--line); overflow-x: auto; }
-  #rail[hidden] { display: none; }
-  .chip { display: flex; align-items: center; gap: 4px; padding: 2px 8px; cursor: grab;
-          background: #232323; border: 1px solid var(--line); border-radius: 3px;
-          white-space: nowrap; user-select: none; }
-  .chip.active { border-color: var(--green); }
-  .chip.sel { background: #202b38; border-color: var(--blue); }
-  .chip.orphan { border-color: var(--red); }
-  .chip.over { border-color: var(--blue); background: #26313d; }
-  .chip:active { cursor: grabbing; }
-  #mouse.on { color: var(--blue); border-color: var(--blue); }
+  /* The stack: one slot per agent, each its own terminal, with dividers the panel draws
+     itself. This is the whole point of the layout living here — a divider in panel DOM can
+     be dragged and clicked, a tmux pane border inside a cross-origin iframe cannot. */
+  #stack { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .slot { display: flex; flex-direction: column; min-height: 60px; flex: 1 1 0; }
+  .slot > header { flex: none; display: flex; align-items: center; gap: 6px; padding: 2px 8px;
+                   background: #171717; border-bottom: 1px solid var(--line); color: var(--dim); }
+  .slot.mgr > header { border-left: 3px solid var(--blue); }
+  .slot.wkr > header { border-left: 3px solid #5a5a5a; }
+  .slot > header .who { color: var(--fg); font-weight: 600; }
+  .slot > header .grow { margin-left: auto; }
+  .slot > header .mail { color: var(--blue); }
+  .slot > header button { background: none; border: 0; color: var(--dim); cursor: pointer;
+                          font: inherit; padding: 0 3px; }
+  .slot > header button:hover { color: var(--fg); }
+  .slot iframe { border: 0; width: 100%; flex: 1; min-height: 0; }
 
-  iframe { border: 0; width: 100%; flex: 1; }
+  .divider { flex: none; height: 7px; cursor: row-resize; background: #2b2b2b;
+             border-top: 1px solid #101010; border-bottom: 1px solid #101010;
+             display: flex; align-items: center; justify-content: center; }
+  .divider::after { content: ''; width: 44px; height: 3px; border-radius: 2px; background: #5a5a5a; }
+  .divider:hover { background: #35424f; }
+  .divider:hover::after { background: var(--blue); }
+  /* While dragging, iframes must stop swallowing mousemove or the drag dies the moment the
+     cursor crosses a terminal. */
+  body.dragging iframe { pointer-events: none; }
+  body.dragging { cursor: row-resize; user-select: none; }
 </style>
 </head>
 <body>
@@ -89,29 +98,20 @@
   <div id="list"></div>
 </div>
 
-<div id="panes">
-  <select id="agent" title="which agent the new pane runs">
-    <option value="grok">grok</option>
+<div id="tools">
+  <select id="agent" title="which agent a new teammate runs">
     <option value="claude" selected>claude</option>
+    <option value="grok">grok</option>
     <option value="codex">codex</option>
     <option value="gemini">gemini</option>
   </select>
-  <button id="mouse" type="button" title="Mouse mode: drag borders to resize, click to focus. Off lets you drag-select text.">🖱</button>
-  <button id="add-manager" type="button" title="One per team: opens above and takes over every pane">+ mgr</button>
-  <button id="add-worker" type="button" title="Opens below the target and reports to the manager">+ worker</button>
-  <button id="dir" type="button" title="Stacked or side by side">⬍</button>
-  <button id="tidy" type="button" title="Even out the pane sizes">tidy</button>
-  <button id="fork" type="button" title="Break the target pane out into its own window">fork</button>
-  <button id="close-pane" type="button" title="Close the target pane">✕</button>
-  <span class="grow" id="panes-count"></span>
+  <button id="add-manager" type="button" title="One per group: takes charge of this tab">+ manager</button>
+  <button id="add-worker" type="button" title="Another agent on this tab, reporting to the manager">+ worker</button>
+  <button id="even" type="button" title="Even out the terminal heights">even</button>
+  <span class="grow" id="roster"></span>
 </div>
 
-<!-- The rail is the drag surface. tmux has no drag-a-pane-to-a-new-spot primitive, and the
-     terminal is a cross-origin iframe we can't reach into, so rearranging happens on chips
-     out here: drag one onto another to swap them, click one to focus it. -->
-<div id="rail"></div>
-
-<iframe id="term"></iframe>
+<div id="stack"></div>
 
 <div class="bar">
   <span id="ids"></span><span id="scope"></span>
