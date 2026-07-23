@@ -14,6 +14,7 @@ const TOOLS = [
   { name: 'screenshot', description: 'Screenshot the tab (activates it first).', props: {} },
   { name: 'tab_create', description: 'Open a new tab; returns its tabId.', props: { url: { type: 'string' } } },
   { name: 'tabs_list',  description: 'List EVERY open tab across all windows (id, windowId, index, title, url, active, pinned). Use it to find a tab, then pass its tabId to any other tool.', props: {} },
+  { name: 'refresh',    description: 'Reload the page. Set hard for a cache-bypassing reload.', props: { hard: { type: 'boolean' } } },
 ].map(t => ({
   name: t.name,
   description: t.description + ' Targets whichever tab is currently active unless tabId is given.',

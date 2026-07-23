@@ -1,26 +1,76 @@
 <!doctype html>
 <html>
-<head><style>
-  html, body { margin: 0; height: 100%; background: #1e1e1e; }
-  body { display: flex; flex-direction: column; }
-  .bar { height: 22px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 8px;
-         background: #111; color: #ccc; font: 11px ui-monospace, monospace;
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --bg: #1e1e1e; --chrome: #141414; --line: #2b2b2b; --fg: #d4d4d4; --dim: #8a8a8a;
+          --blue: #4a9eff; --green: #4caf50; --red: #f44336; }
+  html, body { margin: 0; height: 100%; background: var(--bg); }
+  body { display: flex; flex-direction: column;
+         font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--fg); }
+
+  .bar { height: 24px; flex: none; display: flex; align-items: center; gap: 6px;
+         padding: 0 8px; background: var(--chrome); color: var(--dim);
          white-space: nowrap; overflow: hidden; }
   .bar span { overflow: hidden; text-overflow: ellipsis; }
-  #dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; flex: none; }
-  #dot.dead { background: #f44336; }
-  #fav { width: 14px; height: 14px; flex: none; }
-  #url { opacity: .6; }
-  #sessions { flex: none; width: 100%; box-sizing: border-box; background: #181818; color: #ccc;
-              border: 0; border-bottom: 1px solid #2a2a2a; padding: 3px 8px;
-              font: 11px ui-monospace, monospace; }
+  #title { color: var(--fg); }
+  #fav { width: 13px; height: 13px; flex: none; border-radius: 2px; }
+
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--dim); }
+  .dot.live { background: var(--green); }
+  .dot.dead { background: var(--red); }
+  .dot.unseen { background: var(--blue); box-shadow: 0 0 5px var(--blue); }
+  .dot.running { background: var(--green); animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .25; } }
+
+  /* Native <select> can't color individual options, and its emoji fallback looked awful. */
+  #picker { flex: none; position: relative; border-bottom: 1px solid var(--line); background: var(--chrome); }
+  #trigger { display: flex; align-items: center; gap: 7px; width: 100%; box-sizing: border-box;
+             padding: 5px 8px; background: none; border: 0; color: var(--fg);
+             font: inherit; text-align: left; cursor: pointer; }
+  #trigger:hover { background: #1c1c1c; }
+  #trigger .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #trigger .chev { color: var(--dim); transition: transform .12s; }
+  #picker.open #trigger .chev { transform: rotate(180deg); }
+  #count { color: var(--dim); }
+
+  #list { display: none; position: absolute; z-index: 10; left: 0; right: 0; top: 100%;
+          max-height: 320px; overflow-y: auto; background: #191919;
+          border: 1px solid var(--line); border-top: 0;
+          box-shadow: 0 8px 20px rgba(0,0,0,.55); }
+  #picker.open #list { display: block; }
+  #list .row { display: flex; align-items: center; gap: 7px; padding: 5px 8px; cursor: pointer; }
+  #list .row:hover { background: #232323; }
+  #list .row.current { background: #202b38; }
+  #list .row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #list .row .tag { color: var(--dim); font-size: 10px; }
+  #list .row.gone .name { color: var(--dim); text-decoration: line-through; }
+  #list .empty { padding: 8px; color: var(--dim); }
+
   iframe { border: 0; width: 100%; flex: 1; }
-</style></head>
+</style>
+</head>
 <body>
-<div class="bar"><span id="dot"></span><img id="fav" hidden><span id="title"></span><span id="url"></span></div>
-<select id="sessions" title="Fleetkick sessions — blue means it did something while you were away"></select>
+<div class="bar">
+  <span id="dot" class="dot live"></span><img id="fav" hidden><span id="title"></span><span id="url"></span>
+</div>
+
+<div id="picker">
+  <button id="trigger" type="button">
+    <span id="trigger-dot" class="dot live"></span>
+    <span class="label" id="trigger-label">sessions</span>
+    <span id="count"></span>
+    <span class="chev">▾</span>
+  </button>
+  <div id="list"></div>
+</div>
+
 <iframe id="term"></iframe>
-<div class="bar"><span id="ids"></span><span id="scope" style="opacity:.6"></span><span style="margin-left:auto;opacity:.6">fleetkick</span></div>
+
+<div class="bar">
+  <span id="ids"></span><span id="scope"></span>
+  <span style="margin-left:auto">fleetkick</span>
+</div>
 <script src="panel.js"></script>
 </body>
 </html>
