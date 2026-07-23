@@ -5,7 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 command -v ttyd >/dev/null || { echo "ttyd missing: brew install ttyd" >&2; exit 1; }
 command -v node >/dev/null || { echo "node missing" >&2; exit 1; }
 
-pkill -f "fleetkick/bridge.js" 2>/dev/null || true
+# Kill by port, not by name: a bridge started as plain `node bridge.js` doesn't match a
+# path pattern, and a stale one silently keeps serving old code while the new one dies
+# on EADDRINUSE.
+lsof -ti tcp:7682 | xargs kill -9 2>/dev/null || true
 node "$SCRIPT_DIR/bridge.js" &
 trap 'kill $! 2>/dev/null' EXIT
 

@@ -11,12 +11,16 @@
   #dot.dead { background: #f44336; }
   #fav { width: 14px; height: 14px; flex: none; }
   #url { opacity: .6; }
+  #sessions { flex: none; width: 100%; box-sizing: border-box; background: #181818; color: #ccc;
+              border: 0; border-bottom: 1px solid #2a2a2a; padding: 3px 8px;
+              font: 11px ui-monospace, monospace; }
   iframe { border: 0; width: 100%; flex: 1; }
 </style></head>
 <body>
 <div class="bar"><span id="dot"></span><img id="fav" hidden><span id="title"></span><span id="url"></span></div>
+<select id="sessions" title="Fleetkick sessions — blue means it did something while you were away"></select>
 <iframe id="term"></iframe>
-<div class="bar"><span id="ids"></span><span style="margin-left:auto;opacity:.6">fleetkick</span></div>
+<div class="bar"><span id="ids"></span><span id="scope" style="opacity:.6"></span><span style="margin-left:auto;opacity:.6">fleetkick</span></div>
 <script src="panel.js"></script>
 </body>
 </html>

@@ -17,7 +17,7 @@ extension background.js  <──long-poll──  bridge :7682  <──POST /cmd�
 Two things make it work:
 
 - **Per-tab tmux.** Each tabId gets `tmux new-session -A -s fleetkick-tab-<id>`. Switch tabs and the panel just re-attaches to that tab's session — the conversation is still there, warm, with its context intact. Switch back and it's exactly where you left it.
-- **Its own control tools.** `mcp.js` is a stdio MCP server the session gets via `--mcp-config`, proxying to `bridge.js`, which the extension long-polls. The extension executes with `chrome.tabs` / `chrome.scripting` and posts the result back. Tools: `read`, `click`, `type`, `navigate`, `screenshot`, `tab_create`, `tabs_list`. They target the paired tab by default; pass `tabId` to steer any other tab.
+- **Its own control tools.** `mcp.js` is a stdio MCP server the session gets via `--mcp-config`, proxying to `bridge.js`, which the extension long-polls. The extension executes with `chrome.tabs` / `chrome.scripting` and posts the result back. Tools: `read`, `click`, `type`, `navigate`, `screenshot`, `tab_create`, `tabs_list`. With no `tabId` they act on the **selected** tab — whichever one you're on at that moment — so the session follows you as you switch tabs; pass `tabId` to pin a call to a specific tab. (Set `FLEETKICK_TAB` to pin a whole session.)
 
 The paired session is told to use `fleetkick` tools for the browser and `emux` tools for anything terminal-side, so it doesn't reach for claude-in-chrome.
 
@@ -33,7 +33,7 @@ The top bar shows the favicon, title, and URL; the bottom bar shows `tab <id> ·
 
 ## Check
 
-`./test_roundtrip.sh` — drives mcp.js → bridge → a fake extension and back without Chrome, asserting the paired tabId actually rides along and that a web origin gets 403.
+`./test_roundtrip.sh` — drives mcp.js → bridge → a fake extension and back without Chrome, asserting an explicit tabId rides along, that an unpinned call sends none (so the extension resolves the selected tab), and that a web origin gets 403.
 
 ## Security
 

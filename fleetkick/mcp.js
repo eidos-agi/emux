@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Fleetkick MCP server (stdio, newline-delimited JSON-RPC) — thin proxy to the bridge.
-// Spawned per embedded claude session with FLEETKICK_TAB set to the paired tabId.
+// Spawned per embedded claude session. No paired tab: with no tabId the extension
+// targets whichever tab is currently active (FLEETKICK_TAB pins it if you want that).
 const http = require('http');
+const PORT = Number(process.env.FLEETKICK_PORT) || 7682;
 const TAB = Number(process.env.FLEETKICK_TAB) || undefined;
 
 const TOOLS = [
@@ -11,10 +13,10 @@ const TOOLS = [
   { name: 'type',       description: 'Focus an element by CSS selector and set its value (fires input/change).', props: { selector: { type: 'string' }, text: { type: 'string' } }, required: ['selector', 'text'] },
   { name: 'screenshot', description: 'Screenshot the tab (activates it first).', props: {} },
   { name: 'tab_create', description: 'Open a new tab; returns its tabId.', props: { url: { type: 'string' } } },
-  { name: 'tabs_list',  description: 'List open tabs (id, title, url, active).', props: {} },
+  { name: 'tabs_list',  description: 'List EVERY open tab across all windows (id, windowId, index, title, url, active, pinned). Use it to find a tab, then pass its tabId to any other tool.', props: {} },
 ].map(t => ({
   name: t.name,
-  description: t.description + ' Targets the paired tab unless tabId is given.',
+  description: t.description + ' Targets whichever tab is currently active unless tabId is given.',
   inputSchema: { type: 'object', properties: { ...t.props, tabId: { type: 'number' } }, required: t.required || [] },
 }));
 
@@ -22,8 +24,8 @@ function bridge(cmd) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(cmd);
     const req = http.request(
-      { host: '127.0.0.1', port: 7682, path: '/cmd', method: 'POST',
-        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } },
+      { host: '127.0.0.1', port: PORT, path: '/cmd', method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data), 'x-fleetkick': '1' } },
       (res) => {
         let b = '';
         res.on('data', (c) => (b += c));

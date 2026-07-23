@@ -3,8 +3,19 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 // Fleetkick control plane: long-poll the local bridge for commands from the embedded
 // claude's MCP server, execute them with chrome APIs, post results back.
 const BRIDGE = 'http://127.0.0.1:7682';
+// The bridge rejects anything without this header — a web page can't set it on a
+// no-preflight request, so it can't reach the control plane over localhost.
+const FK = { 'x-fleetkick': '1' };
+
+// No tabId on the command = act on whatever tab the human is looking at right now.
+// The panel is not a tab, so the focused window's active tab is always a real page.
+async function activeTab() {
+  const [t] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return t && t.id;
+}
 
 async function exec({ op, tabId, args = {} }) {
+  if (tabId == null) tabId = await activeTab();
   switch (op) {
     case 'navigate':
       await chrome.tabs.update(tabId, { url: args.url });
@@ -14,7 +25,11 @@ async function exec({ op, tabId, args = {} }) {
       return { tabId: t.id, windowId: t.windowId };
     }
     case 'tabs_list':
-      return (await chrome.tabs.query({})).map(t => ({ id: t.id, title: t.title, url: t.url, active: t.active }));
+      // Every tab in every window — chrome://, pinned, background, all of it.
+      return (await chrome.tabs.query({})).map(t => ({
+        id: t.id, windowId: t.windowId, index: t.index, title: t.title, url: t.url,
+        active: t.active, pinned: t.pinned, audible: t.audible, discarded: t.discarded,
+      }));
     case 'screenshot': {
       const t = await chrome.tabs.get(tabId);
       await chrome.tabs.update(tabId, { active: true });
@@ -62,13 +77,13 @@ async function poll() {
   polling = true;
   try {
     for (;;) {
-      const cmd = await (await fetch(BRIDGE + '/pull')).json();
+      const cmd = await (await fetch(BRIDGE + '/pull', { headers: FK })).json();
       if (cmd && cmd.op) {
         let result;
         try { result = await exec(cmd); } catch (e) { result = { error: String(e) }; }
         await fetch(BRIDGE + '/result', {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: { 'content-type': 'application/json', ...FK },
           body: JSON.stringify({ id: cmd.id, result }),
         });
       }
