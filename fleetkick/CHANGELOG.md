@@ -4,6 +4,30 @@ Version lives in `extension/manifest.json` and is the single source of truth. Th
 footer and the `version` tool both report the **loaded** version, so a stale extension is
 visible instead of being something you have to deduce.
 
+## 0.9.0
+
+- **The role model was wrong, not just the UI.** Role was stored on the pane, and each
+  "+ manager" flipped only the pane it split from — so three clicks produced three panes
+  each believing they managed one neighbour. That is a chain, not a hierarchy, and it is
+  how a two-pane demo became five unusable panes. A team now has exactly one manager:
+  a second is refused by name, a new manager adopts *every* unparented pane, and workers
+  report to the team's manager regardless of which pane they were split from.
+- Panes can be closed (`/close`). Offering creation without deletion is what made the mess
+  unrecoverable. Also `/swap` to reorder and `/layout` to even out sizes.
+- Splits can target a named pane instead of always the active one, so "add a worker below
+  *that* pane" is now expressible — it wasn't before.
+- Orphans are visible. tmux never reuses a pane id, so closing a manager left its workers
+  pointing at a `%N` that no longer exists. `panes` reports `managerAlive`, and the panel
+  marks it, rather than showing an org chart that quietly lies.
+- Split failures report tmux's own message ("no space for new pane") instead of a generic
+  failure that reads like a bug when the window is simply full.
+- URL memory: sessions record what they were looking at (`/seen`), and `/match` scores past
+  sessions against the current URL. Matching is **structured, not edit distance** —
+  Levenshtein calls cnbc.com and cnba.com near-identical while putting cnbc.com/tech/intel
+  far from cnbc.com/markets, which is backwards. A different host scores 0; within a host,
+  score is how deep the paths agree. Measured: /quotes/ORCL vs /quotes/INTC = 0.8, an
+  unrelated site = no match.
+
 ## 0.8.0
 
 - Splits, with roles. tmux already is the window manager, so `split-window`, `join-pane`

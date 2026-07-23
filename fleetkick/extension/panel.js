@@ -260,6 +260,7 @@ async function addPane(role) {
   try {
     const r = await post('/split', {
       install: INSTALL, tabId: current.id, role, agent: $('agent').value, dir: splitDir,
+      pane: $('target').value || undefined,
     });
     // Surface the daemon's reason in the bar rather than failing silently — a split that
     // quietly does nothing is the same trap /switch used to set.
@@ -285,17 +286,58 @@ async function listPanes() {
   }
 }
 
-async function refreshPanes() {
-  const list = await listPanes();
-  $('fork').disabled = list.length < 2;
-  // Reads as the org chart: m=manager, w=worker, * is the pane you're typing in.
-  $('panes-count').textContent = list.length < 2 ? ''
-    : `${list.map((p) => (p.role || '?')[0] + (p.active ? '*' : '')).join(' ')} · ${list.length} panes`;
+// The target dropdown is what makes "add a worker below THAT pane" expressible. Empty
+// value means the active pane, which is the common case.
+function renderTargets(list) {
+  const sel = $('target');
+  const keep = sel.value;
+  const opts = ['<option value="">active</option>'].concat(list.map((p) =>
+    `<option value="${p.pane}">${p.pane} ${p.role || '?'}${p.agent ? ' ' + p.agent : ''}</option>`));
+  const next = opts.join('');
+  if (sel.innerHTML !== next) sel.innerHTML = next;
+  if (list.some((p) => p.pane === keep)) sel.value = keep;
 }
 
+async function refreshPanes() {
+  const list = await listPanes();
+  renderTargets(list);
+  const solo = list.length < 2;
+  $('fork').disabled = solo;
+  $('close-pane').disabled = solo;   // closing the only pane would kill the session
+  $('tidy').disabled = solo;
+  $('add-manager').disabled = list.some((p) => p.role === 'manager');
+  // Reads as the org chart: m=manager, w=worker, * is the pane you're typing in, and ! is
+  // a worker whose manager pane is gone — otherwise the chart would quietly lie.
+  const orphan = list.some((p) => p.manager && p.managerAlive === false);
+  $('panes-count').textContent = solo ? ''
+    : `${list.map((p) => (p.role || '?')[0] + (p.active ? '*' : '') + (p.managerAlive === false ? '!' : '')).join(' ')}`
+      + ` · ${list.length} panes${orphan ? ' · orphaned' : ''}`;
+}
+
+// The target dropdown resolves to a real pane id, so these act on what you picked rather
+// than always on whatever happens to be focused.
+const targetPane = async () => $('target').value
+  || ((await listPanes()).find((p) => p.active) || {}).pane;
+
 $('fork').addEventListener('click', async () => {
-  const active = (await listPanes()).find((p) => p.active);
-  if (active) await post('/break', { pane: active.pane });
+  const p = await targetPane();
+  if (p) await post('/break', { pane: p });
+  refreshPanes();
+});
+
+$('close-pane').addEventListener('click', async () => {
+  const p = await targetPane();
+  if (p) await post('/close', { pane: p });
+  $('target').value = '';
+  refreshPanes();
+});
+
+$('tidy').addEventListener('click', async () => {
+  if (!current) return;
+  await post('/layout', {
+    install: INSTALL, tabId: current.id,
+    preset: splitDir === 'v' ? 'even-vertical' : 'even-horizontal',
+  });
   refreshPanes();
 });
 

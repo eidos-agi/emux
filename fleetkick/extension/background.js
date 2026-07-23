@@ -57,8 +57,23 @@ async function exec({ op, tabId, args = {} }) {
           }
           const body = document.body.cloneNode(true);
           for (const el of marked) el.removeAttribute('data-fk-hide'); // never mutate the user's page
-          for (const el of body.querySelectorAll('[data-fk-hide],' + DROP)) el.remove();
-          const t = (body.innerText || '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+          for (const el of body.querySelectorAll('[data-fk-hide],img,iframe,video,' + DROP)) el.remove();
+          // innerText is *rendered* text, so a detached clone silently degrades to
+          // textContent — no line breaks between blocks, "Day High150.23". Park the clone
+          // offscreen so it gets layout. position:fixed keeps it out of flow, so the real
+          // page never reflows. Always in a finally: leaking this into the DOM is worse
+          // than a failed read.
+          const host = document.createElement('div');
+          // Offscreen, NOT visibility:hidden — hiding it is exactly what makes innerText
+          // drop the text we came for.
+          host.style.cssText = 'position:fixed;left:-99999px;top:0;width:1024px;pointer-events:none';
+          host.appendChild(body);
+          let t;
+          try {
+            document.documentElement.appendChild(host);
+            t = (host.innerText || body.textContent || '');
+          } finally { host.remove(); }
+          t = t.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
           return {
             title: document.title, url: location.href, chars: t.length,
             // A silent slice reads as a complete page — mark it or it lies.

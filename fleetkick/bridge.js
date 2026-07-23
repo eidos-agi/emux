@@ -33,6 +33,12 @@ const SEP = '|';
 const tmux = (args) => new Promise((resolve) =>
   execFile('tmux', args, (err, stdout) => resolve(err ? null : String(stdout).trim())));
 
+// Same as tmux(), but keeps stderr. Worth it where tmux's own message ("no space for new
+// pane") is far more useful to show than a generic failure.
+const tmuxE = (args) => new Promise((resolve) =>
+  execFile('tmux', args, (err, stdout, stderr) =>
+    resolve({ ok: !err, out: String(stdout).trim(), err: String(stderr || '').trim() })));
+
 const digits = (v) => /^[0-9]+$/.test(String(v));
 
 // Switching the iframe's src would drop the websocket and make ttyd fire its
@@ -112,13 +118,18 @@ async function panes(install, tabId) {
     '#{pane_active}', '#{pane_width}x#{pane_height}'].join(SEP);
   const out = await tmux(['list-panes', '-t', sessionName(install, tabId), '-F', F]);
   if (out === null) return [];
-  return out.split('\n').filter(Boolean).map((l) => {
+  const rows = out.split('\n').filter(Boolean).map((l) => {
     const [id, role, manager, agent, active, size] = l.split(SEP);
     return {
       pane: id, role: role || null, manager: manager || null, agent: agent || null,
       active: active === '1', size,
     };
   });
+  // tmux never reuses a pane id, so a closed manager leaves its workers pointing at a %N
+  // that no longer exists. Report that rather than letting the org chart quietly lie.
+  const live = new Set(rows.map((r) => r.pane));
+  for (const r of rows) r.managerAlive = r.manager ? live.has(r.manager) : null;
+  return rows;
 }
 
 const setOpt = (pane, k, v) => tmux(['set-option', '-p', '-t', pane, k, v]);
@@ -138,30 +149,56 @@ async function split(install, tabId, opts = {}) {
 
   const before = role === 'manager';   // managers sit above/left of what they manage
   const existing = await panes(install, tabId);
-  const incumbent = (existing.find((p) => p.active) || existing[0] || {}).pane || '';
+  // Split relative to a NAMED pane when given, not always the active one — otherwise
+  // "add a worker below that pane" is impossible to express.
+  const wanted = String(opts.pane || '');
+  if (wanted && !PANE.test(wanted)) return { error: 'bad pane id' };
+  if (wanted && !existing.some((p) => p.pane === wanted)) return { error: `${wanted} is not in this session` };
+  const incumbent = wanted || (existing.find((p) => p.active) || existing[0] || {}).pane || '';
+
+  // A team has exactly ONE manager. Stacking managers produced panes that each believed
+  // they were in charge of one neighbour, which is a chain, not a hierarchy — and it is
+  // what turned a 2-pane demo into five unusable panes.
+  const boss = existing.find((p) => p.role === 'manager');
+  if (role === 'manager' && boss) {
+    return { error: `this group already has a manager (${boss.pane}). Close it first, or add a worker.` };
+  }
 
   const args = ['split-window', dir === 'h' ? '-h' : '-v'];
   if (before) args.push('-b');
-  args.push('-t', target, '-P', '-F', '#{pane_id}',
-    BOOT, '--pane', install, String(tabId), role, agent, before ? '' : incumbent);
-  const pane = await tmux(args);
-  if (pane === null || !PANE.test(pane)) return { error: 'split failed' };
+  // Workers report to the team's manager when there is one, regardless of which pane they
+  // were split from. Reporting to whatever you happened to split from is how the chain grew.
+  const parent = before ? '' : (boss ? boss.pane : incumbent);
+  args.push('-t', incumbent || target, '-P', '-F', '#{pane_id}',
+    BOOT, '--pane', install, String(tabId), role, agent, parent);
+  const r = await tmuxE(args);
+  // tmux's own message ("no space for new pane") is the useful one — a generic failure
+  // here reads as a bug when it is really a full window.
+  if (!r.ok || !PANE.test(r.out)) return { error: r.err || 'split failed' };
+  const pane = r.out;
 
   await setOpt(pane, '@fk_role', role);
   await setOpt(pane, '@fk_agent', agent);
   if (before) {
-    // A new manager adopts the pane it was created over, so the relationship is recorded
-    // from both sides rather than inferred from geometry later.
+    // A new manager adopts every pane that does not already have one, so the team has a
+    // single head rather than one adopted neighbour and a set of orphans.
     await setOpt(pane, '@fk_manager', '');
-    if (incumbent) {
-      await setOpt(incumbent, '@fk_manager', pane);
-      await setOpt(incumbent, '@fk_role', 'worker');
+    for (const p of existing) {
+      await setOpt(p.pane, '@fk_manager', pane);
+      await setOpt(p.pane, '@fk_role', 'worker');
     }
   } else {
-    await setOpt(pane, '@fk_manager', incumbent);
-    if (incumbent) await setOpt(incumbent, '@fk_role', 'manager');
+    await setOpt(pane, '@fk_manager', parent);
+    if (parent && !boss) await setOpt(parent, '@fk_role', 'manager');
   }
-  return { ok: true, pane, role, agent, manager: before ? null : incumbent };
+  return { ok: true, pane, role, agent, manager: before ? null : parent };
+}
+
+// Creation without deletion is how the window filled with panes nobody could remove.
+async function closePane(pane) {
+  if (!PANE.test(String(pane || ''))) return { error: 'bad pane id' };
+  const r = await tmuxE(['kill-pane', '-t', pane]);
+  return r.ok ? { ok: true, closed: pane } : { error: r.err || 'close failed' };
 }
 
 // A manager drives its worker by typing into it. -l sends the text literally, so a
@@ -172,6 +209,81 @@ async function paneSend(pane, text, enter = true) {
   if ((await tmux(['send-keys', '-t', pane, '-l', text])) === null) return { error: 'send failed' };
   if (enter) await tmux(['send-keys', '-t', pane, 'Enter']);
   return { ok: true, pane };
+}
+
+// --- url memory: "you were here before" ----------------------------------------------
+//
+// tmux sessions outlive the browser, so yesterday's CNBC conversation is still sitting
+// there when you come back — but the tab id is new, so nothing connects the two. Recording
+// what each session was looking at is what makes that reconnectable.
+//
+// Stored on the tmux session, like roles: no database, survives daemon restarts.
+// ponytail: last url + a short ring of recent ones. Full history earns a real store.
+const URLS_KEPT = 8;
+
+async function recordSeen(install, tabId, url, title) {
+  if (!IID.test(String(install || '')) || !digits(tabId)) return { error: 'bad target' };
+  if (typeof url !== 'string' || !/^https?:\/\//.test(url)) return { ok: true, skipped: 'not a web url' };
+  const target = sessionName(install, tabId);
+  if ((await tmux(['has-session', '-t', target])) === null) return { ok: true, skipped: 'no session' };
+
+  const prev = (await tmux(['show-options', '-v', '-t', target, '@fk_urls'])) || '';
+  const list = prev.split('\n').filter(Boolean);
+  if (list[0] !== url) {
+    list.unshift(url);
+    await tmux(['set-option', '-t', target, '@fk_urls',
+      [...new Set(list)].slice(0, URLS_KEPT).join('\n')]);
+  }
+  await tmux(['set-option', '-t', target, '@fk_url', url]);
+  if (title) await tmux(['set-option', '-t', target, '@fk_title', String(title).slice(0, 200)]);
+  await tmux(['set-option', '-t', target, '@fk_seen', String(Math.floor(Date.now() / 1000))]);
+  return { ok: true };
+}
+
+// Structured comparison, deliberately NOT edit distance. Levenshtein calls cnbc.com and
+// cnba.com near-identical (one character) while putting cnbc.com/tech/intel far from
+// cnbc.com/markets — backwards on exactly the cases that matter. A different host is a
+// different site, not a near miss; within a host, agreement is how deep the paths share.
+function urlScore(a, b) {
+  let A, B;
+  try { A = new URL(a); B = new URL(b); } catch { return 0; }
+  const host = (u) => u.host.replace(/^www\./, '');
+  if (host(A) !== host(B)) return 0;
+  const pa = A.pathname.split('/').filter(Boolean);
+  const pb = B.pathname.split('/').filter(Boolean);
+  let shared = 0;
+  while (shared < pa.length && shared < pb.length && pa[shared] === pb[shared]) shared++;
+  const depth = Math.max(pa.length, pb.length);
+  return depth === 0 ? 1 : 0.6 + 0.4 * (shared / depth);
+}
+
+async function matchSessions(install, url, excludeTabId) {
+  const mine = await sessions(install);
+  const out = [];
+  for (const s of mine) {
+    if (String(s.tabId) === String(excludeTabId)) continue;
+    const target = s.name;
+    const urls = ((await tmux(['show-options', '-v', '-t', target, '@fk_urls'])) || '')
+      .split('\n').filter(Boolean);
+    if (!urls.length) continue;
+    // Best of the session's recent urls: a session that wandered off is still the CNBC
+    // session if that is where it did its work.
+    let best = 0;
+    for (const u of urls) best = Math.max(best, urlScore(u, url));
+    if (best < 0.5) continue;
+    out.push({
+      ...s,
+      score: Number(best.toFixed(2)),
+      url: (await tmux(['show-options', '-v', '-t', target, '@fk_url'])) || urls[0],
+      pageTitle: (await tmux(['show-options', '-v', '-t', target, '@fk_title'])) || null,
+      lastSeen: Number((await tmux(['show-options', '-v', '-t', target, '@fk_seen'])) || 0),
+      // What it looks like you were doing. ponytail: the visible tail, not real intent
+      // extraction — reading the transcript would be the real answer.
+      preview: ((await tmux(['capture-pane', '-t', target, '-p', '-S', '-40'])) || '')
+        .split('\n').map((l) => l.trim()).filter(Boolean).slice(-3).join(' · ').slice(0, 240),
+    });
+  }
+  return out.sort((x, y) => y.score - x.score || y.lastSeen - x.lastSeen);
 }
 
 let nextId = 1;
@@ -269,10 +381,52 @@ http.createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && url.pathname === '/split') {
-    const { tabId, install, dir, agent, role } = await body(req);
+    const { tabId, install, dir, agent, role, pane } = await body(req);
     const r = resolveInstall(install);
     if (r.error) return send(res, 200, r);
-    return send(res, 200, await split(r.install, tabId, { dir, agent, role }));
+    return send(res, 200, await split(r.install, tabId, { dir, agent, role, pane }));
+  }
+
+  if (req.method === 'POST' && url.pathname === '/close') {
+    const { pane } = await body(req);
+    return send(res, 200, await closePane(pane));
+  }
+
+  // Reordering, so a pane can be moved rather than only created and destroyed.
+  if (req.method === 'POST' && url.pathname === '/swap') {
+    const { a, b } = await body(req);
+    if (!PANE.test(String(a || '')) || !PANE.test(String(b || ''))) {
+      return send(res, 200, { error: 'bad pane id' });
+    }
+    const r2 = await tmuxE(['swap-pane', '-s', a, '-t', b]);
+    return send(res, 200, r2.ok ? { ok: true, a, b } : { error: r2.err || 'swap failed' });
+  }
+
+  // Panes drift to unusable sizes after a few splits; this is the "tidy" button.
+  if (req.method === 'POST' && url.pathname === '/layout') {
+    const { tabId, install, preset } = await body(req);
+    const allowed = ['even-vertical', 'even-horizontal', 'tiled', 'main-vertical', 'main-horizontal'];
+    if (!allowed.includes(preset)) return send(res, 200, { error: `preset must be one of ${allowed.join(', ')}` });
+    const r2 = resolveInstall(install);
+    if (r2.error) return send(res, 200, r2);
+    if (!digits(tabId)) return send(res, 200, { error: 'bad tabId' });
+    const r3 = await tmuxE(['select-layout', '-t', sessionName(r2.install, tabId), preset]);
+    return send(res, 200, r3.ok ? { ok: true, preset } : { error: r3.err || 'layout failed' });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/seen') {
+    const { tabId, install, url: seenUrl, title } = await body(req);
+    const r = resolveInstall(install);
+    if (r.error) return send(res, 200, r);
+    return send(res, 200, await recordSeen(r.install, tabId, seenUrl, title));
+  }
+
+  if (req.method === 'GET' && url.pathname === '/match') {
+    const r = resolveInstall(qInstall);
+    if (r.error) return send(res, 200, r);
+    const want = url.searchParams.get('url') || '';
+    if (!want) return send(res, 200, []);
+    return send(res, 200, await matchSessions(r.install, want, url.searchParams.get('tabId')));
   }
 
   if (req.method === 'POST' && url.pathname === '/pane_send') {

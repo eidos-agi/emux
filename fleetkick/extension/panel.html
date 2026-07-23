@@ -83,10 +83,13 @@
     <option value="codex">codex</option>
     <option value="gemini">gemini</option>
   </select>
-  <button id="add-manager" type="button" title="New pane above that manages this one">+ manager</button>
-  <button id="add-worker" type="button" title="New pane below that reports to this one">+ worker</button>
+  <select id="target" title="which pane to split from (defaults to the active one)"></select>
+  <button id="add-manager" type="button" title="One per team: opens above and takes over every pane">+ mgr</button>
+  <button id="add-worker" type="button" title="Opens below the target and reports to the manager">+ worker</button>
   <button id="dir" type="button" title="Stacked or side by side">⬍</button>
-  <button id="fork" type="button" title="Break the active pane out into its own window">fork</button>
+  <button id="tidy" type="button" title="Even out the pane sizes">tidy</button>
+  <button id="fork" type="button" title="Break the target pane out into its own window">fork</button>
+  <button id="close-pane" type="button" title="Close the target pane">✕</button>
   <span class="grow" id="panes-count"></span>
 </div>
 
