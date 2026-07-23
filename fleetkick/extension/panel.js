@@ -39,15 +39,16 @@ function scope() {
 // Reloading the iframe drops ttyd's websocket, which makes it fire beforeunload —
 // the "Leave site?" prompt on every tab change. Attach once; after that only ever ask
 // tmux to swap which session this same live client is showing.
+function attach(tabId) {
+  const q = new URLSearchParams();
+  q.append('arg', tabId);
+  attached = true;
+  $('term').src = TTYD + '/?' + q.toString();
+}
+
 async function show(tabId) {
   markSeen(tabId);
-  if (!attached) {
-    attached = true;
-    const q = new URLSearchParams();
-    q.append('arg', tabId);
-    $('term').src = TTYD + '/?' + q.toString();
-    return;
-  }
+  if (!attached) return attach(tabId);
   try {
     await fetch(BRIDGE + '/switch', {
       method: 'POST',
@@ -75,7 +76,15 @@ $('trigger').addEventListener('click', (e) => {
   picker.classList.toggle('open');
   if (picker.classList.contains('open')) refresh();
 });
-document.addEventListener('click', () => picker.classList.remove('open'));
+// Collapse on any click-away, with no change — opening the picker must never be a
+// commitment. A plain document click isn't enough: clicking the terminal lands inside
+// the iframe, which swallows the event, so the menu used to stay open over it. Losing
+// window focus is the signal that actually covers that case (and clicking out of the
+// panel entirely). Escape closes it too.
+const closePicker = () => picker.classList.remove('open');
+document.addEventListener('click', closePicker);
+window.addEventListener('blur', closePicker);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePicker(); });
 
 let sessions = [];
 let liveTabIds = new Set();
@@ -147,6 +156,37 @@ function render() {
   }
 }
 
+// A daemon restart takes ttyd's websocket with it, permanently. ttyd's own "Press ⏎ to
+// Reconnect" can never succeed against a socket whose server is gone — only a fresh
+// client can, and tmux still holds the session, so re-attaching resumes exactly where it
+// left off. startedAt changing is the only reliable signal that this happened.
+let bridgeStartedAt = null;
+let needReattach = false;
+
+async function checkRestart() {
+  let h;
+  try {
+    h = await (await fetch(BRIDGE + '/health', { headers: FK })).json();
+  } catch {
+    return; // daemon down; nothing to re-attach to yet
+  }
+  if (!h.startedAt) return; // older bridge, no signal to act on
+  if (bridgeStartedAt === null) { bridgeStartedAt = h.startedAt; return; }
+  if (h.startedAt !== bridgeStartedAt) { bridgeStartedAt = h.startedAt; needReattach = true; }
+  if (!needReattach) return;
+  // ttyd comes back with the daemon but can lag it. Attaching before it listens leaves a
+  // dead error page, and no later tick would notice — so probe first and retry instead.
+  try {
+    await fetch(TTYD, { mode: 'no-cors' });
+  } catch {
+    return;
+  }
+  needReattach = false;
+  // about:blank first: re-assigning an identical src isn't a guaranteed reload.
+  $('term').src = 'about:blank';
+  requestAnimationFrame(() => attach(current ? current.id : ''));
+}
+
 async function refresh() {
   try {
     const got = await (await fetch(BRIDGE + '/sessions', { headers: FK })).json();
@@ -186,6 +226,9 @@ function keepWorkerAlive() {
 }
 keepWorkerAlive();
 
+// Shows the version actually loaded, so "did my reload take?" is a glance, not a guess.
+$('build').textContent = 'fleetkick ' + chrome.runtime.getManifest().version;
+
 // Hydrate before the first paint, or the first render marks everything unseen.
 (async () => {
   await hydrate();
@@ -195,6 +238,7 @@ keepWorkerAlive();
   await refresh();
   setInterval(() => {
     if (current) markSeen(current.id); // whatever is on screen is by definition seen
+    checkRestart();
     refresh();
   }, 2000);
 })();

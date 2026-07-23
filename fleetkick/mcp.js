@@ -15,6 +15,7 @@ const TOOLS = [
   { name: 'tab_create', description: 'Open a new tab; returns its tabId.', props: { url: { type: 'string' } } },
   { name: 'tabs_list',  description: 'List EVERY open tab across all windows (id, windowId, index, title, url, active, pinned). Use it to find a tab, then pass its tabId to any other tool.', props: {} },
   { name: 'refresh',    description: 'Reload the page. Set hard for a cache-bypassing reload.', props: { hard: { type: 'boolean' } } },
+  { name: 'version',    description: 'Version of the Fleetkick extension Chrome currently has loaded. Check this before concluding a change did not work — it may simply not be running yet.', props: {} },
 ].map(t => ({
   name: t.name,
   description: t.description + ' Targets whichever tab is currently active unless tabId is given.',

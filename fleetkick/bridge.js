@@ -17,6 +17,7 @@ const PREFIX = 'fleetkick-tab-';
 // separator silently collapses into the field values. Interactive tests never show
 // it, because there tmux has a tty and emits the tab intact.
 const SEP = '|';
+const STARTED_AT = Date.now();
 
 // execFile, never exec — no shell, so a tabId can't smuggle shell syntax. Belt and
 // braces with the digits-only check at every call site.
@@ -106,7 +107,10 @@ http.createServer(async (req, res) => {
   }
   if (req.headers['x-fleetkick'] !== '1') return send(res, 403, { error: 'forbidden' });
 
-  if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true });
+  // startedAt changes iff this process is new. The panel watches it to notice a daemon
+  // restart, because a restart kills the ttyd websocket permanently — no amount of
+  // client-side retrying revives that socket, only re-attaching does.
+  if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true, startedAt: STARTED_AT });
 
   if (req.method === 'GET' && req.url === '/sessions') return send(res, 200, await sessions());
 

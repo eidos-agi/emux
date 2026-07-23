@@ -69,6 +69,11 @@ async function exec({ op, tabId, args = {} }) {
     case 'refresh':
       await chrome.tabs.reload(tabId, { bypassCache: !!args.hard });
       return { ok: true, tabId };
+    case 'version':
+      // What Chrome ACTUALLY has loaded. Compare against manifest.json on disk to tell
+      // "my change is wrong" apart from "my change isn't running" — a distinction that
+      // cost two debugging detours before this existed.
+      return { version: chrome.runtime.getManifest().version };
     case 'reload_extension':
       // Answer first — chrome.runtime.reload() tears down this worker mid-flight, so
       // a reply sent after it would never reach the bridge.
