@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<head><style>
+  html, body { margin: 0; height: 100%; background: #1e1e1e; }
+  body { display: flex; flex-direction: column; }
+  .bar { height: 22px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 8px;
+         background: #111; color: #ccc; font: 11px ui-monospace, monospace;
+         white-space: nowrap; overflow: hidden; }
+  .bar span { overflow: hidden; text-overflow: ellipsis; }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; flex: none; }
+  #dot.dead { background: #f44336; }
+  #fav { width: 14px; height: 14px; flex: none; }
+  #url { opacity: .6; }
+  iframe { border: 0; width: 100%; flex: 1; }
+</style></head>
+<body>
+<div class="bar"><span id="dot"></span><img id="fav" hidden><span id="title"></span><span id="url"></span></div>
+<iframe id="term"></iframe>
+<div class="bar"><span id="ids"></span><span style="margin-left:auto;opacity:.6">fleetkick</span></div>
+<script src="panel.js"></script>
+</body>
+</html>
