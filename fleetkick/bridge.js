@@ -68,6 +68,7 @@ async function sessions() {
     }));
 }
 let nextId = 1;
+let lastPullAt = 0;        // when the extension last long-polled; 0 = never since boot
 const queue = [];          // commands waiting for the extension
 const pullers = [];        // extension long-polls waiting for a command
 const pending = new Map(); // id -> /cmd response awaiting a result
@@ -116,7 +117,12 @@ http.createServer(async (req, res) => {
   // startedAt changes iff this process is new. The panel watches it to notice a daemon
   // restart, because a restart kills the ttyd websocket permanently — no amount of
   // client-side retrying revives that socket, only re-attaching does.
-  if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true, startedAt: STARTED_AT });
+  // pullers/lastPullAt exist because "the extension is not responding" was indistinguishable
+  // from a dozen other faults from outside. A waiting puller means the command channel is
+  // live; a stale lastPullAt with a healthy daemon means the extension side is the problem.
+  if (req.method === 'GET' && req.url === '/health') return send(res, 200, {
+    ok: true, startedAt: STARTED_AT, pullers: pullers.length, lastPullAt, queued: queue.length,
+  });
 
   if (req.method === 'GET' && req.url === '/sessions') return send(res, 200, await sessions());
 
@@ -126,6 +132,7 @@ http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && req.url === '/pull') {
+    lastPullAt = Date.now();
     pullers.push(res);
     res.fkTimer = setTimeout(() => {
       const i = pullers.indexOf(res);
