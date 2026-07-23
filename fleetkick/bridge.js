@@ -41,6 +41,35 @@ const tmuxE = (args) => new Promise((resolve) =>
 
 const digits = (v) => /^[0-9]+$/.test(String(v));
 
+// Everything that makes a split usable, applied to every session on every /switch — not
+// just at creation, or the sessions you already have keep behaving like the old ones.
+//
+// mouse on: tmux itself handles border-drag to resize and click to focus. The panel cannot
+// do either — the terminal is a cross-origin iframe, so pane borders are not in a DOM it
+// can reach. `mouse` is a SESSION option, so other tmux work on this server is untouched.
+//
+// The border styling exists because tmux's default separator is a thin unstyled line, which
+// in a narrow side panel reads as nothing at all. Heavy lines plus a labelled top border
+// make the divider obvious AND put each pane's role on screen, so the org chart is visible
+// in the terminal rather than only in the panel's rail.
+async function applyStyle(target) {
+  await tmux(['set-option', '-t', target, 'mouse', 'on']);
+  const w = (k, v) => tmux(['set-option', '-w', '-t', target, k, v]);
+  await w('pane-border-lines', 'heavy');
+  await w('pane-border-style', 'fg=#4a4a4a');
+  await w('pane-active-border-style', 'fg=#4a9eff,bold');
+  await w('pane-border-status', 'top');
+  await w('pane-border-format',
+    ' #{?#{==:#{@fk_role},manager},▲ MANAGER,▼ worker} #{@fk_agent} #{pane_id} ');
+  // A client that attached BEFORE mouse was turned on never received tmux's mouse-tracking
+  // escape sequence, so clicking and dragging kept doing nothing in exactly the sessions
+  // that were already open. Refreshing each attached client is what makes it take effect.
+  const clients = (await tmux(['list-clients', '-t', target, '-F', '#{client_tty}'])) || '';
+  for (const tty of clients.split('\n').filter(Boolean)) {
+    await tmux(['refresh-client', '-t', tty]);
+  }
+}
+
 // Switching the iframe's src would drop the websocket and make ttyd fire its
 // beforeunload ("Leave site?") on every tab change. Instead the terminal stays
 // connected forever and tmux swaps which session that same client displays.
@@ -63,13 +92,7 @@ async function switchTo(install, tabId) {
     // instead of a worker whose agent reads as null.
     await tmux(['set-option', '-p', '-t', target, '@fk_agent', 'claude']);
   }
-  // Outside the create branch on purpose: sessions that already existed need this too, or
-  // clicking between panes keeps not working in exactly the sessions you already have.
-  // Mouse on = tmux itself handles border-drag to resize and click to focus a pane. The
-  // panel cannot do either: the terminal is a cross-origin iframe, so pane borders are not
-  // in a DOM it can reach. `mouse` is a SESSION option, so this stays on Fleetkick's
-  // sessions and never touches other tmux work sharing the server.
-  await tmux(['set-option', '-t', target, 'mouse', 'on']);
+  await applyStyle(target);
   // Only ever switch clients belonging to THIS install, or one browser's tab change would
   // yank the terminal out from under another browser's panel.
   const list = (await tmux(['list-clients', '-F', `#{client_tty}${SEP}#{client_session}`])) || '';

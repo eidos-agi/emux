@@ -4,6 +4,22 @@ Version lives in `extension/manifest.json` and is the single source of truth. Th
 footer and the `version` tool both report the **loaded** version, so a stale extension is
 visible instead of being something you have to deduce.
 
+## 0.11.0
+
+- **The separator is now visible and labelled.** tmux's default pane border is a thin
+  unstyled line, which in a narrow side panel reads as nothing. Borders are now `heavy`,
+  the active one is bold blue, and the top border carries each pane's role and agent —
+  `▲ MANAGER grok %34` / `▼ worker claude %35`. The org chart is readable in the terminal
+  itself, not only in the panel's rail.
+- **Mouse mode actually engages now.** Turning `mouse on` is not enough: tmux sends the
+  mouse-tracking escape sequence to a client when it attaches, so a client that was already
+  attached never received it and clicking/dragging kept doing nothing — in exactly the
+  sessions you already had open. Every attached client is now refreshed after the option is
+  set, which is what makes click-to-focus and border-drag take effect.
+- All of it moved into one `applyStyle()` run on every `/switch`, rather than only at
+  session creation. Same lesson as mouse mode: anything applied only at creation silently
+  skips every session that already exists.
+
 ## 0.10.0
 
 - **Resize by dragging pane borders**, and click to focus a pane. This is tmux's own mouse
