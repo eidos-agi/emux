@@ -4,6 +4,26 @@ Version lives in `extension/manifest.json` and is the single source of truth. Th
 footer and the `version` tool both report the **loaded** version, so a stale extension is
 visible instead of being something you have to deduce.
 
+## 0.10.0
+
+- **Resize by dragging pane borders**, and click to focus a pane. This is tmux's own mouse
+  mode, not panel code — the terminal is a cross-origin iframe, so pane borders are not in
+  a DOM the panel can reach, and no amount of extension JS could have done it. `mouse` is a
+  *session* option, so it applies to Fleetkick's sessions and leaves other tmux work on the
+  same server alone (verified: global `mouse` stays `off`). It is a toggle, because mouse
+  mode trades away drag-to-select-text (that becomes Option-drag).
+- Enabled on every `/switch`, not just at session creation — otherwise clicking between
+  panes kept not working in exactly the sessions you already had.
+- **Drag to rearrange**, via a pane rail below the toolbar. tmux has no
+  drag-a-pane-to-a-new-position primitive and the iframe is unreachable, so the draggable
+  surface is chips outside it: drag one onto another to swap, click one to focus. Chips show
+  role and agent, mark the active pane, and turn red when a worker's manager is gone.
+- `/resize` for precise adjustment when border-dragging is fiddly in a narrow panel.
+- Fixed a silent bug from 0.7.0: `markSeen` still wrote the old `fleetkick-tab-<tabId>` key
+  after sessions were renamed to `fleetkick-<install>-<tabId>`. The lookup never matched, so
+  every session permanently read as "finished something while you were away" and the badge
+  counted sessions you had just been looking at.
+
 ## 0.9.0
 
 - **The role model was wrong, not just the UI.** Role was stored on the pane, and each

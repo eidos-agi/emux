@@ -63,6 +63,13 @@ async function switchTo(install, tabId) {
     // instead of a worker whose agent reads as null.
     await tmux(['set-option', '-p', '-t', target, '@fk_agent', 'claude']);
   }
+  // Outside the create branch on purpose: sessions that already existed need this too, or
+  // clicking between panes keeps not working in exactly the sessions you already have.
+  // Mouse on = tmux itself handles border-drag to resize and click to focus a pane. The
+  // panel cannot do either: the terminal is a cross-origin iframe, so pane borders are not
+  // in a DOM it can reach. `mouse` is a SESSION option, so this stays on Fleetkick's
+  // sessions and never touches other tmux work sharing the server.
+  await tmux(['set-option', '-t', target, 'mouse', 'on']);
   // Only ever switch clients belonging to THIS install, or one browser's tab change would
   // yank the terminal out from under another browser's panel.
   const list = (await tmux(['list-clients', '-F', `#{client_tty}${SEP}#{client_session}`])) || '';
@@ -385,6 +392,35 @@ http.createServer(async (req, res) => {
     const r = resolveInstall(install);
     if (r.error) return send(res, 200, r);
     return send(res, 200, await split(r.install, tabId, { dir, agent, role, pane }));
+  }
+
+  // Precise resizing, for when dragging a border is fiddly in a narrow side panel.
+  if (req.method === 'POST' && url.pathname === '/resize') {
+    const { pane, dir, amount } = await body(req);
+    const flags = { L: '-L', R: '-R', U: '-U', D: '-D' };
+    if (!PANE.test(String(pane || ''))) return send(res, 200, { error: 'bad pane id' });
+    if (!flags[dir]) return send(res, 200, { error: 'dir must be L, R, U or D' });
+    const n = Math.min(Math.max(parseInt(amount, 10) || 3, 1), 40);
+    const r2 = await tmuxE(['resize-pane', flags[dir], '-t', pane, String(n)]);
+    return send(res, 200, r2.ok ? { ok: true, pane, dir, amount: n } : { error: r2.err || 'resize failed' });
+  }
+
+  // Mouse mode is a genuine trade: dragging borders resizes, but drag-to-select-text stops
+  // working (that becomes Option-drag). So it is a toggle, not a decision made for you.
+  if (req.method === 'POST' && url.pathname === '/mouse') {
+    const { tabId, install, on } = await body(req);
+    const r2 = resolveInstall(install);
+    if (r2.error) return send(res, 200, r2);
+    if (!digits(tabId)) return send(res, 200, { error: 'bad tabId' });
+    const r3 = await tmuxE(['set-option', '-t', sessionName(r2.install, tabId), 'mouse', on ? 'on' : 'off']);
+    return send(res, 200, r3.ok ? { ok: true, mouse: !!on } : { error: r3.err || 'mouse toggle failed' });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/select') {
+    const { pane } = await body(req);
+    if (!PANE.test(String(pane || ''))) return send(res, 200, { error: 'bad pane id' });
+    const r2 = await tmuxE(['select-pane', '-t', pane]);
+    return send(res, 200, r2.ok ? { ok: true, pane } : { error: r2.err || 'select failed' });
   }
 
   if (req.method === 'POST' && url.pathname === '/close') {

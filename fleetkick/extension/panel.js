@@ -26,7 +26,15 @@ const hydrate = async () => {
   INSTALL = r && r.install;
 };
 const save = (k, v) => chrome.storage.local.set({ [k]: v });
-const markSeen = (tabId) => { seen['fleetkick-tab-' + tabId] = Date.now() / 1000; save('fk-seen', seen); };
+// Must match the session name the daemon uses, or nothing is ever marked seen. 0.7.0
+// renamed sessions to fleetkick-<install>-<tabId> and this kept writing the old
+// fleetkick-tab-<tabId> key, so state() looked up a name that never existed and every
+// session read as "finished something while you were away", forever.
+const markSeen = (tabId) => {
+  if (!INSTALL) return;
+  seen[`fleetkick-${INSTALL}-${tabId}`] = Date.now() / 1000;
+  save('fk-seen', seen);
+};
 
 function bars(tab) {
   $('title').textContent = tab.title || '';
@@ -260,7 +268,7 @@ async function addPane(role) {
   try {
     const r = await post('/split', {
       install: INSTALL, tabId: current.id, role, agent: $('agent').value, dir: splitDir,
-      pane: $('target').value || undefined,
+      pane: targetSel || undefined,
     });
     // Surface the daemon's reason in the bar rather than failing silently — a split that
     // quietly does nothing is the same trap /switch used to set.
@@ -286,21 +294,58 @@ async function listPanes() {
   }
 }
 
-// The target dropdown is what makes "add a worker below THAT pane" expressible. Empty
-// value means the active pane, which is the common case.
-function renderTargets(list) {
-  const sel = $('target');
-  const keep = sel.value;
-  const opts = ['<option value="">active</option>'].concat(list.map((p) =>
-    `<option value="${p.pane}">${p.pane} ${p.role || '?'}${p.agent ? ' ' + p.agent : ''}</option>`));
-  const next = opts.join('');
-  if (sel.innerHTML !== next) sel.innerHTML = next;
-  if (list.some((p) => p.pane === keep)) sel.value = keep;
+// Which pane the buttons act on. '' means "whichever is active", the common case.
+let targetSel = '';
+let mouseOn = true;
+
+// The rail is the drag surface. tmux can resize by border-drag once mouse mode is on, but
+// it has no drag-a-pane-to-a-new-position primitive — and the terminal is a cross-origin
+// iframe, so the panel can't reach its pane borders anyway. Rearranging therefore happens
+// out here on chips: drag one onto another to swap them, click one to focus it.
+function renderRail(list) {
+  const rail = $('rail');
+  rail.hidden = list.length < 2;
+  if (rail.hidden) { rail.textContent = ''; return; }
+  rail.textContent = '';
+  for (const p of list) {
+    const chip = document.createElement('span');
+    chip.className = 'chip' + (p.active ? ' active' : '') + (p.pane === targetSel ? ' sel' : '')
+      + (p.managerAlive === false ? ' orphan' : '');
+    chip.draggable = true;
+    chip.textContent = `${p.role === 'manager' ? 'mgr' : 'wkr'} ${p.agent || '?'}`;
+    chip.title = p.managerAlive === false
+      ? `${p.pane} — its manager pane is gone`
+      : `${p.pane} · click to focus · drag onto another to swap`;
+
+    chip.addEventListener('click', async () => {
+      targetSel = targetSel === p.pane ? '' : p.pane;
+      await post('/select', { pane: p.pane });
+      refreshPanes();
+    });
+    chip.addEventListener('dragstart', (e) => e.dataTransfer.setData('text/plain', p.pane));
+    chip.addEventListener('dragover', (e) => { e.preventDefault(); chip.classList.add('over'); });
+    chip.addEventListener('dragleave', () => chip.classList.remove('over'));
+    chip.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      chip.classList.remove('over');
+      const from = e.dataTransfer.getData('text/plain');
+      if (from && from !== p.pane) await post('/swap', { a: from, b: p.pane });
+      refreshPanes();
+    });
+    rail.appendChild(chip);
+  }
 }
+
+$('mouse').addEventListener('click', async () => {
+  if (!current) return;
+  mouseOn = !mouseOn;
+  $('mouse').classList.toggle('on', mouseOn);
+  await post('/mouse', { install: INSTALL, tabId: current.id, on: mouseOn });
+});
 
 async function refreshPanes() {
   const list = await listPanes();
-  renderTargets(list);
+  renderRail(list);
   const solo = list.length < 2;
   $('fork').disabled = solo;
   $('close-pane').disabled = solo;   // closing the only pane would kill the session
@@ -316,7 +361,7 @@ async function refreshPanes() {
 
 // The target dropdown resolves to a real pane id, so these act on what you picked rather
 // than always on whatever happens to be focused.
-const targetPane = async () => $('target').value
+const targetPane = async () => targetSel
   || ((await listPanes()).find((p) => p.active) || {}).pane;
 
 $('fork').addEventListener('click', async () => {
@@ -328,7 +373,7 @@ $('fork').addEventListener('click', async () => {
 $('close-pane').addEventListener('click', async () => {
   const p = await targetPane();
   if (p) await post('/close', { pane: p });
-  $('target').value = '';
+  targetSel = '';
   refreshPanes();
 });
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Fleetkick",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Sidekick for the fleet: a live claude code session in the side panel, paired per-tab, with its own tab-control tools.",
   "permissions": ["sidePanel", "tabs", "scripting", "alarms", "offscreen", "storage"],
   "host_permissions": ["<all_urls>", "http://127.0.0.1/*"],

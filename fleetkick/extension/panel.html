@@ -58,6 +58,19 @@
   #panes .grow { margin-left: auto; color: var(--dim); }
   #dir.on { color: var(--blue); border-color: var(--blue); }
 
+  #rail { flex: none; display: flex; gap: 4px; padding: 4px 8px; background: var(--chrome);
+          border-bottom: 1px solid var(--line); overflow-x: auto; }
+  #rail[hidden] { display: none; }
+  .chip { display: flex; align-items: center; gap: 4px; padding: 2px 8px; cursor: grab;
+          background: #232323; border: 1px solid var(--line); border-radius: 3px;
+          white-space: nowrap; user-select: none; }
+  .chip.active { border-color: var(--green); }
+  .chip.sel { background: #202b38; border-color: var(--blue); }
+  .chip.orphan { border-color: var(--red); }
+  .chip.over { border-color: var(--blue); background: #26313d; }
+  .chip:active { cursor: grabbing; }
+  #mouse.on { color: var(--blue); border-color: var(--blue); }
+
   iframe { border: 0; width: 100%; flex: 1; }
 </style>
 </head>
@@ -83,7 +96,7 @@
     <option value="codex">codex</option>
     <option value="gemini">gemini</option>
   </select>
-  <select id="target" title="which pane to split from (defaults to the active one)"></select>
+  <button id="mouse" type="button" title="Mouse mode: drag borders to resize, click to focus. Off lets you drag-select text.">🖱</button>
   <button id="add-manager" type="button" title="One per team: opens above and takes over every pane">+ mgr</button>
   <button id="add-worker" type="button" title="Opens below the target and reports to the manager">+ worker</button>
   <button id="dir" type="button" title="Stacked or side by side">⬍</button>
@@ -92,6 +105,11 @@
   <button id="close-pane" type="button" title="Close the target pane">✕</button>
   <span class="grow" id="panes-count"></span>
 </div>
+
+<!-- The rail is the drag surface. tmux has no drag-a-pane-to-a-new-spot primitive, and the
+     terminal is a cross-origin iframe we can't reach into, so rearranging happens on chips
+     out here: drag one onto another to swap them, click one to focus it. -->
+<div id="rail"></div>
 
 <iframe id="term"></iframe>
 
