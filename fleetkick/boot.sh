@@ -4,6 +4,18 @@
 # session stays alive and reattaches instantly when its tab is active again.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# A missing `claude` used to be invisible: exec fails, the session's command exits, tmux
+# drops the session, and /switch still answered ok. Hold the pane open with the reason on
+# screen instead — a session you can read the error in beats one that never appears.
+# ponytail: sleep, not a retry loop; the fix is always PATH, and the pane says so.
+command -v claude >/dev/null || {
+  echo "fleetkick: 'claude' not found on PATH" >&2
+  echo "  PATH=$PATH" >&2
+  echo "  fix: add its dir to EnvironmentVariables/PATH in com.eidos.fleetkick.plist," >&2
+  echo "       then re-run ./install-daemon.sh" >&2
+  exec sleep 86400
+}
+
 # Args arrive from a URL. tmux runs its command through sh -c and $tab becomes a /tmp
 # path and a JSON string, so anything but digits is an injection. Reject it here, once.
 for a in "$@"; do

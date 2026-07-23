@@ -8,7 +8,14 @@ LABEL="com.eidos.fleetkick"
 DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 mkdir -p "$HOME/Library/LaunchAgents"
-sed -e "s|__DIR__|$DIR|g" -e "s|__WORKDIR__|$WORKDIR|g" "$DIR/$LABEL.plist" > "$DEST"
+sed -e "s|__DIR__|$DIR|g" -e "s|__WORKDIR__|$WORKDIR|g" -e "s|__HOME__|$HOME|g" \
+  "$DIR/$LABEL.plist" > "$DEST"
+
+# Fail here rather than shipping a daemon that can't spawn claude. launchd gets none of
+# your shell's PATH, so this is the one dependency worth proving at install time.
+command -v claude >/dev/null || { echo "claude not found on PATH — fix before installing" >&2; exit 1; }
+grep -q "$(dirname "$(command -v claude)")" "$DEST" \
+  || echo "WARN: claude is at $(command -v claude), which is not on the plist PATH" >&2
 
 # bootout is the documented way to replace a running agent; it fails when nothing is
 # loaded, which is a normal first install, not an error.

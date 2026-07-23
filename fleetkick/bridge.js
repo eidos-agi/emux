@@ -34,6 +34,12 @@ async function switchTo(tabId) {
   const target = PREFIX + tabId;
   if ((await tmux(['has-session', '-t', target])) === null) {
     await tmux(['new-session', '-d', '-s', target, BOOT, '--inner', String(tabId)]);
+    // new-session exits 0 even when its command dies a millisecond later, and tmux then
+    // discards the session — which is how a daemon that could not create a single session
+    // still answered ok:true to every /switch. Confirm it exists before saying so.
+    if ((await tmux(['has-session', '-t', target])) === null) {
+      return { error: `session ${target} died immediately — is claude on the daemon's PATH?` };
+    }
   }
   const clients = (await tmux(['list-clients', '-F', `#{client_tty}${SEP}#{client_session}`])) || '';
   const ttys = clients.split('\n').filter(Boolean)

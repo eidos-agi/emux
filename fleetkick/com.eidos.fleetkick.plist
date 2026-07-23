@@ -28,10 +28,14 @@
   <key>StandardErrorPath</key>
   <string>/tmp/fleetkick.log</string>
 
+  <!-- ~/.local/bin FIRST and non-negotiable: that is where the claude binary lives. A
+       launchd job inherits none of your shell's PATH, so without it boot.sh's `exec claude`
+       fails, the session's command exits instantly, tmux discards the session, and the
+       daemon looks perfectly healthy while being unable to create a single session. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
 </dict>
 </plist>
