@@ -119,6 +119,30 @@ async function readPalette(tabId) {
   }
 }
 
+function hslToHex(h, sPct, lPct) {
+  const s = sPct / 100, l = lPct / 100;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  const [r, g, b] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x]
+    : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  const hex = (v) => Math.round((v + m) * 255).toString(16).padStart(2, '0');
+  return `#${hex(r)}${hex(g)}${hex(b)}`;
+}
+
+// The terminal itself is themed, not a header strip: bg is the page's hue at very low
+// lightness so it reads as atmosphere rather than decoration, fg is the same hue nearly
+// white so text stays legible, accent drives borders and selection.
+function terminalTheme(seed, i) {
+  const h = seed ? (seed.h + i * 32) % 360 : 210;
+  const s = seed ? clamp(seed.s - i * 3, 30, 85) : 18;
+  return {
+    bg: hslToHex(h, Math.min(s, 42), 8),
+    fg: hslToHex(h, Math.min(s, 22), 86),
+    accent: hslToHex(h, s, 56),
+  };
+}
+
 // Manager sits closest to the page's own colour; each worker steps around the wheel.
 function shade(seed, i) {
   if (!seed) return i === 0 ? '#4a9eff' : '#5a5a5a';
@@ -137,6 +161,7 @@ function shade(seed, i) {
 // Iframes are NEVER re-created for a slot that already exists: setting src again reloads
 // the terminal. Only added and removed slots touch the DOM.
 const slots = new Map(); // key `${tabId}:${slot}` -> wrapper element
+const themed = new Map(); // key -> last theme pushed, so we don't repaint every tick
 let stackKey = '';       // which tab the stack is currently built for
 
 function slotEl(tabId, s) {
@@ -189,9 +214,15 @@ function slotEl(tabId, s) {
     if (e.key === 'Enter') { e.preventDefault(); who.blur(); }
     if (e.key === 'Escape') { who.textContent = s.label; who.blur(); }
   });
+  // Order matters: tear the iframe out FIRST. boot.sh re-attaches forever by design, so a
+  // still-connected client recreates the session the instant it is killed — which looks
+  // exactly like the close button spawning a new agent.
   del.addEventListener('click', async () => {
+    const key = `${tabId}:${s.slot}`;
+    const el = slots.get(key);
+    if (el) { el.remove(); slots.delete(key); themed.delete(key); }
     const r = await post('/remove', { install: INSTALL, tabId, slot: s.slot });
-    if (r.error) $('roster').textContent = r.error;
+    if (r && r.error) $('roster').textContent = r.error;
     refreshGroup();
   });
 
@@ -231,6 +262,15 @@ function divider() {
   return d;
 }
 
+// A tab needs an agent, but only if it has none. Calling /switch unconditionally is what
+// made closing slot 0 look like the button spawned a new claude: the session was killed and
+// immediately recreated on the next tick.
+async function ensureAgent(tabId) {
+  const g = await get(`/group?install=${INSTALL}&tabId=${tabId}`);
+  if (Array.isArray(g) && g.length) return;
+  return post('/switch', { install: INSTALL, tabId });
+}
+
 async function refreshGroup() {
   if (!current || !INSTALL) return;
   const tabId = current.id;
@@ -246,6 +286,7 @@ async function refreshGroup() {
   if (stackKey !== String(tabId)) {
     stackKey = String(tabId);
     slots.clear();
+    themed.clear();
     $('stack').textContent = '';
   }
 
@@ -264,8 +305,17 @@ async function refreshGroup() {
     let el = slots.get(key);
     if (!el) { el = slotEl(tabId, s); slots.set(key, el); }
     const { who, role, mail } = el._parts;
-    const tint = shade(palette, order.findIndex((x) => x.slot === s.slot));
-    el.style.setProperty('--tint', tint);
+    const idx = order.findIndex((x) => x.slot === s.slot);
+    el.style.setProperty('--tint', shade(palette, idx));
+    // Push the theme into tmux only when it actually changes — this loop runs every 2s and
+    // re-styling the terminal on every tick would repaint it constantly.
+    const th = terminalTheme(palette, idx);
+    const sig = `${th.bg}|${th.fg}|${th.accent}`;
+    if (themed.get(key) !== sig) {
+      themed.set(key, sig);
+      el.style.background = th.bg;
+      post('/theme', { install: INSTALL, tabId, slot: s.slot, ...th });
+    }
     if (who.contentEditable !== 'true') who.textContent = s.label;
     role.textContent = `${s.role === 'manager' ? 'manager' : s.role === 'worker' ? 'worker' : 'solo'} · ${s.agent}`;
     const n = counts[s.label] || 0;
@@ -318,8 +368,7 @@ function pair(tab) {
   bars(tab);
   if (tab.title) { titles[tab.id] = tab.title; save('fk-titles', titles); }
   if (changed) {
-    // Make sure the tab has its slot-0 session before the iframe asks ttyd for it.
-    post('/switch', { install: INSTALL, tabId: tab.id }).then(refreshGroup);
+    ensureAgent(tab.id).then(refreshGroup);
     render();
   }
   if (tab.url) post('/seen', { install: INSTALL, tabId: tab.id, url: tab.url, title: tab.title });

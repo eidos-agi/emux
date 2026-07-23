@@ -52,7 +52,9 @@ if [ "${1:-}" = "--inner" ]; then
   [ -n "$role" ]  || role=$(tmux show-options -v -t "$sess" @fk_role 2>/dev/null)
   [ -n "$agent" ] || agent=$(tmux show-options -v -t "$sess" @fk_agent 2>/dev/null)
   [ -n "$me" ]    || me=$(tmux show-options -v -t "$sess" @fk_name 2>/dev/null)
-  [ -n "$me" ]    || me="agent$slot"
+  # Named, not numbered: "agent0" is what a slot id looks like, not an agent.
+  POOL=(todd sally marcus nina omar wren)
+  [ -n "$me" ]    || me="${POOL[$((slot % ${#POOL[@]}))]}"
   [ -n "$role" ]  || role=solo
   [ -n "$agent" ] || agent=claude
   case "$role" in manager|worker|solo) ;; *) role=solo ;; esac

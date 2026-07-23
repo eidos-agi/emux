@@ -4,6 +4,29 @@ Version lives in `extension/manifest.json` and is the single source of truth. Th
 footer and the `version` tool both report the **loaded** version, so a stale extension is
 visible instead of being something you have to deduce.
 
+## 0.14.0
+
+- **The whole terminal is themed, not a header strip.** `/theme` sets tmux `window-style`,
+  so each agent's pane background carries the page's hue at low lightness, with foreground
+  and borders derived from the same seed. Programs that set their own colours still win, so
+  agent output stays readable on top of it. Colours are hex-validated — anything that isn't
+  `#rrggbb` is refused rather than passed to tmux.
+- Pushed only when the derived theme actually changes, since the group loop runs every 2s
+  and re-styling on every tick would repaint the terminal constantly.
+- **Fixed: closing an agent spawned a new one.** `boot.sh` re-attaches forever by design, so
+  killing a session while its iframe was still connected made the iframe recreate it
+  instantly — the close button looked like a spawn button. The panel now removes the iframe
+  *before* killing the session. Separately, `/switch` was called on every tab change, which
+  resurrected slot 0 on the next tick; a tab now only gets an agent conjured for it when it
+  has none at all.
+- `migrate-panes.sh`: sessions created before 0.12 hold several agents as tmux panes inside
+  one session, which the slot model does not retroactively unpack — so an old tab still
+  rendered as one terminal with the old split inside. This moves each extra pane into its
+  own slot session with `join-pane`, which *moves* a pane rather than restarting it, so the
+  running agent and its conversation survive. It also demotes duplicate managers left behind
+  by the pre-0.9 chaining bug. Idempotent.
+- Default names come from the pool instead of `agent0` — a slot id is not an agent.
+
 ## 0.13.0
 
 - **Agents take their colour from the page.** The manager gets the page's own accent and

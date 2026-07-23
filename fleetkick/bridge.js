@@ -459,6 +459,33 @@ http.createServer(async (req, res) => {
       url.searchParams.get('peek') !== '1'));
   }
 
+  // Theme the whole terminal, not a header strip. tmux window-style takes hex, so the
+  // pane's default background and foreground can carry the page's own hue — programs that
+  // set their own colours still win, so claude's output stays readable on top of it.
+  if (req.method === 'POST' && url.pathname === '/theme') {
+    const { tabId, install, slot, bg, fg, accent } = await body(req);
+    const r = resolveInstall(install);
+    if (r.error) return send(res, 200, r);
+    if (!digits(tabId) || !digits(slot)) return send(res, 200, { error: 'bad target' });
+    const HEX = /^#[0-9a-f]{6}$/i;
+    if (![bg, fg, accent].every((c) => HEX.test(String(c || '')))) {
+      return send(res, 200, { error: 'bg, fg and accent must be #rrggbb' });
+    }
+    const target = sessionName(r.install, tabId, slot);
+    if ((await tmux(['has-session', '-t', target])) === null) return send(res, 200, { error: 'no such agent' });
+    const w = (k, v) => tmux(['set-option', '-w', '-t', target, k, v]);
+    await w('window-style', `bg=${bg},fg=${fg}`);
+    await w('window-active-style', `bg=${bg},fg=${fg}`);
+    await w('pane-active-border-style', `fg=${accent}`);
+    await w('pane-border-style', `fg=${accent}`);
+    await tmux(['set-option', '-t', target, 'message-style', `bg=${accent},fg=${bg}`]);
+    await tmux(['set-option', '-t', target, 'mode-style', `bg=${accent},fg=${bg}`]);
+    // Repaint attached clients, or the new colours only appear on the next redraw.
+    const cl = (await tmux(['list-clients', '-t', target, '-F', '#{client_tty}'])) || '';
+    for (const tty of cl.split('\n').filter(Boolean)) await tmux(['refresh-client', '-t', tty]);
+    return send(res, 200, { ok: true, slot: Number(slot), bg, fg, accent });
+  }
+
   if (req.method === 'POST' && url.pathname === '/rename') {
     const { tabId, install, slot, name } = await body(req);
     const r = resolveInstall(install);
