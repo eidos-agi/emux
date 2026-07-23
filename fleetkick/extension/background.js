@@ -79,29 +79,28 @@ async function exec({ op, tabId, args = {} }) {
   }
 }
 
-let polling = false;
-async function poll() {
-  if (polling) return;
-  polling = true;
+// This worker does NOT hold the connection — it can't, Chrome kills it at ~30s idle.
+// offscreen.js owns the long-poll and messages us when a command arrives; delivering
+// that message is itself the event that revives us. We are the hands, not the wire.
+async function ensureConnection() {
   try {
-    for (;;) {
-      const cmd = await (await fetch(BRIDGE + '/pull', { headers: FK })).json();
-      if (cmd && cmd.op) {
-        let result;
-        try { result = await exec(cmd); } catch (e) { result = { error: String(e) }; }
-        await fetch(BRIDGE + '/result', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', ...FK },
-          body: JSON.stringify({ id: cmd.id, result }),
-        });
-      }
-    }
-  } catch {
-    // bridge down or fetch aborted — the alarm below restarts us
-  } finally {
-    polling = false;
+    if (await chrome.offscreen.hasDocument()) return;
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['WORKERS'],
+      justification: 'Holds the persistent connection to the local Fleetkick daemon so browser commands still work while the service worker is asleep.',
+    });
+  } catch (e) {
+    // Two callers can race to create it; losing that race is success, not failure.
+    if (!/single offscreen|already/i.test(String(e))) console.error('fleetkick offscreen:', e);
   }
 }
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (!msg || !msg.fkCmd) return;
+  exec(msg.fkCmd).then(sendResponse, (e) => sendResponse({ error: String(e) }));
+  return true; // keep the channel open for the async reply
+});
 
 // --- Tab lifecycle + badge (pattern borrowed from apple-a-day's browser monitor) ---
 //
@@ -152,23 +151,22 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   updateBadge();
 });
 
-chrome.runtime.onInstalled.addListener(() => { poll(); seedTitles(); });
-chrome.runtime.onStartup.addListener(() => { poll(); seedTitles(); });
+chrome.runtime.onInstalled.addListener(() => { ensureConnection(); seedTitles(); });
+chrome.runtime.onStartup.addListener(() => { ensureConnection(); seedTitles(); });
+// Backstop only: if the offscreen document ever goes missing, this rebuilds it within
+// 30s. It is not the connection — it just makes sure the connection exists.
 chrome.alarms.create('fleetkick-poll', { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener(() => { poll(); updateBadge(); });
+chrome.alarms.onAlarm.addListener(() => { ensureConnection(); updateBadge(); });
 
 async function seedTitles() {
   for (const tab of await chrome.tabs.query({})) await rememberTab(tab);
   updateBadge();
 }
 
-// The panel holds a port open to keep this worker from being killed at ~30s idle —
-// a dead worker stops polling, which reads as the tools "disconnecting" the moment
-// you stop typing. Re-poll on every (re)connect, since a fresh worker starts cold.
 chrome.runtime.onConnect.addListener((port) => {
-  poll();
+  ensureConnection();
   port.onDisconnect.addListener(() => {});
 });
 
-poll();
+ensureConnection();
 seedTitles();

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.eidos.fleetkick</string>
+
+  <!-- serve.sh runs the bridge as a child and execs ttyd in the foreground, so launchd
+       watches ttyd; if either dies the whole pair is rebuilt. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__DIR__/serve.sh</string>
+    <string>__WORKDIR__</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- The point of this file: the extension may reconnect whenever it likes, because
+       the thing it reconnects to never stays down. -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/fleetkick.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/fleetkick.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
