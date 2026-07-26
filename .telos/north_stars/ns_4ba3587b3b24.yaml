@@ -9,6 +9,7 @@ stop_max_iters: null
 stop_zero_delta_n: 3
 signature: "founder-amend-2026-07-12-bless-explicit-spawn"
 created_at: "2026-07-12T22:01:42.906162+00:00"
-closed_at: null
-outcome: null
+closed_at: "2026-07-26T06:00:51.021225+00:00"
+outcome: "pivoted"
 repo_path: "/Users/dshanklinbv/repos-eidos-agi/emux"
+notes: "Founder-authorized amendment (Daniel, 2026-07-26): the nested-manager insight holds and is carried forward, but the GOVERNED UNIT changes. Governing the session is an employee model — correct at 10, fails at 10,000. Evidence from operating emux 2026-07-25: 77 registry entries for 12 live sessions; no way to distinguish session-died from work-finished, so AIC-224, GMW-948 and GMW-949 sat In Progress in Linear with no live worker, and AIC-224 had already been worked twice. Superseded by the mission-governed north star."
