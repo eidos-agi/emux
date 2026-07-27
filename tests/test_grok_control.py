@@ -89,9 +89,12 @@ def test_enrich_session_dir_summary_and_history(tmp_path):
     assert idx is not None
     assert idx.session_id == sid
     assert idx.cwd == "/Users/x/repos-greenmark"
-    # Phase A: last human prompt preferred for title/summary triage
-    assert "Caddy" in idx.title or "Greenmux" in idx.title
-    assert "Caddy" in idx.summary or "greenmux" in idx.summary.lower() or "Ship" in idx.summary
+    # AIC-283 / Phase A: generated_title wins over last-user typo noise;
+    # last human prompt stays in last_user_snippet (and fills empty summary).
+    assert "Greenmux" in idx.title
+    assert "Caddy" not in idx.title  # do not clobber mission title
+    assert "Caddy" in idx.last_user_snippet
+    assert "greenmux" in idx.summary.lower() or "Ship" in idx.summary or "Caddy" in idx.summary
     assert idx.model == "grok-4.5"
     assert idx.branch == "feat/x"
     assert idx.chat_messages == 4

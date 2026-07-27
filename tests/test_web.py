@@ -271,6 +271,25 @@ def test_ai_diagnosis_html_wrapper(daemon):
     assert "<pre" in body
 
 
+def test_health_page_markdown_is_product_scoped(daemon):
+    """Standing /health is cheap markdown with verdict + evolving criteria."""
+    status, body = _get(daemon + "/health")
+    assert status == 200
+    text = body if isinstance(body, str) else str(body)
+    assert "verdict:" in text.lower() or "verdict" in text.lower()
+    assert "health criteria" in text.lower()
+    assert "healthz" in text.lower()
+    # product-stamped title line
+    assert text.lstrip().startswith("#") and "health" in text.splitlines()[0].lower()
+
+
+def test_health_page_html_wrapper(daemon):
+    status, body = _get(daemon + "/health.html")
+    assert status == 200
+    assert "standing health" in body.lower() or "health" in body.lower()
+    assert "<pre" in body
+
+
 def test_gmux_skin_rebrands_without_forking():
     from emux import skin
     s = skin.get_skin("gmux")

@@ -171,6 +171,22 @@ def _is_noise_prompt(text: str) -> bool:
     low = t.lower()
     if low.startswith("stop at the requested boundary"):
         return True
+    # Fleet / PR / land / tool noise — not mid-flight mission titles (AIC-283)
+    noise_prefixes = (
+        "review this change for security",
+        "review this change for",
+        "# /land",
+        "/land —",
+        "/land -",
+        "npm warn ",
+        "[request interrupted",
+        "[co-pilot help",
+        "say hi",
+    )
+    if any(low.startswith(p) for p in noise_prefixes):
+        return True
+    if "skeptic" in low and len(t) < 80:
+        return True
     if low in ("say hi", "hi", "hello", "test"):
         return False  # still real, just trivial — keep but low priority
     return False
@@ -216,8 +232,8 @@ def _priority(
             "g702",
             "g703",
             "waiver_ledger",
+            "progress management",
             # Northstar CEO news / Iran daily (AIC Ledger)
-            "northstar",
             "iran war",
             "iran-war",
             "us-iran",
@@ -229,6 +245,12 @@ def _priority(
         )
     ):
         score += 35
+    # Northstar cwd alone is weak signal (flooded with PR-review subagents).
+    # Only boost when title/blob carries a mission cue, not every path hit.
+    if "northstar" in hay and any(
+        k in hay for k in ("iran", "ceo news", "12th", "ledger", "daily")
+    ):
+        score += 20
     if status == "stale" and age_hours > 72:
         score += 10
     if status == "stale" and age_hours > 168:
@@ -236,8 +258,30 @@ def _priority(
     if title and not _is_noise_prompt(title) and len(title) > 12:
         score += 8
     if title and _is_noise_prompt(title):
-        score -= 15
+        score -= 40  # bury PR-review / land / npm noise under real missions
+    # Subagent / SKEPTIC noise must not outrank parent missions (AIC-283)
+    if any(k in hay for k in ("skeptic", "memory-consolidation", "subagent")):
+        score -= 30
     return score
+
+
+# Live-id process scans are expensive (ps over a busy laptop can hit the full
+# subprocess timeout and wedge every /api/chats call — EID-1100 / EID-1109).
+_LIVE_IDS_CACHE: dict[str, tuple[float, set[str]]] = {}
+_LIVE_IDS_TTL_SECS = 8.0
+
+
+def _cached_live_ids(key: str, builder) -> set[str]:
+    now = time.time()
+    hit = _LIVE_IDS_CACHE.get(key)
+    if hit is not None and (now - hit[0]) < _LIVE_IDS_TTL_SECS:
+        return hit[1]
+    try:
+        val = builder()
+    except Exception:
+        val = set()
+    _LIVE_IDS_CACHE[key] = (now, val)
+    return val
 
 
 def _pid_alive(pid: int) -> bool:
@@ -252,23 +296,27 @@ def _pid_alive(pid: int) -> bool:
 
 def _grok_live_ids() -> set[str]:
     """Session ids with a live Grok process (from active_sessions.json)."""
-    path = Path.home() / ".grok" / "active_sessions.json"
-    live: set[str] = set()
-    if not path.exists():
+
+    def _build() -> set[str]:
+        path = Path.home() / ".grok" / "active_sessions.json"
+        live: set[str] = set()
+        if not path.exists():
+            return live
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return live
+        rows = data if isinstance(data, list) else data.get("sessions") or []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            sid = row.get("session_id") or row.get("id")
+            pid = row.get("pid")
+            if sid and isinstance(pid, int) and _pid_alive(pid):
+                live.add(str(sid))
         return live
-    try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return live
-    rows = data if isinstance(data, list) else data.get("sessions") or []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        sid = row.get("session_id") or row.get("id")
-        pid = row.get("pid")
-        if sid and isinstance(pid, int) and _pid_alive(pid):
-            live.add(str(sid))
-    return live
+
+    return _cached_live_ids("grok", _build)
 
 
 def _claude_live_ids() -> set[str]:
@@ -276,48 +324,70 @@ def _claude_live_ids() -> set[str]:
 
     Ignores Claude Desktop (Electron), helpers, and remote bridges — those
     otherwise false-positive "already_live" and block RESUME IN FLEET.
-    """
-    live: set[str] = set()
-    try:
-        import subprocess
 
-        out = subprocess.run(
-            ["ps", "-axo", "pid=,command="],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        ).stdout
-    except Exception:
+    Cached briefly: a full ``ps`` on a busy laptop can take many seconds and
+    was wedging every CHATS API call (EID-1100).
+    """
+
+    def _build() -> set[str]:
+        live: set[str] = set()
+        try:
+            import subprocess
+
+            # Prefer pgrep (narrow) over full-table ps; short timeout — empty is OK.
+            out = ""
+            try:
+                proc = subprocess.run(
+                    ["pgrep", "-af", "claude"],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.5,
+                )
+                out = proc.stdout or ""
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                try:
+                    proc = subprocess.run(
+                        ["ps", "-axo", "pid=,command="],
+                        capture_output=True,
+                        text=True,
+                        timeout=2.0,
+                    )
+                    out = proc.stdout or ""
+                except Exception:
+                    return live
+        except Exception:
+            return live
+        uuid_re = re.compile(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            re.I,
+        )
+        # CLI: …/claude --resume <uuid>  or  claude <args with uuid>
+        # Not: Claude.app, Helper, remote/srv, chrome_crashpad, etc.
+        skip_frags = (
+            "claude.app/",
+            "claude helper",
+            "claude/remote/",
+            "crashpad",
+            "electron",
+            "gpu-process",
+            "type=renderer",
+        )
+        for line in out.splitlines():
+            low = line.lower()
+            if "claude" not in low:
+                continue
+            if any(s in low for s in skip_frags):
+                continue
+            # Prefer lines that look like the CLI binary (path or bare name + resume)
+            if not re.search(r"(?:^|\s)(?:\S*/)?claude(?:\s|$)", line, re.I):
+                continue
+            if "claude.app" in low:
+                continue
+            for m in uuid_re.findall(line):
+                live.add(m.lower())
         return live
-    uuid_re = re.compile(
-        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-        re.I,
-    )
-    # CLI: …/claude --resume <uuid>  or  claude <args with uuid>
-    # Not: Claude.app, Helper, remote/srv, chrome_crashpad, etc.
-    skip_frags = (
-        "claude.app/",
-        "claude helper",
-        "claude/remote/",
-        "crashpad",
-        "electron",
-        "gpu-process",
-        "type=renderer",
-    )
-    for line in out.splitlines():
-        low = line.lower()
-        if "claude" not in low:
-            continue
-        if any(s in low for s in skip_frags):
-            continue
-        # Prefer lines that look like the CLI binary (path or bare name + resume)
-        if not re.search(r"(?:^|\s)(?:\S*/)?claude(?:\s|$)", line, re.I):
-            continue
-        if "claude.app" in low:
-            continue
-        for m in uuid_re.findall(line):
-            live.add(m.lower())
-    return live
+
+    return _cached_live_ids("claude", _build)
 
 
 def _match_path(path: str, pattern: re.Pattern[str] | None) -> bool:
@@ -437,7 +507,12 @@ def scan_grok(
                     model=idx.model,
                     branch=idx.branch,
                     priority=_priority(
-                        status, gm, age_h, title, cwd=resume_cwd, blob=title
+                        status,
+                        gm,
+                        age_h,
+                        title,
+                        cwd=resume_cwd,
+                        blob=blob,
                     ),
                     greenmark=gm,
                     session_kind=idx.session_kind,

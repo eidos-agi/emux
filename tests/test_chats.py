@@ -311,3 +311,37 @@ def test_normalize_chat_cwd_and_resume_fleet(monkeypatch):
     )
     assert live["ok"] is False
     assert live["error"] == "already_live"
+
+
+def test_claude_project_cwd_preserves_hyphenated_dirs():
+    """AIC-283: repos-aic / aic-arp-cockpit must not split on hyphens."""
+    decoded = chats._claude_project_cwd(
+        "-Users-x-repos-aic-aic-arp-cockpit"
+    )
+    assert decoded == "/Users/x/repos-aic/aic-arp-cockpit"
+    decoded2 = chats._claude_project_cwd(
+        "-Users-x-repos-aic-aic-software-engineer-cockpit"
+    )
+    assert decoded2 == "/Users/x/repos-aic/aic-software-engineer-cockpit"
+
+
+def test_priority_boosts_payapp_and_demotes_pr_noise():
+    """AIC-283: real-estate mission outranks security-review / land noise."""
+    pay = chats._priority(
+        "stale",
+        False,
+        48.0,
+        "Real Estate Progress Management with Emails",
+        cwd="/Users/x/repos-aic/aic-software-engineer-cockpit",
+        blob="payapp lien waiver g702",
+    )
+    noise = chats._priority(
+        "stale",
+        False,
+        48.0,
+        "Review this change for security vulnerabilities. Changed files…",
+        cwd="/Users/x/repos-aic/northstar",
+        blob="northstar",
+    )
+    assert pay > noise
+    assert pay >= 70

@@ -351,12 +351,14 @@ def enrich_session_dir(
                 snip = last_agent_snippet_from_updates(d)
                 if snip:
                     summary = snip
-        # Prefer last human prompt for control-room triage (over agent tail / title echo)
+        # Mission identity: keep generated_title / session_summary when present
+        # (AIC-283). last_user is for snippet + fallback title only — never clobber
+        # a real mission title with a typo'd one-liner ("do you udnrestand tha…").
         if last_user:
-            gen_title = str(data.get("generated_title") or "").strip()
-            if not title or title == gen_title or title == summary:
+            if not title:
                 title = last_user[:100]
-            summary = last_user[:240]
+            if not summary:
+                summary = last_user[:240]
 
     if not title and last_user:
         title = last_user[:100]

@@ -14,6 +14,7 @@ Default path: ~/.config/emux/chats.db
   * gmux / EMUX_SKIN=gmux → ~/.config/greenmux/chats.db
   * reevux / EMUX_SKIN=reevux → ~/.config/reevux/chats.db
   * amux / EMUX_SKIN=amux → ~/.config/amux/chats.db
+  * directrux / EMUX_SKIN=directrux → ~/.config/directrux/chats.db
 """
 
 from __future__ import annotations
@@ -27,7 +28,10 @@ from typing import Any, Iterable
 
 from .chats import (
     ChatHit,
+    _AIC_RE,
+    _DIRECTRUX_RE,
     _GREENMARK_RE,
+    _PERSONAL_RE,
     _claude_live_ids,
     _grok_live_ids,
     _priority,
@@ -48,6 +52,8 @@ def _config_root_for_skin(skin_id: str) -> Path:
         return Path.home() / ".config" / "reevux"
     if sid in ("amux", "aic", "aic-holdings", "holdings"):
         return Path.home() / ".config" / "amux"
+    if sid in ("directrux", "director", "meta"):
+        return Path.home() / ".config" / "directrux"
     return Path.home() / ".config" / "emux"
 
 
@@ -66,6 +72,9 @@ def default_chats_db_path() -> str:
         "aic",
         "aic-holdings",
         "holdings",
+        "directrux",
+        "director",
+        "meta",
     ):
         root = _config_root_for_skin(skin)
     else:
@@ -82,6 +91,8 @@ def default_chats_db_path() -> str:
             root = Path.home() / ".config" / "reevux"
         elif prod in ("amux", "aic", "aic-holdings", "holdings"):
             root = Path.home() / ".config" / "amux"
+        elif prod in ("directrux", "director", "meta"):
+            root = Path.home() / ".config" / "directrux"
         else:
             try:
                 from . import skin as _skin
@@ -408,21 +419,58 @@ class ChatStore:
         if want and "abandoned" in want:
             want = (want - {"abandoned"}) | {"stale"}
 
+        # match filter — same named lanes as chats._match_pattern
+        mkey = (match or "").strip().lower()
+        if mkey in ("", "all"):
+            pat = None
+        elif mkey in ("greenmark", "gm", "gmw"):
+            pat = _GREENMARK_RE
+        elif mkey in ("personal", "reeves", "reevux", "rvs"):
+            pat = _PERSONAL_RE
+        elif mkey in ("aic", "amux", "holdings"):
+            pat = _AIC_RE
+        elif mkey in ("directrux", "director", "meta"):
+            pat = _DIRECTRUX_RE
+        else:
+            pat = re.compile(match, re.I)
+
+        # SQL prefilter for named lanes so we do not walk the entire laptop
+        # index on every room load (EID-1100). Regex still applied below.
         sql = "SELECT * FROM chats WHERE host=? AND deleted_at IS NULL"
         args: list[Any] = [host]
         if not include_off_disk:
             sql += " AND on_disk=1"
+        if mkey in ("aic", "amux", "holdings"):
+            sql += (
+                " AND ("
+                "cwd LIKE '%repos-aic%' OR path LIKE '%repos-aic%' OR path LIKE '%aic-%' "
+                "OR cwd LIKE '%aic-%' OR cwd LIKE '%northstar%' OR cwd LIKE '%ARP%' "
+                "OR title LIKE '%payapp%' OR title LIKE '%Real Estate%' "
+                "OR title LIKE '%ARP%' OR title LIKE '%amux%' OR title LIKE '%Iran%' "
+                "OR summary LIKE '%payapp%' OR summary LIKE '%repos-aic%' "
+                "OR summary LIKE '%Real Estate%' OR summary LIKE '%aic-arp%'"
+                ")"
+            )
+        elif mkey in ("greenmark", "gm", "gmw"):
+            sql += (
+                " AND (greenmark=1 OR cwd LIKE '%greenmark%' OR cwd LIKE '%repos-greenmark%' "
+                "OR path LIKE '%greenmark%' OR title LIKE '%GMW%' OR title LIKE '%greenmux%')"
+            )
+        elif mkey in ("personal", "reeves", "reevux", "rvs"):
+            sql += (
+                " AND (cwd LIKE '%repos-personal%' OR cwd LIKE '%reeves%' "
+                "OR path LIKE '%repos-personal%' OR path LIKE '%reeves%')"
+            )
+        elif mkey in ("directrux", "director", "meta"):
+            sql += (
+                " AND (cwd LIKE '%directrux%' OR path LIKE '%directrux%' "
+                "OR title LIKE '%directrux%' OR summary LIKE '%directrux%')"
+            )
+        # Prefer high-priority rows first so early stop can work after limit.
+        sql += " ORDER BY priority DESC, mtime DESC"
         rows = self.db.execute(sql, args).fetchall()
 
-        # match filter
-        if match is None or match == "" or match == "all":
-            pat = None
-        elif match in ("greenmark", "gm", "gmw"):
-            pat = _GREENMARK_RE
-        else:
-            pat = re.compile(match, re.I)
-
-        # one process table walk per query — not per row
+        # one process table walk per query — not per row (cached; must not wedge HTTP)
         claude_live = _claude_live_ids() if "claude" in tools_set else set()
         grok_live = _grok_live_ids() if "grok" in tools_set else set()
 
@@ -435,7 +483,7 @@ class ChatStore:
             if row["tool"] not in tools_set:
                 continue
             blob = f"{row['cwd']} {row['title']} {row['summary']} {row['path']}"
-            if match in ("greenmark", "gm", "gmw"):
+            if mkey in ("greenmark", "gm", "gmw"):
                 if not row["greenmark"] and not _GREENMARK_RE.search(blob):
                     continue
             elif pat is not None and not pat.search(blob):
@@ -577,6 +625,36 @@ def open_store(path: str | None = None) -> ChatStore:
     return ChatStore(path=path)
 
 
+_BG_SYNC_LOCK = __import__("threading").Lock()
+_BG_SYNC_RUNNING = False
+
+
+def _background_sync_from_disk(
+    *,
+    store_path: str | None,
+    tools: Iterable[str],
+    recent_hours: float,
+    limit: int,
+) -> None:
+    """Disk reindex off the HTTP request path (EID-1109)."""
+    global _BG_SYNC_RUNNING
+    try:
+        store = ChatStore(path=store_path)
+        try:
+            store.sync_from_disk(
+                tools=tools,
+                recent_hours=recent_hours,
+                limit=limit,
+            )
+        finally:
+            store.close()
+    except Exception:
+        pass
+    finally:
+        with _BG_SYNC_LOCK:
+            _BG_SYNC_RUNNING = False
+
+
 def list_or_sync(
     *,
     refresh: bool = False,
@@ -590,18 +668,51 @@ def list_or_sync(
     recent_hours: float = 24.0,
     store_path: str | None = None,
 ) -> dict[str, Any]:
-    """Room/API entry: serve from durable index; rescan disk only when stale/forced."""
+    """Room/API entry: serve from durable index; rescan disk only when stale/forced.
+
+    When the store already has rows, a stale reindex runs in a **background
+    thread** so /api/chats never blocks the web accept loop for a full disk scan
+    (EID-1109). Empty store or refresh=1 still syncs inline (must return data).
+    """
+    global _BG_SYNC_RUNNING
     store = ChatStore(path=store_path)
     try:
         did_sync = False
         sync_info: dict[str, Any] = {}
-        if refresh or not store.is_fresh(max_age_secs):
-            sync_info = store.sync_from_disk(
-                tools=tools,
-                recent_hours=recent_hours,
-                limit=max(limit, 5000),
-            )
-            did_sync = True
+        sync_deferred = False
+        needs = refresh or not store.is_fresh(max_age_secs)
+        rows = 0
+        try:
+            rows = int(store.row_count() or 0)
+        except Exception:
+            rows = 0
+        if needs:
+            # Prefer not to block HTTP: only inline-scan when forced or empty.
+            if refresh or rows == 0:
+                sync_info = store.sync_from_disk(
+                    tools=tools,
+                    recent_hours=recent_hours,
+                    limit=max(limit, 5000),
+                )
+                did_sync = True
+            else:
+                with _BG_SYNC_LOCK:
+                    if not _BG_SYNC_RUNNING:
+                        _BG_SYNC_RUNNING = True
+                        import threading
+
+                        threading.Thread(
+                            target=_background_sync_from_disk,
+                            kwargs={
+                                "store_path": store_path or str(store.path),
+                                "tools": list(tools),
+                                "recent_hours": recent_hours,
+                                "limit": max(limit, 5000),
+                            },
+                            name="emux-chats-sync",
+                            daemon=True,
+                        ).start()
+                        sync_deferred = True
         bundle = store.query(
             tools=tools,
             match=match,
@@ -613,6 +724,7 @@ def list_or_sync(
         )
         bundle["did_sync"] = did_sync
         bundle["sync"] = sync_info if did_sync else None
+        bundle["sync_deferred"] = sync_deferred
         # query_ms is the store read; index_ms is disk ingest when we re-synced
         bundle["query_ms"] = bundle.get("scan_ms") or 0
         if did_sync and sync_info:

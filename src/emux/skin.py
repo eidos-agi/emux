@@ -101,6 +101,25 @@ _LOGO_AMUX = (
     "</svg>"
 )
 
+# Directrux — Longhorns-themed abstract mark (not the official UT logo).
+# Wide horns + head silhouette, fill=currentColor so burnt orange paints it.
+_LOGO_DIRECTRUX = (
+    '<svg class="skin-logo" viewBox="0 0 64 64" width="36" height="36" '
+    'aria-hidden="true" xmlns="http://www.w3.org/2000/svg">'
+    '<rect x="4" y="4" width="56" height="56" rx="12" fill="currentColor" opacity=".12"/>'
+    # left horn
+    '<path fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" '
+    'd="M28 30 C18 28 10 22 8 14 C14 16 20 20 26 26"/>'
+    # right horn
+    '<path fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" '
+    'd="M36 30 C46 28 54 22 56 14 C50 16 44 20 38 26"/>'
+    # head
+    '<ellipse cx="32" cy="38" rx="11" ry="12" fill="currentColor"/>'
+    # snout notch (reads as longhorn face, not a blob)
+    '<ellipse cx="32" cy="44" rx="5" ry="4" fill="currentColor" opacity=".35"/>'
+    "</svg>"
+)
+
 
 @dataclass(frozen=True)
 class Skin:
@@ -140,6 +159,8 @@ class Skin:
             bg = "0e1218"
         elif self.id == "amux":
             bg = "151c36"  # AIC Holdings navy (brand plate)
+        elif self.id == "directrux":
+            bg = "bf5700"  # UT burnt orange (Longhorns)
         else:
             bg = "0f1a14"
         svg = (
@@ -321,6 +342,40 @@ _REEVUX_DARK = Palette(
     user="#7aa2ff",
 )
 
+# Directrux meta — Longhorns theme (UT burnt orange #BF5700 + white).
+# Deliberately unlike emux amber, gmux green, amux navy, reevux slate.
+# Not official UT marks — color + abstract horn chrome only.
+_DIRECTRUX_LIGHT = Palette(
+    bg="#ffffff",           # Longhorn white field
+    bg_raise="#f7f2ec",
+    bg_card="#ffffff",
+    accent="#BF5700",       # official UT burnt orange
+    accent_dim="#9c4600",
+    accent_faint="#f3d9c4",
+    text="#333f48",         # UT secondary charcoal-ish
+    text_dim="#5f6a72",
+    live="#3d7a5a",
+    stale="#a33b2a",
+    line="#e6d5c6",
+    on_accent="#ffffff",
+    user="#BF5700",
+)
+_DIRECTRUX_DARK = Palette(
+    bg="#1a120c",           # warm black / stadium night
+    bg_raise="#241811",
+    bg_card="#2e1e14",
+    accent="#BF5700",       # burnt orange holds on dark
+    accent_dim="#d66a12",   # slightly brighter hover/secondary
+    accent_faint="#3d2614",
+    text="#ffffff",         # Longhorn white type
+    text_dim="#c4b0a0",
+    live="#5fbf8f",
+    stale="#e07050",
+    line="#3d2a1c",
+    on_accent="#ffffff",
+    user="#e8a060",         # warm read on dark for user bubbles
+)
+
 _SKINS: dict[str, Skin] = {
     "emux": Skin(
         id="emux",
@@ -382,6 +437,21 @@ _SKINS: dict[str, Skin] = {
         logo_svg=_LOGO_AMUX,
         default_theme="dark",  # brand plate is navy
     ),
+    "directrux": Skin(
+        id="directrux",
+        brand="DIRECTRUX",
+        product="directrux",
+        tagline="manager · loading allowlist…",
+        status_title="directrux status",
+        room_title="directrux — manager",
+        docs_title="directrux documentation",
+        engine_label="emux",
+        footer_note="powered by emux · manager (product.json allowlist)",
+        light=_DIRECTRUX_LIGHT,
+        dark=_DIRECTRUX_DARK,
+        logo_svg=_LOGO_DIRECTRUX,
+        default_theme="dark",
+    ),
 }
 
 
@@ -399,6 +469,8 @@ def get_skin(name: str | None) -> Skin:
         key = "reevux"
     if key in ("aic", "aic-holdings", "holdings"):
         key = "amux"
+    if key in ("director", "meta", "directrux-meta"):
+        key = "directrux"
     if key in _SKINS:
         return _SKINS[key]
     print(f"emux skin: unknown skin {name!r} — using emux", file=sys.stderr)

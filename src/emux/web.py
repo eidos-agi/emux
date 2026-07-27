@@ -47,7 +47,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import __version__
 from . import help as _help
@@ -78,6 +78,51 @@ _SPINNER_RE = re.compile(
 _ACTIVITY: dict[str, dict[str, Any]] = {}   # session -> {norm, changed, last_change, samples}
 _CACHE: dict[str, dict[str, Any]] = {}      # session -> {content, ts, lines}
 _LOCK = threading.Lock()
+# Expensive GET responses: short TTL + single-flight so concurrent tabs/stress
+# do not stampede disk/tmux/remote probes (EID-1100 / 1107 / 1108 / 1109).
+_EXPENSIVE_CACHE: dict[str, tuple[float, Any]] = {}
+_EXPENSIVE_INFLIGHT: dict[str, threading.Event] = {}
+_EXPENSIVE_LOCK = threading.Lock()
+_EXPENSIVE_TTL = {
+    "ai_md": 8.0,
+    "ai_html": 8.0,
+    "managed": 5.0,
+    "chats": 4.0,
+    "sessions": 1.5,
+}
+
+
+def _expensive_get(key: str, ttl: float, factory):
+    """Return cached value or run factory once; concurrent waiters share the result."""
+    now = time.time()
+    with _EXPENSIVE_LOCK:
+        hit = _EXPENSIVE_CACHE.get(key)
+        if hit and (now - hit[0]) < ttl:
+            return hit[1]
+        ev = _EXPENSIVE_INFLIGHT.get(key)
+        owner = False
+        if ev is None:
+            ev = threading.Event()
+            _EXPENSIVE_INFLIGHT[key] = ev
+            owner = True
+    if not owner:
+        # Wait briefly for owner; on timeout compute ourselves (avoid deadlock).
+        if not ev.wait(timeout=max(ttl, 6.0)):
+            return factory()
+        with _EXPENSIVE_LOCK:
+            hit = _EXPENSIVE_CACHE.get(key)
+            if hit:
+                return hit[1]
+        return factory()
+    try:
+        value = factory()
+        with _EXPENSIVE_LOCK:
+            _EXPENSIVE_CACHE[key] = (time.time(), value)
+        return value
+    finally:
+        with _EXPENSIVE_LOCK:
+            _EXPENSIVE_INFLIGHT.pop(key, None)
+        ev.set()
 # The Gist, cached server-side by content hash so it's not recomputed while the
 # pane is unchanged; warmed proactively the moment a session stops (see
 # _capture_and_observe) so its result is ready before you open it.
@@ -2137,9 +2182,18 @@ def _probe_managed_planes(cfg: Any) -> dict[str, Any]:
             out["error"] = "no_healthz_url"
             return out
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": f"emux-manager/{__version__}"})
-            with urllib.request.urlopen(req, timeout=4.0) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
+            # No redirect-follow: Authentik/login HTML is "degraded ok", not a hang.
+            # Hard socket timeout so a bad peer cannot pin the single-thread web handler.
+            class _NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+                    return None
+
+            opener = urllib.request.build_opener(_NoRedirect)
+            req = urllib.request.Request(
+                url, headers={"User-Agent": f"emux-manager/{__version__}"}
+            )
+            with opener.open(req, timeout=3.0) as resp:
+                body = resp.read(65536).decode("utf-8", errors="replace")
                 code = getattr(resp, "status", None) or resp.getcode()
                 out["http_status"] = code
                 try:
@@ -2157,6 +2211,16 @@ def _probe_managed_planes(cfg: Any) -> dict[str, Any]:
                     out["error"] = f"non_json_health ({code})"
                 else:
                     out["error"] = f"http_{code}"
+        except urllib.error.HTTPError as exc:
+            # Redirects surface as HTTPError when redirect handler declines.
+            code = int(getattr(exc, "code", 0) or 0)
+            out["http_status"] = code or None
+            if 300 <= code < 400 or (code and code < 500):
+                out["ok"] = True
+                out["degraded"] = True
+                out["error"] = f"non_json_health ({code})"
+            else:
+                out["error"] = f"http_{code or 'err'}"
         except Exception as exc:  # noqa: BLE001
             out["error"] = str(exc)[:200]
         return out
@@ -2164,8 +2228,23 @@ def _probe_managed_planes(cfg: Any) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=min(6, len(planes))) as pool:
         futs = {pool.submit(one, p): p for p in planes}
-        for fut in as_completed(futs):
-            results.append(fut.result())
+        try:
+            for fut in as_completed(futs, timeout=6.0):
+                try:
+                    results.append(fut.result(timeout=0.1))
+                except Exception as exc:  # noqa: BLE001
+                    results.append(
+                        {"id": "?", "ok": False, "degraded": True, "error": str(exc)[:200]}
+                    )
+        except TimeoutError:
+            pass  # unfinished planes get stubs below
+        # Any plane that never completed → degraded stub (do not hang the web handler)
+        done_ids = {r.get("id") for r in results}
+        for p in planes:
+            pid = getattr(p, "id", None) or (p.get("id") if isinstance(p, dict) else None)
+            if pid not in done_ids:
+                row = p.as_dict() if hasattr(p, "as_dict") else dict(p)
+                results.append({**row, "ok": False, "degraded": True, "error": "probe_timeout"})
     order = {p.id: i for i, p in enumerate(planes)}
     results.sort(key=lambda r: order.get(r.get("id"), 99))
     workers_ok = all(r.get("ok") for r in results)
@@ -5954,11 +6033,15 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
 
     def _json(self, payload: dict[str, Any], status: int = 200) -> None:
         body = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # Client gave up (stress tests, tab close) — not a server fault.
+            return
 
     def _host_allowed(self) -> bool:
         """Defeat DNS-rebinding on loopback; allow the configured public origin.
@@ -6012,22 +6095,36 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
 
     def _send_html(self, html: str, status: int = 200) -> None:
         body = html.encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
 
     def _send_text(self, text: str, content_type: str = "text/markdown; charset=utf-8",
                    status: int = 200) -> None:
         body = text.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
+
+    def handle_error(self, request, client_address) -> None:  # noqa: ANN001
+        """Swallow client disconnect noise; log real handler errors."""
+        import traceback
+        err = traceback.format_exc()
+        if "BrokenPipeError" in err or "ConnectionResetError" in err:
+            return
+        super().handle_error(request, client_address)
 
     def _control_room_html(self) -> str:
         html = _help.control_room_page(PAGE, __version__).replace("__OS__", _host_os())
@@ -6116,17 +6213,30 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             self._send_html(health_page_html(__version__, self.public_path or ""))
             return
         if url.path in ("/ai", "/ai/", "/ai.md", "/diagnosis", "/diagnosis/"):
-            md = ai_diagnosis_markdown(__version__, self.public_path or "")
-            # /ai.html or browser navigation → readable wrapper; raw path → markdown
             qs = parse_qs(url.query or "")
             want_html = (qs.get("view") or [""])[0].lower() in ("html", "1", "yes")
             if want_html or url.path.rstrip("/").endswith(".html"):
-                self._send_html(ai_diagnosis_html(__version__, self.public_path or ""))
+                html = _expensive_get(
+                    f"ai_html:{self.public_path or ''}",
+                    _EXPENSIVE_TTL["ai_html"],
+                    lambda: ai_diagnosis_html(__version__, self.public_path or ""),
+                )
+                self._send_html(html)
             else:
+                md = _expensive_get(
+                    f"ai_md:{self.public_path or ''}",
+                    _EXPENSIVE_TTL["ai_md"],
+                    lambda: ai_diagnosis_markdown(__version__, self.public_path or ""),
+                )
                 self._send_text(md)
             return
         if url.path in ("/ai.html", "/ai.html/"):
-            self._send_html(ai_diagnosis_html(__version__, self.public_path or ""))
+            html = _expensive_get(
+                f"ai_html:{self.public_path or ''}",
+                _EXPENSIVE_TTL["ai_html"],
+                lambda: ai_diagnosis_html(__version__, self.public_path or ""),
+            )
+            self._send_html(html)
             return
         # Simple status first: under a public path mount, "/" is the testable
         # read-only table; full SPA lives at /room. Local loopback (no path)
@@ -6210,7 +6320,13 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                 self._controller_error(exc)
             return
         if url.path == "/api/sessions":
-            self._json(sessions_payload())
+            self._json(
+                _expensive_get(
+                    "sessions",
+                    _EXPENSIVE_TTL["sessions"],
+                    sessions_payload,
+                )
+            )
             return
         if url.path == "/api/help":
             query = (parse_qs(url.query).get("q") or [""])[0]
@@ -6306,7 +6422,18 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/chats":
             # Claude Code + Grok Build transcripts on disk (this host). Not tmux.
-            self._json(chats_payload(parse_qs(url.query)))
+            # Single-flight cache so concurrent Chats tab polls share one scan (EID-1109).
+            qs = parse_qs(url.query)
+            cache_key = "chats:" + urlencode(
+                {k: (v[0] if v else "") for k, v in sorted(qs.items())}
+            )
+            self._json(
+                _expensive_get(
+                    cache_key,
+                    _EXPENSIVE_TTL["chats"],
+                    lambda: chats_payload(qs),
+                )
+            )
             return
         if url.path == "/api/chats/peek":
             self._json(chats_peek_payload(parse_qs(url.query)))
@@ -6340,7 +6467,14 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                         400,
                     )
                     return
-                self._json({"ok": True, **_probe_managed_planes(cfg)})
+                # Cache probe: concurrent room tabs + stress must not re-probe
+                # every external healthz in parallel (EID-1107).
+                probe = _expensive_get(
+                    f"managed:{cfg.product}:{cfg.path}",
+                    _EXPENSIVE_TTL["managed"],
+                    lambda: _probe_managed_planes(cfg),
+                )
+                self._json({"ok": True, **probe})
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)}, 500)
             return
@@ -7877,8 +8011,28 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
     EmuxWebHandler.public_origin = public_origin
     EmuxWebHandler.public_path = normalized_path
     EmuxWebHandler.remote_controller_api = _remote_controller_from_env()
+
+    class EmuxThreadingHTTPServer(ThreadingHTTPServer):
+        """Threading HTTP with a real listen backlog (EID-1100/1107).
+
+        CPython's default request_queue_size is 5 — concurrent stress (16 clients)
+        overflows the accept queue and surfaces as ConnectionReset / refused.
+        """
+
+        allow_reuse_address = True
+        daemon_threads = True
+        request_queue_size = int(os.environ.get("EMUX_HTTP_BACKLOG", "256"))
+
+        def handle_error(self, request, client_address) -> None:  # noqa: ANN001
+            import traceback
+
+            err = traceback.format_exc()
+            if "BrokenPipeError" in err or "ConnectionResetError" in err:
+                return
+            super().handle_error(request, client_address)
+
     try:
-        server = ThreadingHTTPServer((host, port), EmuxWebHandler)
+        server = EmuxThreadingHTTPServer((host, port), EmuxWebHandler)
     except OSError as e:
         if "address already in use" in str(e).lower():
             print(f"emux web: port {port} is already in use — try `emux web --port {port + 1}`.", file=sys.stderr)
