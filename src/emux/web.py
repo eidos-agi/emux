@@ -2947,9 +2947,12 @@ function shown(){
   return grid.filter(s=>baseMatch(s)||hot.has(comp[s.name]));
 }
 
-// ---- SKINS: the whole UI recolors to what you're working on ----
-// default = Eidos light; the Eidos pill = Eidos dark; the Greenmark pill = the
-// Greenmark Waste forest-green brand. Each theme just remaps the 12 CSS vars.
+// ---- Company themes (runtime recolor). Product skin (__SKIN_ID__) sets the
+// DEFAULT when no company filter is active — gmux must NOT fall back to Eidos
+// amber/brown, which is what made go.greenmarkwaste.com/gmux/room look brown.
+const SKIN_ID="__SKIN_ID__";
+const SKIN_DEFAULT_THEME=SKIN_ID==="gmux"?"greenmark":"eidos-light";
+const THEME_KEY="emux_theme_"+SKIN_ID;
 const THEMES={
   "eidos-light":{"--bg":"#f0ebe4","--bg-raise":"#e9e3db","--bg-card":"#e4ded6",
     "--amber":"#8e6129","--amber-dim":"#a9853f","--amber-faint":"#d8cdba",
@@ -2959,29 +2962,33 @@ const THEMES={
     "--amber":"#c4935a","--amber-dim":"#9a6d35","--amber-faint":"#3a2f22",
     "--text":"#dcd5cb","--text-dim":"#8b8179","--live":"#7a8c72","--stale":"#c4694f",
     "--line":"#332a20","--user":"#d4a870","--on-accent":"#1a1207"},
-  // Greenmark Waste — its actual brand: forest-green ink (#2d4a3e) on warm cream,
-  // gold as the secondary pop. Light, per the brand's own palette.json.
-  "greenmark":{"--bg":"#f5f0e8","--bg-raise":"#efe8da","--bg-card":"#e8e0d0",
-    "--amber":"#2d4a3e","--amber-dim":"#3d6b56","--amber-faint":"#d7e0d3",
-    "--text":"#1f2937","--text-dim":"#6b7280","--live":"#3d6b56","--stale":"#b3261e",
-    "--line":"#d3ccbb","--user":"#2d4a3e","--on-accent":"#f5f0e8"},
-  // Reeves — the PERSONAL context. A cool slate/navy skin, deliberately unlike the
-  // Eidos amber and Greenmark green, so switching to Reeves signals "personal mode".
+  // Greenmark Waste — cool forest green on cool cream (not warm brown paper).
+  "greenmark":{"--bg":"#f4f7f4","--bg-raise":"#e8f0ea","--bg-card":"#ffffff",
+    "--amber":"#1b7a4e","--amber-dim":"#2d6a4f","--amber-faint":"#d4edda",
+    "--text":"#14261c","--text-dim":"#4d6356","--live":"#1a7a45","--stale":"#a67c2d",
+    "--line":"#c5d6cb","--user":"#203C31","--on-accent":"#f4f7f4"},
+  // Reeves — personal slate/navy, distinct from Eidos amber and Greenmark green.
   "reeves":{"--bg":"#eef1f6","--bg-raise":"#e6ebf2","--bg-card":"#dee4ee",
     "--amber":"#3b5ba5","--amber-dim":"#5a76bd","--amber-faint":"#ccd6e8",
     "--text":"#182030","--text-dim":"#5c6678","--live":"#3d7a5a","--stale":"#b3503a",
     "--line":"#c5cddd","--user":"#3b5ba5","--on-accent":"#f4f7fc"},
 };
-// company key → skin. Anything unmapped falls back to the default light Eidos.
-const CO_THEME={"":"eidos-light","eidos":"eidos-dark","greenmark":"greenmark","reeves":"reeves"};
+// company key → skin. Empty filter uses product-skin default (gmux → greenmark).
+const CO_THEME={"":SKIN_DEFAULT_THEME,"eidos":"eidos-dark","greenmark":"greenmark","reeves":"reeves"};
 function applyTheme(name){
-  const t=THEMES[name]||THEMES["eidos-light"];
+  const t=THEMES[name]||THEMES[SKIN_DEFAULT_THEME]||THEMES["eidos-light"];
   const r=document.documentElement;
   for(const k in t) r.style.setProperty(k,t[k]);
   r.dataset.theme=name;
-  localStorage.setItem("emux_theme",name);
+  try{localStorage.setItem(THEME_KEY,name);}catch(e){}
 }
-function skinForCompany(){applyTheme(CO_THEME[activeCompany]||"eidos-light");}
+function skinForCompany(){applyTheme(CO_THEME[activeCompany]||SKIN_DEFAULT_THEME);}
+// Apply product default immediately (before first paint of company filter).
+(function(){
+  let start=SKIN_DEFAULT_THEME;
+  try{const s=localStorage.getItem(THEME_KEY); if(s&&THEMES[s]) start=s;}catch(e){}
+  applyTheme(start);
+})();
 
 function applyFilters(){localStorage.setItem("emux_company",activeCompany);
   skinForCompany();renderTagbar();renderSidebar();if(mode!=="chat")render();syncURL();}
