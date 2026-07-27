@@ -439,6 +439,31 @@ def cmd_ls() -> int:
     return 0
 
 
+def cmd_chats(args: argparse.Namespace) -> int:
+    """Scan Claude Code + Grok Build transcript stores for nonoperative work."""
+    from . import chats as chat_find
+
+    statuses = list(args.statuses or [])
+    if args.abandoned_only:
+        statuses = ["stale"]
+    tools = args.tools or ["claude", "grok"]
+    hits = chat_find.find_chats(
+        tools=tools,
+        match=args.match,
+        recent_hours=args.recent_hours,
+        statuses=statuses or None,
+        limit=args.limit,
+    )
+    if args.json:
+        print(json.dumps([h.as_dict() for h in hits], indent=2))
+        return 0
+    print(chat_find.format_text(hits))
+    # non-zero when abandoned work exists — useful as a CI/cron gate
+    if any(h.status == "stale" for h in hits):
+        return 2
+    return 0
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     """Send a prompt to an AI running in a tmux session, print its reply.
 
@@ -1318,6 +1343,43 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub.add_parser("ls", help="print registered + live sessions (non-interactive)")
 
+    p_chats = sub.add_parser(
+        "chats",
+        help="find Claude Code / Grok Build chats on disk (stale/abandoned missions)",
+    )
+    p_chats.add_argument(
+        "--match",
+        default="greenmark",
+        help="path/title filter: greenmark (default), all, or a regex",
+    )
+    p_chats.add_argument(
+        "--tool",
+        action="append",
+        dest="tools",
+        choices=["claude", "grok"],
+        help="limit to a tool (repeatable); default both",
+    )
+    p_chats.add_argument(
+        "--status",
+        action="append",
+        dest="statuses",
+        choices=["live", "recent", "stale", "abandoned"],
+        help="filter status (repeatable); abandoned ≡ stale",
+    )
+    p_chats.add_argument(
+        "--recent-hours",
+        type=float,
+        default=24.0,
+        help="not-live sessions newer than this are 'recent' (default 24)",
+    )
+    p_chats.add_argument("--limit", type=int, default=40, help="max rows (default 40)")
+    p_chats.add_argument("--json", action="store_true", help="machine-readable list")
+    p_chats.add_argument(
+        "--abandoned-only",
+        action="store_true",
+        help="shortcut: only stale (not live, older than --recent-hours)",
+    )
+
     p_ask = sub.add_parser(
         "ask",
         help="send a prompt to an AI in a tmux session, wait for it to settle, print the reply",
@@ -1719,6 +1781,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_new_mission()
     if args.cmd == "ls":
         return cmd_ls()
+    if args.cmd == "chats":
+        return cmd_chats(args)
     if args.cmd == "ask":
         return cmd_ask(args)
     if args.cmd == "navigate":

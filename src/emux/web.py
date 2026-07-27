@@ -4926,6 +4926,34 @@ def ai_diagnosis_markdown(
     if ghosts:
         reasons.append(f"{len(ghosts)} stale registry row(s) kept (not reaped)")
 
+    # Claude Code + Grok Build chats on disk (dropped missions)
+    chat_section = ""
+    try:
+        from . import chats as chat_find
+
+        chat_hits = chat_find.find_chats(
+            match="greenmark" if sk.id == "gmux" else "all",
+            recent_hours=24.0,
+            statuses=["stale", "recent"],
+            limit=25,
+        )
+        stale_chats = [h for h in chat_hits if h.status == "stale"]
+        if stale_chats:
+            reasons.append(
+                f"{len(stale_chats)} stale agent chat(s) on disk (Claude/Grok) — "
+                "may be dropped missions; resume before starting new agents"
+            )
+            if verdict == "HEALTHY":
+                verdict = "DEGRADED"
+        if chat_hits:
+            chat_section = "\n" + chat_find.format_text(
+                chat_hits,
+                title="Abandoned / nonoperative agent chats (Claude + Grok)",
+            )
+            chat_section += "\nCLI: `emux chats --match greenmark --abandoned-only`\n"
+    except Exception as exc:  # noqa: BLE001
+        chat_section = f"\n## Abandoned agent chats\n\n_(scan failed: {exc})_\n"
+
     ssh_host = resolve_connect_ssh_host(public_path)
     lines: list[str] = [
         f"# {sk.product} system diagnosis",
@@ -5039,11 +5067,20 @@ def ai_diagnosis_markdown(
         "4. Unregistered LIVE rows are real processes — consider registering for governance.",
         "5. Connect commands are for a human laptop (ssh → tmux attach), not for inventing new sessions.",
         "6. Pane samples beat guessing — look for gates, errors, idle shells.",
+        "7. Stale Claude/Grok chats are often dropped missions — resume those before spawning new agents.",
         "",
         f"— end {sk.product} diagnosis —",
         "",
     ]
-    return "\n".join(lines)
+    body = "\n".join(lines)
+    if chat_section:
+        # insert chat section before "How an AI should use this"
+        marker = "## How an AI should use this"
+        if marker in body:
+            body = body.replace(marker, chat_section + "\n" + marker, 1)
+        else:
+            body = body + "\n" + chat_section
+    return body
 
 
 def ai_diagnosis_html(version: str, public_path: str = "") -> str:
