@@ -58,6 +58,11 @@ class ChatHit:
     branch: str | None = None
     priority: int = 0  # higher = more urgent to resume
     greenmark: bool = False
+    session_kind: str | None = None
+    agent_name: str | None = None
+    parent_session_id: str | None = None
+    src_summary_mtime: float = 0.0
+    src_updates_mtime: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -242,11 +247,22 @@ def scan_grok(
     match: re.Pattern[str] | None = None,
     recent_hours: float = 24.0,
     now: float | None = None,
+    include_subagents: bool | None = None,
 ) -> list[ChatHit]:
-    """Scan ~/.grok/sessions via grok_control enrichment when available."""
+    """Scan ~/.grok/sessions via grok_control enrichment when available.
+
+    Subagent sessions are skipped by default (fleet noise); set
+    include_subagents=True or EMUX_CHATS_INCLUDE_SUBAGENTS=1 to keep them.
+    """
     now = now if now is not None else time.time()
     live_ids = _grok_live_ids()
     hits: list[ChatHit] = []
+    if include_subagents is None:
+        include_subagents = (os.environ.get("EMUX_CHATS_INCLUDE_SUBAGENTS") or "").strip() in (
+            "1",
+            "true",
+            "yes",
+        )
 
     try:
         from . import grok_control as gc
@@ -259,14 +275,16 @@ def scan_grok(
         if not root.is_dir():
             return hits
         for session_dir in gc.iter_session_dirs(root):
-            idx = gc.enrich_session_dir(session_dir)
+            idx = gc.enrich_session_dir(session_dir, deep=True)
             if idx is None:
+                continue
+            if not include_subagents and idx.is_subagent:
                 continue
             sid = idx.session_id
             resume_cwd = idx.cwd or idx.project_cwd or "~"
             blob = (
                 f"{idx.cwd} {idx.project_cwd} {idx.summary} {idx.title} "
-                f"{idx.last_user_snippet} {idx.branch or ''}"
+                f"{idx.last_user_snippet} {idx.branch or ''} {idx.agent_name or ''}"
             )
             if not _match_path(blob, match):
                 continue
@@ -280,8 +298,9 @@ def scan_grok(
             else:
                 status = "stale"
             title = clean_text(idx.title, max_len=100) or sid[:12]
-            summary_txt = clean_text(idx.summary or idx.title, max_len=240)
-            # Prefer CLI --resume (documented); absolute bin when resolved.
+            # Prefer last human prompt for summary when present
+            summary_src = idx.last_user_snippet or idx.summary or idx.title
+            summary_txt = clean_text(summary_src, max_len=240)
             try:
                 resume = gc.resume_shell_command(
                     sid, bin_path=grok_bin, cwd=resume_cwd, use_exec=False
@@ -306,6 +325,11 @@ def scan_grok(
                     branch=idx.branch,
                     priority=_priority(status, gm, age_h, title),
                     greenmark=gm,
+                    session_kind=idx.session_kind,
+                    agent_name=idx.agent_name,
+                    parent_session_id=idx.parent_session_id,
+                    src_summary_mtime=idx.summary_mtime,
+                    src_updates_mtime=idx.updates_mtime,
                 )
             )
         return hits

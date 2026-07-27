@@ -128,10 +128,27 @@ class GrokSessionIndex:
     agent_name: str | None = None
     project_cwd: str = ""
     last_user_snippet: str = ""
+    session_kind: str | None = None
+    parent_session_id: str | None = None
+    hidden: bool = False
+    summary_mtime: float = 0.0
+    updates_mtime: float = 0.0
     source_files: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @property
+    def activity_mtime(self) -> float:
+        """Best watermark for dirty detection / age ranking."""
+        return max(self.summary_mtime or 0.0, self.updates_mtime or 0.0)
+
+    @property
+    def is_subagent(self) -> bool:
+        kind = (self.session_kind or "").lower()
+        if kind.startswith("subagent"):
+            return True
+        return bool(self.hidden)
 
 
 def _iso_to_epoch(raw: str | None) -> float | None:
@@ -204,23 +221,25 @@ def last_user_from_chat_history(session_dir: Path, *, max_lines: int = 80) -> st
     return ""
 
 
+def _tail_file_lines(path: Path, *, max_bytes: int = 256_000, max_lines: int = 200) -> list[str]:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            if size > max_bytes:
+                f.seek(-max_bytes, os.SEEK_END)
+            raw = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    return raw.splitlines()[-max_lines:]
+
+
 def last_agent_snippet_from_updates(session_dir: Path, *, max_lines: int = 120) -> str:
     """Tail updates.jsonl for a short agent_message_chunk (resume context)."""
     upd = session_dir / "updates.jsonl"
     if not upd.is_file():
         return ""
-    try:
-        # Read tail only — updates.jsonl can be large.
-        size = upd.stat().st_size
-        with upd.open("rb") as f:
-            if size > 64_000:
-                f.seek(-64_000, os.SEEK_END)
-            raw = f.read().decode("utf-8", errors="replace")
-    except OSError:
-        return ""
-    lines = raw.splitlines()[-max_lines:]
     last = ""
-    for line in lines:
+    for line in _tail_file_lines(upd, max_bytes=64_000, max_lines=max_lines):
         try:
             o = json.loads(line)
         except json.JSONDecodeError:
@@ -241,13 +260,65 @@ def last_agent_snippet_from_updates(session_dir: Path, *, max_lines: int = 120) 
     return last
 
 
-def enrich_session_dir(session_dir: Path | str) -> GrokSessionIndex | None:
-    """Load summary.json (+ light enrichment) for one session directory."""
+def last_user_from_updates(session_dir: Path, *, max_lines: int = 200) -> str:
+    """Tail updates.jsonl for last user_message_chunk (best abandoned-mission title)."""
+    upd = session_dir / "updates.jsonl"
+    if not upd.is_file():
+        return ""
+    last = ""
+    for line in _tail_file_lines(upd, max_bytes=256_000, max_lines=max_lines):
+        try:
+            o = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        params = o.get("params") if isinstance(o, dict) else None
+        if not isinstance(params, dict):
+            continue
+        u = params.get("update")
+        if not isinstance(u, dict):
+            continue
+        if u.get("sessionUpdate") != "user_message_chunk":
+            continue
+        text = _text_from_content(u.get("content"))
+        if text:
+            last = text
+    if len(last) > 240:
+        last = last[:239] + "…"
+    return last
+
+
+def session_file_mtimes(session_dir: Path) -> tuple[float, float]:
+    """(summary_mtime, updates_mtime) — 0 if missing."""
+    d = Path(session_dir)
+    s_m = u_m = 0.0
+    try:
+        s_m = (d / "summary.json").stat().st_mtime
+    except OSError:
+        pass
+    try:
+        u_m = (d / "updates.jsonl").stat().st_mtime
+    except OSError:
+        pass
+    return s_m, u_m
+
+
+def enrich_session_dir(
+    session_dir: Path | str,
+    *,
+    deep: bool = True,
+) -> GrokSessionIndex | None:
+    """Load summary.json (+ optional transcript tails) for one session directory.
+
+    deep=False: summary only (cheap dirty check / refresh of clean rows).
+    deep=True: also tail chat_history / updates for last-user summary.
+    """
     d = Path(session_dir)
     summary_path = d / "summary.json"
     data = load_summary_json(summary_path)
     if data is None:
         return None
+
+    s_mtime, u_mtime = session_file_mtimes(d)
 
     info = data.get("info") if isinstance(data.get("info"), dict) else {}
     sid = str(info.get("id") or d.name)
@@ -259,31 +330,45 @@ def enrich_session_dir(session_dir: Path | str) -> GrokSessionIndex | None:
     summary = str(data.get("session_summary") or "").strip()
     sources = ["summary.json"] if summary_path.is_file() else []
 
+    kind = str(data.get("session_kind") or "").strip() or None
+    parent = str(data.get("parent_session_id") or "").strip() or None
+    hidden = bool(data.get("hidden"))
+    if not hidden and kind and kind.lower().startswith("subagent"):
+        # Grok UI hides these by default when kind starts with subagent
+        hidden = True
+
     last_user = ""
-    if (d / "chat_history.jsonl").is_file():
-        last_user = last_user_from_chat_history(d)
+    if deep:
+        if (d / "chat_history.jsonl").is_file():
+            last_user = last_user_from_chat_history(d)
+            if last_user:
+                sources.append("chat_history.jsonl")
+        if (d / "updates.jsonl").is_file():
+            sources.append("updates.jsonl")
+            if not last_user:
+                last_user = last_user_from_updates(d)
+            if not summary:
+                snip = last_agent_snippet_from_updates(d)
+                if snip:
+                    summary = snip
+        # Prefer last human prompt for control-room triage (over agent tail / title echo)
         if last_user:
-            sources.append("chat_history.jsonl")
+            gen_title = str(data.get("generated_title") or "").strip()
+            if not title or title == gen_title or title == summary:
+                title = last_user[:100]
+            summary = last_user[:240]
+
     if not title and last_user:
         title = last_user[:100]
     if not summary and last_user:
         summary = last_user[:240]
-
-    if (d / "updates.jsonl").is_file():
-        sources.append("updates.jsonl")
-        if not summary:
-            snip = last_agent_snippet_from_updates(d)
-            if snip:
-                summary = snip
 
     mtime_iso = (
         data.get("last_active_at")
         or data.get("updated_at")
         or data.get("created_at")
     )
-    if isinstance(mtime_iso, str):
-        pass
-    else:
+    if not isinstance(mtime_iso, str):
         mtime_iso = None
 
     msgs = data.get("num_messages")
@@ -312,6 +397,11 @@ def enrich_session_dir(session_dir: Path | str) -> GrokSessionIndex | None:
         agent_name=str(data.get("agent_name") or "") or None,
         project_cwd=project_cwd,
         last_user_snippet=last_user,
+        session_kind=kind,
+        parent_session_id=parent,
+        hidden=hidden,
+        summary_mtime=s_mtime,
+        updates_mtime=u_mtime,
         source_files=sources,
     )
 
@@ -329,11 +419,13 @@ def iter_session_dirs(root: Path | None = None) -> Iterable[Path]:
 
 
 def mtime_from_index(idx: GrokSessionIndex, fallback_stat: Path | None = None) -> float:
-    """Epoch seconds for age ranking."""
+    """Epoch seconds for age ranking — prefer content activity, then file watermarks."""
     for raw in (idx.last_active_at, idx.mtime_iso):
         ts = _iso_to_epoch(raw)
         if ts is not None:
             return ts
+    if idx.activity_mtime > 0:
+        return idx.activity_mtime
     if fallback_stat is not None:
         try:
             return fallback_stat.stat().st_mtime

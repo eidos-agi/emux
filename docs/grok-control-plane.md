@@ -41,6 +41,12 @@ Reference tree (when present): `/tmp/grok-build` (open-source crates under
 3. **Headless / ACP builders** — pure argv helpers; nothing shells out unless a caller does.
 4. **Hooks bridge sketch** — writes Grok-format JSON that points at `python3 -m emux.hook_delegation` for `PreToolUse` + `Stop`. **Not wired for Grok stdin semantics yet** (delegation module still speaks Claude Code hook JSON).
 
+### Phase A (session memory v2)
+
+5. **Subagent filter** — skip `session_kind` starting with `subagent` (and `hidden`) by default; `include_subagents=True` or `EMUX_CHATS_INCLUDE_SUBAGENTS=1` to keep them.
+6. **Last-user summary** — tail `updates.jsonl` `user_message_chunk` (and chat_history) preferred over title echo for CHATS triage.
+7. **Watermarks** — `summary_mtime` / `updates_mtime` on enrich; stored as `src_*_mtime` in chats.db for dirty checks; optional fields `session_kind`, `agent_name`, `parent_session_id`.
+
 ## Remaining gaps for full ACP
 
 - **Protocol client** — spawn `acp_stdio_argv()`, speak agent-client-protocol (initialize / session/new|load / prompt / permissions). Today we only return the command list.

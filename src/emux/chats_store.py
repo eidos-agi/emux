@@ -117,6 +117,20 @@ class ChatStore:
             );
             """
         )
+        # Phase A: watermarks + Grok topology fields (safe additive ALTERs)
+        cols = {
+            r[1]
+            for r in self.db.execute("PRAGMA table_info(chats)").fetchall()
+        }
+        for col, decl in (
+            ("src_summary_mtime", "REAL DEFAULT 0"),
+            ("src_updates_mtime", "REAL DEFAULT 0"),
+            ("session_kind", "TEXT"),
+            ("agent_name", "TEXT"),
+            ("parent_session_id", "TEXT"),
+        ):
+            if col not in cols:
+                self.db.execute(f"ALTER TABLE chats ADD COLUMN {col} {decl}")
         self.db.commit()
 
     def close(self) -> None:
@@ -177,8 +191,10 @@ class ChatStore:
                 INSERT INTO chats(
                     tool, session_id, host, cwd, title, summary, path, mtime,
                     status, resume, messages, model, branch, priority, greenmark,
-                    on_disk, first_seen, last_seen, last_scan, deleted_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,NULL)
+                    on_disk, first_seen, last_seen, last_scan, deleted_at,
+                    src_summary_mtime, src_updates_mtime, session_kind, agent_name,
+                    parent_session_id
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,NULL,?,?,?,?,?)
                 ON CONFLICT(tool, session_id, host) DO UPDATE SET
                     cwd=excluded.cwd,
                     title=excluded.title,
@@ -199,7 +215,12 @@ class ChatStore:
                     on_disk=1,
                     last_seen=excluded.last_seen,
                     last_scan=excluded.last_scan,
-                    deleted_at=NULL
+                    deleted_at=NULL,
+                    src_summary_mtime=excluded.src_summary_mtime,
+                    src_updates_mtime=excluded.src_updates_mtime,
+                    session_kind=excluded.session_kind,
+                    agent_name=excluded.agent_name,
+                    parent_session_id=excluded.parent_session_id
                 """,
                 (
                     h.tool,
@@ -220,6 +241,11 @@ class ChatStore:
                     now,
                     now,
                     now,
+                    float(getattr(h, "src_summary_mtime", 0) or 0),
+                    float(getattr(h, "src_updates_mtime", 0) or 0),
+                    getattr(h, "session_kind", None),
+                    getattr(h, "agent_name", None),
+                    getattr(h, "parent_session_id", None),
                 ),
             )
             n += 1
@@ -227,6 +253,21 @@ class ChatStore:
         self._meta_set("last_scan_token", token)
         self.db.commit()
         return n
+
+    def grok_watermarks(self, *, host: str = "local") -> dict[str, tuple[float, float]]:
+        """session_id → (src_summary_mtime, src_updates_mtime) for dirty checks."""
+        rows = self.db.execute(
+            "SELECT session_id, src_summary_mtime, src_updates_mtime FROM chats "
+            "WHERE tool='grok' AND host=? AND deleted_at IS NULL",
+            (host,),
+        ).fetchall()
+        out: dict[str, tuple[float, float]] = {}
+        for r in rows:
+            out[str(r["session_id"])] = (
+                float(r["src_summary_mtime"] or 0),
+                float(r["src_updates_mtime"] or 0),
+            )
+        return out
 
     def mark_missing_not_in(
         self,
@@ -389,13 +430,20 @@ class ChatStore:
 
             if want and status not in want:
                 continue
+            keys = (
+                "title", "summary", "cwd", "session_id", "branch", "tool",
+                "fleet_name", "agent_name", "session_kind",
+            )
             if qn:
-                hay = " ".join(
-                    str(row[k] or "")
-                    for k in ("title", "summary", "cwd", "session_id", "branch", "tool", "fleet_name")
-                ).lower()
+                hay = " ".join(str(row[k] if k in row.keys() else "") or "" for k in keys).lower()
                 if qn not in hay:
                     continue
+
+            def _col(name: str, default=None):
+                try:
+                    return row[name]
+                except (IndexError, KeyError):
+                    return default
 
             hits.append(
                 {
@@ -424,6 +472,11 @@ class ChatStore:
                     "last_scan": row["last_scan"],
                     "resumed_at": row["resumed_at"],
                     "host": row["host"],
+                    "session_kind": _col("session_kind"),
+                    "agent_name": _col("agent_name"),
+                    "parent_session_id": _col("parent_session_id"),
+                    "src_summary_mtime": float(_col("src_summary_mtime") or 0),
+                    "src_updates_mtime": float(_col("src_updates_mtime") or 0),
                     "source": "store",
                 }
             )

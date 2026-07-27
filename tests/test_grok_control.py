@@ -89,12 +89,16 @@ def test_enrich_session_dir_summary_and_history(tmp_path):
     assert idx is not None
     assert idx.session_id == sid
     assert idx.cwd == "/Users/x/repos-greenmark"
-    assert "Greenmux" in idx.title
-    assert "greenmux" in idx.summary.lower() or "Ship" in idx.summary
+    # Phase A: last human prompt preferred for title/summary triage
+    assert "Caddy" in idx.title or "Greenmux" in idx.title
+    assert "Caddy" in idx.summary or "greenmux" in idx.summary.lower() or "Ship" in idx.summary
     assert idx.model == "grok-4.5"
     assert idx.branch == "feat/x"
     assert idx.chat_messages == 4
     assert "Caddy" in idx.last_user_snippet
+    assert idx.summary_mtime > 0
+    assert idx.updates_mtime > 0
+    assert idx.activity_mtime >= idx.summary_mtime
     assert "summary.json" in idx.source_files
     assert "chat_history.jsonl" in idx.source_files
     assert "updates.jsonl" in idx.source_files
@@ -235,3 +239,111 @@ def test_scan_grok_uses_control_resume(tmp_path, monkeypatch):
     assert "--resume" in h.resume
     assert sid in h.resume
     assert h.greenmark is True or "greenmark" in h.cwd.lower()
+
+
+def test_enrich_skips_deep_and_marks_subagent(tmp_path):
+    sid = "019fa1e8-aaaa-bbbb-cccc-ddddeeee0001"
+    proj = tmp_path / "sessions" / "%2Ftmp" / sid
+    proj.mkdir(parents=True)
+    (proj / "summary.json").write_text(
+        json.dumps(
+            {
+                "info": {"id": sid, "cwd": "/tmp"},
+                "generated_title": "child worker",
+                "session_kind": "subagent",
+                "parent_session_id": "parent-id",
+                "num_chat_messages": 2,
+            }
+        )
+    )
+    shallow = gc.enrich_session_dir(proj, deep=False)
+    assert shallow is not None
+    assert shallow.is_subagent is True
+    assert shallow.parent_session_id == "parent-id"
+    assert shallow.last_user_snippet == ""
+
+
+def test_last_user_from_updates(tmp_path):
+    sid = "019fa1e8-aaaa-bbbb-cccc-ddddeeee0002"
+    proj = tmp_path / "sessions" / "%2Ftmp" / sid
+    proj.mkdir(parents=True)
+    (proj / "summary.json").write_text(
+        json.dumps({"info": {"id": sid, "cwd": "/tmp"}, "generated_title": "t"})
+    )
+    (proj / "updates.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "params": {
+                            "update": {
+                                "sessionUpdate": "user_message_chunk",
+                                "content": {"type": "text", "text": "fix the outage now"},
+                            }
+                        }
+                    }
+                ),
+                json.dumps(
+                    {
+                        "params": {
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {"type": "text", "text": "looking"},
+                            }
+                        }
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+    assert "outage" in gc.last_user_from_updates(proj)
+    idx = gc.enrich_session_dir(proj, deep=True)
+    assert idx is not None
+    assert "outage" in idx.summary
+
+
+def test_scan_grok_filters_subagents(tmp_path, monkeypatch):
+    from emux import chats
+
+    home = tmp_path / "home"
+    root = home / ".grok" / "sessions"
+    main = root / "%2Fgm" / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0001"
+    child = root / "%2Fgm" / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002"
+    main.mkdir(parents=True)
+    child.mkdir(parents=True)
+    (main / "summary.json").write_text(
+        json.dumps(
+            {
+                "info": {"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0001", "cwd": "/gm/greenmark"},
+                "generated_title": "main mission",
+                "session_summary": "main mission",
+                "updated_at": "2020-01-01T00:00:00Z",
+            }
+        )
+    )
+    (child / "summary.json").write_text(
+        json.dumps(
+            {
+                "info": {"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002", "cwd": "/gm/greenmark"},
+                "generated_title": "sub worker",
+                "session_kind": "subagent",
+                "updated_at": "2020-01-01T00:00:00Z",
+            }
+        )
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    # Point grok_control sessions_root at fixture
+    monkeypatch.setattr(
+        "emux.grok_control.sessions_root",
+        lambda home=None: root,
+    )
+    monkeypatch.setattr("emux.grok_control.resolve_grok_bin", lambda **kw: None)
+    monkeypatch.setattr("emux.chats._grok_live_ids", lambda: set())
+    hits = chats.scan_grok(match=None, recent_hours=24 * 365 * 20)
+    ids = {h.session_id for h in hits}
+    assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0001" in ids
+    assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002" not in ids
+    hits2 = chats.scan_grok(match=None, include_subagents=True, recent_hours=24 * 365 * 20)
+    assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002" in {h.session_id for h in hits2}
