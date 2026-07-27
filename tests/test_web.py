@@ -55,7 +55,7 @@ def test_send_payload_literal_sends_text_then_enter(monkeypatch):
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
     monkeypatch.setattr(server, "_pane_settle", lambda s, h=None: 0.0)   # no paste-settle wait
     calls: list[list[str]] = []
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (calls.append(args), (0, "", ""))[1])
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (calls.append(args), (0, "", ""))[1])
     result = web.send_payload("main", "C-c looks like text", literal=True, enter=True)
     assert result["ok"]
     # text and Enter go as SEPARATE send-keys events (so a paste-detecting TUI submits)
@@ -68,7 +68,7 @@ def test_send_payload_named_key(monkeypatch):
     from emux import server, web
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
     calls: list[list[str]] = []
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (calls.append(args), (0, "", ""))[1])
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (calls.append(args), (0, "", ""))[1])
     result = web.send_payload("main", "C-c", literal=False, enter=False)
     assert result["ok"]
     assert calls == [["send-keys", "-t", "main", "C-c"]]
@@ -77,7 +77,7 @@ def test_send_payload_named_key(monkeypatch):
 def test_capture_payload_reports_failure(monkeypatch):
     from emux import server, web
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (1, "", "no such session"))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (1, "", "no such session"))
     result = web.capture_payload("nope")
     assert result["ok"] is False
     assert result["error"] == "tmux_capture_failed"
@@ -94,7 +94,7 @@ def test_poll_once_tracks_activity_then_grid_reads_cache(monkeypatch):
                  "manages": ["worker-1"], "registered_at": 0},
     })
     outputs = iter(["pane v1\n", "pane v1\n", "pane v2\n"])
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, next(outputs), ""))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (0, next(outputs), ""))
     monkeypatch.setattr(web, "_pane_command", lambda s: "")  # don't consume the capture iterator
     web._ACTIVITY.clear()
     web._CACHE.clear()
@@ -166,7 +166,7 @@ def test_observe_ignores_spinner_frame_change():
 def test_poll_once_evicts_dead_sessions(monkeypatch):
     from emux import server, web
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "x\n", ""))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (0, "x\n", ""))
     web._ACTIVITY.clear()
     web._CACHE.clear()
 
@@ -192,7 +192,7 @@ def daemon(monkeypatch):
         {"name": "main", "windows": 1, "created_unix": 0, "attached": False},
     ])
     monkeypatch.setattr(server, "_load_registry", lambda: {})
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "pane content here\n", ""))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (0, "pane content here\n", ""))
 
     web.EmuxWebHandler.public_origin = None
     web.EmuxWebHandler.public_path = ""
@@ -236,11 +236,12 @@ def test_http_simple_status_always_available(daemon):
     assert "auto-refresh" in body
     assert "uptime" in body and "active" in body
     assert 'class="chip' in body  # filters
+    assert "scan scope" in body  # honest multi-socket claim stamp
 
 
 def test_http_simple_filters_and_peek(daemon):
-    """live=1 filters; peek=name captures pane (server-rendered)."""
-    status, body = _get(daemon + "/simple?live=1")
+    """Default is live-only; peek=name captures pane (server-rendered)."""
+    status, body = _get(daemon + "/simple")
     assert status == 200
     assert "main" in body
     assert "chip on" in body
@@ -249,9 +250,15 @@ def test_http_simple_filters_and_peek(daemon):
     assert "pane peek" in body
     assert "pane content here" in body or "empty pane" in body or "pre class='pane'" in body or 'pre class="pane"' in body
     # stale peek message when name unknown under filter
-    status, body = _get(daemon + "/simple?live=1&peek=nope-session")
+    status, body = _get(daemon + "/simple?peek=nope-session")
     assert status == 200
     assert "No session named" in body
+
+
+def test_discover_local_tmux_sockets_includes_default():
+    from emux import server
+    socks = server._discover_local_tmux_sockets()
+    assert any(s.get("name") == "default" for s in socks)
 
 
 def test_normalize_public_path():
@@ -276,7 +283,7 @@ def test_http_ui_stamps_public_path_prefix(monkeypatch):
         "proof": {"session": "main", "description": "scratch", "tags": ["test"],
                   "registered_at": 0},
     })
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "pane\n", ""))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (0, "pane\n", ""))
     web.EmuxWebHandler.public_origin = "https://go.greenmarkwaste.com"
     web.EmuxWebHandler.public_path = "/gmux"
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), web.EmuxWebHandler)
@@ -552,7 +559,7 @@ def test_grid_payload_attaches_agent(monkeypatch):
         {"name": "main", "windows": 1, "created_unix": 0, "attached": False},
     ])
     monkeypatch.setattr(server, "_load_registry", lambda: {})
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "x\n", ""))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (0, "x\n", ""))
     monkeypatch.setattr(web, "_pane_command", lambda s: "claude")
     web._ACTIVITY.clear()
     web._CACHE.clear()
@@ -583,7 +590,7 @@ def test_flow_handles_recursive_manages_cycle(monkeypatch):
         "a": {"session": "a", "description": None, "tags": [], "manages": ["b"], "registered_at": 0},
         "b": {"session": "b", "description": None, "tags": [], "manages": ["a"], "registered_at": 0},
     })
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "x\n", ""))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (0, "x\n", ""))
     web._ACTIVITY.clear()
     web._CACHE.clear()
 
@@ -715,7 +722,7 @@ def _wire_gate_policy(monkeypatch, tmp_path, rules):
                         signals.append({"kind": kind, "payload": payload}))
     sent = []
     monkeypatch.setattr(server, "_run_tmux",
-                        lambda args, timeout=10, host=None:
+                        lambda args, timeout=10, host=None, socket=None, **kw:
                         (sent.append({"args": list(args), "host": host}), (0, "", ""))[1])
     monkeypatch.setattr(web, "_file_hancock_escalation", lambda *a, **k: None)
     web._ESCALATED.clear()
@@ -801,7 +808,7 @@ def test_remote_session_reads_live_and_captures_over_ssh(monkeypatch):
                        "manages": [], "tags": [], "registered_at": 0},
     })
     calls = []
-    def fake_tmux(args, timeout=10, host=None):
+    def fake_tmux(args, timeout=10, host=None, socket=None, **kw):
         calls.append((args[0], host))
         if args[0] == "ls":
             return (0, "wrk\nother\n", "") if host == "rentamac" else (0, "", "")

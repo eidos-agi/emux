@@ -104,11 +104,25 @@ def _should_warm_gist(state: str, age: float | None, norm: str | None,
 # ---------------------------------------------------------------------------
 
 def sessions_payload() -> dict[str, Any]:
-    """Merged registry + live view: registered entries first, then live unregistered."""
+    """Merged registry + live view: registered entries first, then live unregistered.
+
+    Live discovery walks every readable local tmux socket (see server._live_sessions).
+    Returns `scope` describing what was scanned so UIs do not overclaim "all work".
+    """
     if _server._resolve_tmux() is None:
-        return {"ok": False, "error": "tmux_not_installed", "sessions": []}
+        return {
+            "ok": False,
+            "error": "tmux_not_installed",
+            "sessions": [],
+            "scope": {
+                "claim": "tmux not installed — no scan",
+                "sockets": [],
+            },
+        }
     live = _server._live_sessions()
+    scan = _server.tmux_scan_scope()
     registry = _server._load_registry()
+    # Prefer matching live rows by name; keep socket metadata when present.
     live_by_name = {s["name"]: s for s in live}
     # a registered session may live on another machine — probe each distinct
     # remote host once so it shows LIVE, not "gone".
@@ -121,11 +135,12 @@ def sessions_payload() -> dict[str, Any]:
     for name, entry in sorted(registry.items()):
         target = entry.get("session")
         host = entry.get("host")
+        live_row = live_by_name.get(target) if not host else None
         if host:
             is_live = target in remote_live.get(host, set())
         else:
             is_live = target in live_by_name
-        cwd = live_by_name.get(target, {}).get("cwd") or entry.get("cwd")
+        cwd = (live_row or {}).get("cwd") or entry.get("cwd")
         sessions.append({
             "name": name,
             "session": target,
@@ -135,9 +150,12 @@ def sessions_payload() -> dict[str, Any]:
             "manages": entry.get("manages") or [],
             "registered": True,
             "live": is_live,
-            "attached": live_by_name.get(target, {}).get("attached", False),
-            "created_unix": live_by_name.get(target, {}).get("created_unix"),
+            "state": "live" if is_live else "stale",
+            "attached": (live_row or {}).get("attached", False),
+            "created_unix": (live_row or {}).get("created_unix"),
             "cwd": cwd,
+            "socket": (live_row or {}).get("socket") or "default",
+            "socket_path": (live_row or {}).get("socket_path"),
             # explicit override (remote worker / manager) wins over cwd-derivation
             "company": _company_by_key(entry.get("company")) or _detect_company(cwd),
             "_co_explicit": bool(entry.get("company")),
@@ -154,11 +172,34 @@ def sessions_payload() -> dict[str, Any]:
             "manages": [],
             "registered": False,
             "live": True,
+            "state": "live",
             "attached": s.get("attached", False),
             "created_unix": s.get("created_unix"),
             "cwd": s.get("cwd"),
+            "socket": s.get("socket") or "default",
+            "socket_path": s.get("socket_path"),
             "company": _detect_company(s.get("cwd")),
         })
+    # Socket we could not read → synthetic "unknown" row (not silent absence).
+    for sock in scan:
+        if sock.get("status") == "unknown":
+            label = sock.get("socket") or "?"
+            sessions.append({
+                "name": f"socket:{label}",
+                "session": f"socket:{label}",
+                "description": f"tmux socket not readable: {sock.get('error') or sock.get('path') or label}",
+                "tags": ["scan", "unknown"],
+                "manages": [],
+                "registered": False,
+                "live": False,
+                "state": "unknown",
+                "attached": False,
+                "created_unix": None,
+                "cwd": sock.get("dir") or sock.get("path"),
+                "socket": label,
+                "socket_path": sock.get("path"),
+                "company": {},
+            })
     # A manager belongs to the company of what it SUPERVISES, not where its
     # process runs. So if it manages workers that agree on one company, adopt it
     # — overriding a cwd-derived guess, but never an explicit override.
@@ -175,7 +216,28 @@ def sessions_payload() -> dict[str, Any]:
             s["company"] = next(iter(managed_cos.values()))
     for s in sessions:
         s.pop("_co_explicit", None)
-    return {"ok": True, "sessions": sessions}
+    import getpass
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = str(os.getuid()) if hasattr(os, "getuid") else "?"
+    ok_socks = [s for s in scan if s.get("status") == "ok"]
+    unknown_socks = [s for s in scan if s.get("status") == "unknown"]
+    claim = (
+        f"tmux sessions on {len(ok_socks)} readable socket(s) for user {user} "
+        f"— not all host processes; not other users' servers"
+    )
+    if unknown_socks:
+        claim += f"; {len(unknown_socks)} socket(s) unknown/unreadable"
+    return {
+        "ok": True,
+        "sessions": sessions,
+        "scope": {
+            "claim": claim,
+            "user": user,
+            "sockets": scan,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -215,15 +277,20 @@ def _session_host(session: str) -> str | None:
 
 
 def capture_payload(session: str, lines: int = 300,
-                    host: str | None = None) -> dict[str, Any]:
+                    host: str | None = None,
+                    socket: str | None = None) -> dict[str, Any]:
     """Capture the active pane of `session` (raw tmux session name), local or —
     when `host` is set — over ssh. Always live; the chat/modal want fresh, deep
-    scrollback for one session, which is cheap."""
+    scrollback for one session, which is cheap.
+
+    `socket` is an optional absolute tmux server socket path when the session
+    lives off the default server (`tmux -S`).
+    """
     if host is None and _server._resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
     code, out, err = _server._run_tmux(
         ["capture-pane", "-t", session, "-p", "-S", f"-{lines}"],
-        host=host, timeout=20)
+        host=host, timeout=20, socket=socket)
     if code != 0:
         return {"ok": False, "error": "tmux_capture_failed", "stderr": err}
     return {"ok": True, "session": session, "host": host, "content": out,
@@ -4220,10 +4287,16 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             lines = int(line_vals[0]) if line_vals else 24
         except (TypeError, ValueError):
             lines = 24
+        # Default live-only. all=1 shows registry ghosts. live=1 is explicit same as default.
+        show_all = _flag("all")
+        if "live" in qs and not show_all:
+            live_only = _flag("live")
+        else:
+            live_only = not show_all
         return simple_status_html(
             __version__,
             self.public_path or "",
-            live_only=_flag("live"),
+            live_only=live_only,
             registered_only=_flag("registered"),
             peek=peek,
             peek_lines=lines,
@@ -4615,15 +4688,16 @@ def simple_status_html(
     version: str,
     public_path: str = "",
     *,
-    live_only: bool = False,
+    live_only: bool = True,
     registered_only: bool = False,
     peek: str | None = None,
     peek_lines: int = 24,
 ) -> str:
     """Server-rendered, read-only session table — the first testable view.
 
-    Filters, age columns, and optional pane peek are all query-string driven
-    (no SPA). When public_path is set (e.g. /gmux), links stay under that prefix.
+    Default filter is live-only (ghosts stay available via "all"). Filters, age,
+    and pane peek are query-string driven. Scope stamp states what tmux sockets
+    were actually scanned — not "all work on the host".
     """
     import html as _html
     from datetime import datetime, timezone
@@ -4634,37 +4708,54 @@ def simple_status_html(
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     payload = sessions_payload()
     all_sessions = payload.get("sessions") or []
+    scope = payload.get("scope") or {}
     live_n = sum(1 for s in all_sessions if s.get("live"))
     reg_n = sum(1 for s in all_sessions if s.get("registered"))
+    ghost_n = sum(
+        1 for s in all_sessions
+        if s.get("registered") and not s.get("live") and s.get("state") != "unknown"
+    )
+    unknown_n = sum(1 for s in all_sessions if s.get("state") == "unknown")
     ok = bool(payload.get("ok"))
     err = payload.get("error") or ""
 
     sessions = list(all_sessions)
     if live_only:
-        sessions = [s for s in sessions if s.get("live")]
+        # keep unknown scan rows even in live-only — they are not ghosts, they are gaps
+        sessions = [s for s in sessions if s.get("live") or s.get("state") == "unknown"]
     if registered_only:
-        sessions = [s for s in sessions if s.get("registered")]
+        sessions = [s for s in sessions if s.get("registered") or s.get("state") == "unknown"]
 
     def _qs(**extra: Any) -> str:
-        """Build query string preserving active filters + optional overrides."""
+        """Build query string. Default view is live-only → use all=1 for ghosts."""
         q: dict[str, str] = {}
-        if live_only and "live" not in extra:
-            q["live"] = "1"
+        # start from current mode
+        show_all = (not live_only) if "all" not in extra else bool(extra.get("all"))
+        if extra.get("all") is False:
+            show_all = False
+        if extra.get("live") is True:
+            show_all = False
+        if extra.get("live") is False and "all" not in extra:
+            show_all = True
+        if show_all:
+            q["all"] = "1"
         if registered_only and "registered" not in extra:
             q["registered"] = "1"
         if peek and "peek" not in extra:
             q["peek"] = peek
         for k, v in extra.items():
+            if k in ("live", "all") and v is False:
+                continue
             if v is None or v is False or v == "":
                 q.pop(k, None)
                 continue
             if v is True:
+                if k == "live":
+                    q.pop("all", None)
+                    continue  # live is default — no query needed
                 q[k] = "1"
             else:
                 q[k] = str(v)
-        # explicit clears
-        if extra.get("live") is False:
-            q.pop("live", None)
         if extra.get("registered") is False:
             q.pop("registered", None)
         if extra.get("peek") is None and "peek" in extra:
@@ -4680,9 +4771,14 @@ def simple_status_html(
         return f'<a class="{cls}" href="{_html.escape(_href(**extra))}">{_html.escape(label)}</a>'
 
     filters_html = (
-        chip("all", not live_only and not registered_only, live=False, registered=False)
-        + chip("live", live_only and not registered_only, live=True, registered=False)
-        + chip("registered", registered_only and not live_only, live=False, registered=True)
+        chip("live", live_only and not registered_only, live=True, all=False, registered=False)
+        + chip(
+            f"all ({ghost_n} ghost{'s' if ghost_n != 1 else ''})",
+            not live_only and not registered_only,
+            all=True,
+            registered=False,
+        )
+        + chip("registered", registered_only and not live_only, all=True, registered=True)
         + chip("live · registered", live_only and registered_only, live=True, registered=True)
     )
 
@@ -4695,10 +4791,16 @@ def simple_status_html(
         name = _html.escape(name_raw)
         tmux = _html.escape(tmux_raw)
         host = _html.escape(str(s.get("host") or "local"))
+        sock = _html.escape(str(s.get("socket") or "default"))
         desc = _html.escape(str(s.get("description") or "—"))
         is_live = bool(s.get("live"))
-        live = "LIVE" if is_live else "stale"
-        live_cls = "live" if is_live else "stale"
+        state = s.get("state") or ("live" if is_live else "stale")
+        if state == "unknown":
+            live, live_cls = "unknown", "unknown"
+        elif is_live:
+            live, live_cls = "LIVE", "live"
+        else:
+            live, live_cls = "stale", "stale"
         reg = "yes" if s.get("registered") else "no"
         tags = _html.escape(", ".join(s.get("tags") or []) or "—")
 
@@ -4707,7 +4809,9 @@ def simple_status_html(
         # activity is keyed by tmux session name in the poller cache
         meta = _meta(tmux_raw) if is_live else {}
         act_age = meta.get("last_change_age")
-        if is_live:
+        if state == "unknown":
+            active = "—"
+        elif is_live:
             active = _fmt_age(act_age) if act_age is not None else "quiet"
         else:
             active = "gone"
@@ -4717,17 +4821,23 @@ def simple_status_html(
             peek_found = True
         open_href = _html.escape(_href(peek=name_raw))
         close_href = _html.escape(_href(peek=None))
-        name_cell = (
-            f'<a class="name" href="{close_href}" title="close peek"><code>{name}</code> ▾</a>'
-            if is_peek
-            else f'<a class="name" href="{open_href}" title="peek pane"><code>{name}</code></a>'
-        )
+        if state == "unknown":
+            name_cell = f"<code>{name}</code>"
+        elif is_peek:
+            name_cell = (
+                f'<a class="name" href="{close_href}" title="close peek"><code>{name}</code> ▾</a>'
+            )
+        else:
+            name_cell = (
+                f'<a class="name" href="{open_href}" title="peek pane"><code>{name}</code></a>'
+            )
         row_cls = f"{live_cls}{' open' if is_peek else ''}"
         rows.append(
             f"<tr class='{row_cls}'>"
             f"<td>{name_cell}</td>"
             f"<td><code>{tmux}</code></td>"
             f"<td>{host}</td>"
+            f"<td><code>{sock}</code></td>"
             f"<td><span class='pill {live_cls}'>{live}</span></td>"
             f"<td class='age' title='session uptime'>{uptime}</td>"
             f"<td class='age' title='time since last pane change'>{active}</td>"
@@ -4738,12 +4848,16 @@ def simple_status_html(
         )
         if is_peek:
             if not is_live:
-                pane_html = "<p class='peek-err'>Session is stale — no live pane to capture.</p>"
+                pane_html = (
+                    "<p class='peek-err'>Session is not live — no pane to capture "
+                    "(ghosts are kept on purpose; they are not reaped).</p>"
+                )
             else:
                 cap = capture_payload(
                     tmux_raw,
                     lines=max(5, min(int(peek_lines), 200)),
                     host=s.get("host"),
+                    socket=s.get("socket_path"),
                 )
                 if not cap.get("ok"):
                     pane_html = (
@@ -4752,14 +4866,13 @@ def simple_status_html(
                     )
                 else:
                     content = (cap.get("content") or "").rstrip("\n")
-                    # keep last peek_lines for display even if capture returned more
                     lines = content.splitlines()
                     if len(lines) > peek_lines:
                         lines = lines[-peek_lines:]
                     content = "\n".join(lines)
                     pane_html = f"<pre class='pane'>{_html.escape(content) if content else '(empty pane)'}</pre>"
             rows.append(
-                f"<tr class='peek-row'><td colspan='9'>"
+                f"<tr class='peek-row'><td colspan='10'>"
                 f"<div class='peek'>"
                 f"<div class='peek-bar'>pane peek · <code>{name}</code> · last {peek_lines} lines · "
                 f"<a href='{close_href}'>close</a></div>"
@@ -4774,13 +4887,22 @@ def simple_status_html(
         )
 
     body_rows = "\n".join(rows) if rows else (
-        "<tr><td colspan='9' class='empty'>No sessions match this filter.</td></tr>"
+        "<tr><td colspan='10' class='empty'>No sessions match this filter.</td></tr>"
     )
-    shown = len(sessions)
+    shown = len([s for s in sessions if s.get("state") != "unknown"])
     status_line = (
-        f"ok · showing {shown} · {live_n} live · {reg_n} registered · {len(all_sessions)} total"
+        f"ok · showing {shown} · {live_n} live · {ghost_n} ghost · "
+        f"{reg_n} registered · {unknown_n} unknown socket"
         if ok else f"error · {_html.escape(str(err))}"
     )
+    claim = _html.escape(str(scope.get("claim") or "scope not yet scanned"))
+    sock_bits = []
+    for sk in scope.get("sockets") or []:
+        st = sk.get("status") or "?"
+        nm = _html.escape(str(sk.get("socket") or "?"))
+        n = sk.get("n")
+        sock_bits.append(f"<code>{nm}</code>:{st}" + (f"({n})" if n else ""))
+    scope_html = " · ".join(sock_bits) if sock_bits else "—"
     # meta-refresh keeps filters + peek
     refresh_url = _html.escape(f"{base}/{_qs()}")
 
@@ -4824,7 +4946,11 @@ def simple_status_html(
            font-weight:600; letter-spacing:.03em; }}
   .pill.live {{ background:var(--pill); color:var(--live); }}
   .pill.stale {{ background:#f5efdf; color:var(--stale); }}
+  .pill.unknown {{ background:#eee6f0; color:#6b3a7a; }}
   .empty {{ color:var(--dim); text-align:center; padding:24px; }}
+  .scope {{ margin:0 0 14px; padding:8px 12px; background:#eef1ea; border:1px dashed var(--line);
+            border-radius:6px; font-size:12px; color:var(--dim); }}
+  .scope strong {{ color:var(--ink); font-weight:600; }}
   .peek {{ background:#0f1411; color:#d7e0d9; border-radius:6px; overflow:hidden; }}
   .peek-bar {{ padding:8px 12px; font-size:12px; color:#9aab9f; border-bottom:1px solid #243028; }}
   .peek-bar a {{ color:#9fd6b0; }}
@@ -4847,12 +4973,13 @@ def simple_status_html(
 </header>
 <main>
   <div class="summary{' bad' if not ok else ''}" id="summary">{status_line} · checked {now}</div>
+  <div class="scope"><strong>scan scope</strong> — {claim}<br>sockets: {scope_html}</div>
   <div class="filters">{filters_html}</div>
   {peek_block}
   <table>
     <thead>
       <tr>
-        <th>name</th><th>tmux</th><th>host</th><th>state</th>
+        <th>name</th><th>tmux</th><th>host</th><th>socket</th><th>state</th>
         <th>uptime</th><th>active</th>
         <th>registered</th><th>tags</th><th>description</th>
       </tr>
@@ -4862,8 +4989,8 @@ def simple_status_html(
     </tbody>
   </table>
   <footer>
-    Click a name to peek the live pane. Filters and peek survive refresh.
-    Gate is go door OIDC (strict). Observation only — no keystrokes.
+    Default is live tmux only; ghosts stay under <strong>all</strong> (not reaped).
+    Click a name to peek. Observation only — no keystrokes.
     Path prefix: <code>{_html.escape(base or "/")}</code>
   </footer>
 </main>

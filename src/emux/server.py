@@ -459,7 +459,12 @@ def _resolve_tmux() -> str | None:
     return None
 
 
-def _run_tmux(args: list[str], timeout: int = 10, host: str | None = None) -> tuple[int, str, str]:
+def _run_tmux(
+    args: list[str],
+    timeout: int = 10,
+    host: str | None = None,
+    socket: str | None = None,
+) -> tuple[int, str, str]:
     """Run `tmux <args>` and return (returncode, stdout, stderr).
 
     When `host` is given (any ssh destination — `user@ip` or a `~/.ssh/config`
@@ -469,8 +474,15 @@ def _run_tmux(args: list[str], timeout: int = 10, host: str | None = None) -> tu
     of them go remote for free just by carrying a host. The remote command is
     shell-quoted so keystrokes with spaces/metacharacters survive the ssh hop.
 
+    `socket` is an optional absolute path to a tmux server socket (`tmux -S`).
+    Global flags must precede the subcommand so capture-pane's own `-S` (start
+    line) is not confused with the server socket flag.
+
     Raises FileNotFoundError if tmux is not installed (local only).
     """
+    prefix: list[str] = []
+    if socket:
+        prefix = ["-S", socket]
     if host:
         # A non-interactive ssh shell does NOT source the login profile, so
         # Homebrew's bin (where tmux lives on most Macs) is off PATH and a bare
@@ -480,7 +492,7 @@ def _run_tmux(args: list[str], timeout: int = 10, host: str | None = None) -> tu
         # ponytail: covers homebrew (arm+intel) and /usr/local; if a host puts
         # tmux somewhere exotic, set it on that host's ssh-config or PATH.
         remote = "PATH=/opt/homebrew/bin:/usr/local/bin:$PATH tmux " + " ".join(
-            shlex.quote(a) for a in args
+            shlex.quote(a) for a in (prefix + args)
         )
         cmd = [
             "ssh",
@@ -495,7 +507,7 @@ def _run_tmux(args: list[str], timeout: int = 10, host: str | None = None) -> tu
         tmux = _resolve_tmux()
         if tmux is None:
             raise FileNotFoundError("tmux not found on PATH")
-        cmd = [tmux] + args
+        cmd = [tmux] + prefix + args
     proc = subprocess.run(
         cmd,
         capture_output=True,
@@ -561,29 +573,123 @@ def _ago(unix: int | None, now: int) -> str | None:
     return f"{d // 86400}d ago"
 
 
-def _live_sessions(host: str | None = None) -> list[dict[str, Any]]:
-    """Return currently-running tmux sessions with RICH, rankable metadata — on
-    the local machine, or on `host` over ssh. Each session carries its last
-    activity, working directory, and current command, which is what lets you
-    FIND the right existing session to hook into (most-recent, in this project,
-    running claude), not just enumerate raw names."""
-    try:
-        code, out, _err = _run_tmux(
-            [
-                "list-sessions",
-                "-F",
-                "#{session_name}\t#{session_windows}\t#{session_created}\t"
-                "#{session_attached}\t#{session_activity}\t#{pane_current_path}\t"
-                "#{pane_current_command}",
-            ],
-            host=host,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return []  # one unavailable host must not take down fleet discovery
-    if code != 0:
-        return []  # nonzero (incl. "no server running") → no sessions
+_LIST_SESSIONS_FMT = (
+    "#{session_name}\t#{session_windows}\t#{session_created}\t"
+    "#{session_attached}\t#{session_activity}\t#{pane_current_path}\t"
+    "#{pane_current_command}"
+)
+
+# Last local multi-socket scan — what we actually probed, not what we wish we saw.
+# Consumed by the status page so it can stamp honest scope (Claude second opinion).
+_TMUX_SCAN_SCOPE: list[dict[str, Any]] = []
+
+
+def tmux_scan_scope() -> list[dict[str, Any]]:
+    """Copy of the most recent local socket scan (empty until _live_sessions runs)."""
+    return [dict(x) for x in _TMUX_SCAN_SCOPE]
+
+
+def _discover_local_tmux_sockets() -> list[dict[str, Any]]:
+    """Find tmux server sockets under /tmp (and TMUX_TMPDIR), not just the default.
+
+    A single bare `tmux list-sessions` only sees one server. Agents or launchd
+    jobs that used `tmux -L other` or a custom TMUX_TMPDIR are invisible unless
+    we walk the socket dirs. Entries we cannot open are kept with access=denied
+    so the UI can show `unknown` instead of pretending they do not exist.
+    """
+    uid = os.getuid()
+    dir_paths: list[Path] = []
+    env_tmp = (os.environ.get("TMUX_TMPDIR") or "").strip()
+    if env_tmp:
+        p = Path(env_tmp)
+        dir_paths.append(p)
+        if p.name != f"tmux-{uid}":
+            dir_paths.append(p / f"tmux-{uid}")
+    for base in ("/tmp", "/private/tmp"):
+        dir_paths.append(Path(base) / f"tmux-{uid}")
+        try:
+            for child in Path(base).glob("tmux-*"):
+                if child.is_dir():
+                    dir_paths.append(child)
+        except OSError:
+            pass
+
+    seen_dirs: set[str] = set()
+    sockets: list[dict[str, Any]] = []
+    for d in dir_paths:
+        try:
+            key = str(d.resolve()) if d.exists() else str(d)
+        except OSError:
+            key = str(d)
+        if key in seen_dirs:
+            continue
+        seen_dirs.add(key)
+        if not d.is_dir():
+            continue
+        if not os.access(d, os.R_OK | os.X_OK):
+            sockets.append({
+                "name": d.name,
+                "path": None,
+                "dir": str(d),
+                "access": "denied",
+            })
+            continue
+        try:
+            entries = sorted(d.iterdir(), key=lambda p: p.name)
+        except OSError:
+            sockets.append({
+                "name": d.name,
+                "path": None,
+                "dir": str(d),
+                "access": "error",
+            })
+            continue
+        n_before = len(sockets)
+        for ent in entries:
+            if ent.name.startswith("."):
+                continue
+            try:
+                # tmux server sockets are socket files; skip junk if any
+                if ent.is_dir():
+                    continue
+            except OSError:
+                continue
+            access = "ok" if os.access(ent, os.R_OK) else "denied"
+            sockets.append({
+                "name": ent.name,
+                "path": str(ent),
+                "dir": str(d),
+                "access": access,
+            })
+        if len(sockets) == n_before:
+            # empty dir still matters — server may start later
+            sockets.append({
+                "name": f"{d.name}/(empty)",
+                "path": None,
+                "dir": str(d),
+                "access": "empty",
+            })
+
+    # Always probe the default server name even if no socket file was found yet
+    # (tmux creates it on first use; bare list-sessions still talks to it).
+    if not any(s.get("name") == "default" and s.get("access") == "ok" for s in sockets):
+        sockets.insert(0, {
+            "name": "default",
+            "path": None,
+            "dir": None,
+            "access": "ok",  # implicit default socket via bare tmux
+        })
+    return sockets
+
+
+def _parse_list_sessions(
+    out: str,
+    *,
+    socket_name: str = "default",
+    socket_path: str | None = None,
+) -> list[dict[str, Any]]:
     now = int(time.time())
-    sessions = []
+    sessions: list[dict[str, Any]] = []
     for line in (out or "").strip().split("\n"):
         if not line.strip():
             continue
@@ -605,8 +711,116 @@ def _live_sessions(host: str | None = None) -> list[dict[str, Any]]:
                 "cwd": cwd or None,
                 "command": command or None,
                 "kind": _classify(command),
+                "socket": socket_name,
+                "socket_path": socket_path,
             }
         )
+    return sessions
+
+
+def _live_sessions(host: str | None = None) -> list[dict[str, Any]]:
+    """Return currently-running tmux sessions with RICH, rankable metadata — on
+    the local machine, or on `host` over ssh. Each session carries its last
+    activity, working directory, and current command, which is what lets you
+    FIND the right existing session to hook into (most-recent, in this project,
+    running claude), not just enumerate raw names.
+
+    Local discovery walks every readable tmux socket (default + -L names under
+    /tmp/tmux-$UID and TMUX_TMPDIR). Scope of that scan is stored in
+    `_TMUX_SCAN_SCOPE` for honest UI stamping. Remote hosts still use one
+    default socket (ssh multi-socket is a separate climb).
+    """
+    global _TMUX_SCAN_SCOPE
+
+    if host is not None:
+        # Remote: one socket only; do not pretend we scanned the remote host fully.
+        _TMUX_SCAN_SCOPE = [{
+            "socket": "default",
+            "path": None,
+            "status": "remote_default_only",
+            "host": host,
+            "n": 0,
+            "error": None,
+        }]
+        try:
+            code, out, err = _run_tmux(
+                ["list-sessions", "-F", _LIST_SESSIONS_FMT],
+                host=host,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            _TMUX_SCAN_SCOPE[0]["status"] = "unknown"
+            _TMUX_SCAN_SCOPE[0]["error"] = type(exc).__name__
+            return []
+        if code != 0:
+            _TMUX_SCAN_SCOPE[0]["status"] = "empty" if "no server" in (err or "").lower() else "unknown"
+            _TMUX_SCAN_SCOPE[0]["error"] = (err or "list-sessions failed").strip()[:200]
+            return []
+        sessions = _parse_list_sessions(out, socket_name="default", socket_path=None)
+        _TMUX_SCAN_SCOPE[0]["n"] = len(sessions)
+        _TMUX_SCAN_SCOPE[0]["status"] = "ok"
+        return sessions
+
+    # Local: multi-socket
+    sockets = _discover_local_tmux_sockets()
+    scope: list[dict[str, Any]] = []
+    sessions: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()  # socket_name\0session_name
+
+    for sock in sockets:
+        entry: dict[str, Any] = {
+            "socket": sock["name"],
+            "path": sock.get("path"),
+            "dir": sock.get("dir"),
+            "status": "ok",
+            "n": 0,
+            "error": None,
+        }
+        access = sock.get("access") or "ok"
+        if access in ("denied", "error", "empty"):
+            entry["status"] = "unknown" if access == "denied" else access
+            entry["error"] = access
+            scope.append(entry)
+            continue
+
+        sock_path = sock.get("path")  # None → default bare tmux server
+        try:
+            code, out, err = _run_tmux(
+                ["list-sessions", "-F", _LIST_SESSIONS_FMT],
+                socket=sock_path,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            entry["status"] = "unknown"
+            entry["error"] = type(exc).__name__
+            scope.append(entry)
+            continue
+        if code != 0:
+            # "no server running" is empty, not unknown
+            err_l = (err or "").lower()
+            if "no server" in err_l or code == 1:
+                entry["status"] = "empty"
+                entry["error"] = None
+            else:
+                entry["status"] = "unknown"
+                entry["error"] = (err or f"exit {code}").strip()[:200]
+            scope.append(entry)
+            continue
+
+        batch = _parse_list_sessions(
+            out,
+            socket_name=str(sock["name"]),
+            socket_path=sock_path,
+        )
+        for s in batch:
+            key = f"{s.get('socket')}\0{s['name']}"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            sessions.append(s)
+        entry["n"] = len(batch)
+        entry["status"] = "ok"
+        scope.append(entry)
+
+    _TMUX_SCAN_SCOPE = scope
     return sessions
 
 
