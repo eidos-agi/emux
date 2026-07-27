@@ -244,13 +244,19 @@ def test_http_simple_status_always_available(daemon):
 
 
 def test_gmux_skin_rebrands_without_forking():
-    from emux import skin, web
+    from emux import skin
     s = skin.get_skin("gmux")
     assert s.id == "gmux" and s.brand == "GMUX"
-    assert "emux" in s.footer_note or s.engine_label == "emux"
-    stamped = s.apply("<h1>__BRAND__</h1><p>__FOOTER_NOTE__</p> · __ENGINE__", "1.2.3")
-    assert "GMUX" in stamped and "emux 1.2.3" in stamped
-    # aliases
+    assert s.engine_label == "emux" and "emux" in s.footer_note
+    assert s.light.accent == "#203C31" and s.dark.accent.startswith("#")
+    css = s.theme_css()
+    assert "[data-theme=dark]" in css and s.light.bg in css and s.dark.bg in css
+    assert "skin-logo" in s.logo_svg and "GMUX" in s.logo_html()
+    stamped = s.apply(
+        "<h1>__BRAND__</h1>__LOGO_HTML__<style>__THEME_CSS__</style> · __ENGINE__",
+        "1.2.3",
+    )
+    assert "GMUX" in stamped and "emux 1.2.3" in stamped and "__THEME_CSS__" not in stamped
     assert skin.get_skin("greenmux").id == "gmux"
     skin.set_active_skin("gmux")
     assert skin.active_skin().product == "gmux"
@@ -332,6 +338,8 @@ def test_http_ui_stamps_public_path_prefix(monkeypatch):
         assert "gmux status" in body
         assert "GMUX" in body or "gmux" in body
         assert "powered by emux" in body
+        assert "themebtn" in body and "data-theme" in body or "emux-theme" in body
+        assert "skin-logo" in body  # gmux logo mark
         assert "proof" in body and "LIVE" in body
         assert 'href="/gmux/room"' in body
         assert "uptime" in body and "active" in body

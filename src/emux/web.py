@@ -1960,26 +1960,12 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__ROOM_TITLE__</title>
-<style id="skin-accent">:root{--amber:__ACCENT__;--live:__ACCENT__;}</style>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230c0a07'/><rect x='3' y='3' width='10' height='10' rx='2' fill='%23ffb000'/></svg>">
+<style id="skin-theme">__THEME_CSS__</style>
+<link rel="icon" href="__FAVICON__">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=VT323&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
 <style>
-:root{   /* Eidos light — the default skin; JS may swap to another via a company pill */
-  --bg:#f0ebe4;
-  --bg-raise:#e9e3db;
-  --bg-card:#e4ded6;
-  --amber:#8e6129;
-  --amber-dim:#a9853f;
-  --amber-faint:#d8cdba;
-  --text:#1e1a17;
-  --text-dim:#6b6159;
-  --live:#4a6a3a;
-  --stale:#ab5036;
-  --line:#cabfae;
-  --user:#8e6129;
-  --on-accent:#f5efe6;
-}
+/* Color tokens come from skin (light/dark). Layout only below. */
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{
@@ -1994,11 +1980,16 @@ body{
   background:var(--bg-raise);border-right:1px solid var(--line);
 }
 #brand{padding:18px 18px 10px}
-#brand h1{
-  font-family:"VT323",monospace;font-size:44px;font-weight:400;letter-spacing:2px;
-  color:var(--amber);text-shadow:0 0 18px rgba(255,176,0,.45),0 0 2px rgba(255,176,0,.9);
+#brand .brand-mark{
+  display:flex;align-items:center;gap:10px;color:var(--amber);
 }
-#brand small{color:var(--text-dim);font-size:11px;letter-spacing:3px;text-transform:uppercase}
+#brand .skin-logo{flex:none;display:block}
+#brand .brand-word{
+  font-family:"VT323",monospace;font-size:40px;font-weight:400;letter-spacing:2px;
+  color:var(--amber);line-height:1;
+  text-shadow:0 0 18px color-mix(in srgb, var(--amber) 45%, transparent);
+}
+#brand small{display:block;margin-top:6px;color:var(--text-dim);font-size:11px;letter-spacing:3px;text-transform:uppercase}
 #tagbar{display:flex;flex-wrap:wrap;gap:4px;padding:4px 8px 0;max-height:26vh;overflow-y:auto}  /* EID-880: cap tag noise so the session list isn't buried */
 #tagbar:empty{display:none}
 .tagchip{font-size:10px;letter-spacing:.5px;padding:2px 7px;border:1px solid var(--line);
@@ -2671,7 +2662,7 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
   </div>
 </div>
 <aside id="side">
-  <div id="brand"><h1>__BRAND__</h1><small>__TAGLINE__</small></div>
+  <div id="brand">__LOGO_HTML__<small>__TAGLINE__</small></div>
   <input id="filter" placeholder="filter sessions…" autocomplete="off" spellcheck="false">
   <div id="tagbar"></div>
   <div id="sessions"></div>
@@ -2683,11 +2674,12 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
     <span id="title">grid</span>
     <span id="status">connecting…</span>
     <button id="attachbtn" class="act" style="display:none">⧉ copy attach</button>
-    <a id="docsbtn" class="act" href="__PUBLIC_PATH__/docs" title="Emux documentation and help">◇ DOCS</a>
+    <a id="docsbtn" class="act" href="__PUBLIC_PATH__/docs" title="documentation">◇ DOCS</a>
     <button id="newbtn" class="act">+ NEW SESSION</button>
     <button id="feedbtn" class="act" title="live fleet activity">◫ FEED</button>
     <button id="hbtn" class="act" title="Hancock approvals" onclick="openHancock()">⧉ HANCOCK<span id="hbadge" style="display:none">0</span></button>
     <button id="refreshbtn" class="act">↻ refresh</button>
+    <button id="themebtn" class="act" type="button" title="toggle light/dark">☾ dark</button>
     <button id="setbtn" class="act" title="model routing settings" onclick="openSettings()">⚙ SETTINGS</button>
     <div id="tabs">
       <button class="tab" data-mode="grid">GRID</button>
@@ -4182,6 +4174,34 @@ async function saveSettings(quiet){
 applyURL();   // restore view + filters + open session from the URL (falls back to localStorage)
 poll();gridTimer=setInterval(poll,2000);
 </script>
+<script id="emux-theme">
+(function(){
+  var KEY="__THEME_STORAGE_KEY__";
+  var def="__DEFAULT_THEME__";
+  function pref(){
+    try{var s=localStorage.getItem(KEY); if(s==="light"||s==="dark")return s;}catch(e){}
+    if(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
+    return (def==="dark")?"dark":"light";
+  }
+  function apply(t){
+    document.documentElement.setAttribute("data-theme", t);
+    var b=document.getElementById("themebtn");
+    if(b){b.textContent=t==="dark"?"☀ light":"☾ dark";}
+  }
+  function toggle(){
+    var cur=document.documentElement.getAttribute("data-theme")||pref();
+    var next=cur==="dark"?"light":"dark";
+    try{localStorage.setItem(KEY,next);}catch(e){}
+    apply(next);
+  }
+  apply(pref());
+  document.addEventListener("DOMContentLoaded",function(){
+    apply(pref());
+    var b=document.getElementById("themebtn");
+    if(b) b.addEventListener("click",toggle);
+  });
+})();
+</script>
 </body>
 </html>
 """
@@ -4991,16 +5011,23 @@ def simple_status_html(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="15;url={refresh_url}">
 <title>__STATUS_TITLE__</title>
-<style id="skin-accent">:root{{--on:__ACCENT__;--live:__ACCENT__;}}</style>
+<style id="skin-theme">__THEME_CSS__</style>
+<link rel="icon" href="__FAVICON__">
 <style>
-  :root {{ --bg:#f7f8f3; --ink:#1d2b23; --dim:#5c6b61; --line:#d5ddd6;
-           --live:#1a7a45; --stale:#8a6a2a; --card:#fff; --pill:#e8f5ee; --on:#203c31; }}
   * {{ box-sizing: border-box; }}
   body {{ margin:0; font:14px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--ink); }}
-  header {{ padding:20px 24px 12px; border-bottom:1px solid var(--line); background:var(--card); }}
-  h1 {{ margin:0 0 4px; font-size:18px; font-weight:600; }}
+  header {{ padding:20px 24px 12px; border-bottom:1px solid var(--line); background:var(--card);
+            display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:12px; }}
+  .hdr-left {{ min-width:0; }}
+  .brand-row {{ display:flex; align-items:center; gap:10px; margin:0 0 4px; }}
+  .brand-row .skin-logo {{ color:var(--amber); flex:none; }}
+  .brand-row .brand-word {{ font:600 18px/1.2 system-ui,sans-serif; color:var(--ink); letter-spacing:.02em; }}
+  h1 {{ margin:0; font-size:18px; font-weight:600; color:var(--ink); }}
   .meta {{ color:var(--dim); font-size:12px; }}
   .meta a {{ color:var(--ink); }}
+  #themebtn {{ font:12px system-ui,sans-serif; cursor:pointer; border:1px solid var(--line);
+               background:var(--card); color:var(--ink); padding:6px 12px; border-radius:6px; }}
+  #themebtn:hover {{ border-color:var(--amber); color:var(--amber); }}
   main {{ padding:16px 24px 40px; max-width:1200px; }}
   .summary {{ margin:0 0 12px; padding:10px 12px; background:var(--card);
               border:1px solid var(--line); border-radius:6px; font-size:13px; }}
@@ -5008,15 +5035,15 @@ def simple_status_html(
   .filters {{ display:flex; flex-wrap:wrap; gap:6px; margin:0 0 14px; }}
   .chip {{ display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px;
            text-decoration:none; border:1px solid var(--line); color:var(--dim); background:var(--card); }}
-  .chip.on {{ background:var(--on); color:#f7f8f3; border-color:var(--on); }}
+  .chip.on {{ background:var(--on); color:var(--on-accent); border-color:var(--on); }}
   table {{ width:100%; border-collapse:collapse; background:var(--card);
            border:1px solid var(--line); border-radius:6px; overflow:hidden; }}
   th, td {{ text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
             vertical-align:top; font-size:13px; }}
   th {{ font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--dim);
-       background:#f0f3f0; }}
+       background:var(--bg-raise); }}
   tr:last-child td {{ border-bottom:0; }}
-  tr.open td {{ background:#f0f7f2; }}
+  tr.open td {{ background:var(--pill); }}
   a.name {{ color:var(--ink); text-decoration:none; }}
   a.name:hover {{ color:var(--live); text-decoration:underline; }}
   code {{ font:12px/1.4 ui-monospace,Menlo,monospace; }}
@@ -5024,23 +5051,24 @@ def simple_status_html(
   .pill {{ display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px;
            font-weight:600; letter-spacing:.03em; }}
   .pill.live {{ background:var(--pill); color:var(--live); }}
-  .pill.stale {{ background:#f5efdf; color:var(--stale); }}
-  .pill.unknown {{ background:#eee6f0; color:#6b3a7a; }}
+  .pill.stale {{ background:var(--bg-raise); color:var(--stale); }}
+  .pill.unknown {{ background:var(--bg-raise); color:var(--text-dim); }}
   .empty {{ color:var(--dim); text-align:center; padding:24px; }}
   .dim {{ color:var(--dim); }}
-  .scope {{ margin:0 0 14px; padding:8px 12px; background:#eef1ea; border:1px dashed var(--line);
+  .scope {{ margin:0 0 14px; padding:8px 12px; background:var(--bg-raise); border:1px dashed var(--line);
             border-radius:6px; font-size:12px; color:var(--dim); }}
   .scope strong {{ color:var(--ink); font-weight:600; }}
   .connect {{ display:flex; flex-direction:column; gap:4px; max-width:28rem; }}
   .connect .cmd {{ display:block; font:11px/1.35 ui-monospace,Menlo,monospace;
                    white-space:pre-wrap; word-break:break-all; color:var(--ink);
-                   background:#f0f3f0; padding:6px 8px; border-radius:4px; border:1px solid var(--line); }}
+                   background:var(--bg-raise); padding:6px 8px; border-radius:4px; border:1px solid var(--line); }}
   .connect .copy {{ align-self:flex-start; font:11px system-ui,sans-serif; cursor:pointer;
                     border:1px solid var(--line); background:var(--card); color:var(--ink);
                     padding:3px 10px; border-radius:4px; }}
   .connect .copy:hover {{ border-color:var(--live); color:var(--live); }}
   .connect .copy.ok {{ background:var(--pill); color:var(--live); border-color:var(--live); }}
   .peek {{ background:#0f1411; color:#d7e0d9; border-radius:6px; overflow:hidden; }}
+  [data-theme=dark] .peek {{ background:#0a100c; }}
   .peek-bar {{ padding:8px 12px; font-size:12px; color:#9aab9f; border-bottom:1px solid #243028; }}
   .peek-bar a {{ color:#9fd6b0; }}
   .peek-bar code {{ color:#e8f5ee; }}
@@ -5053,13 +5081,17 @@ def simple_status_html(
 </head>
 <body>
 <header>
-  <h1>__STATUS_TITLE__</h1>
-  <div class="meta">
-    __PRODUCT_LINE__ · read-only · auto-refresh 15s ·
-    <a href="{base}/room">__TAGLINE__</a> ·
-    <a href="{base}/healthz">healthz</a>
-    <span class="dim"> · __FOOTER_NOTE__</span>
+  <div class="hdr-left">
+    <div class="brand-row">__LOGO_HTML__</div>
+    <h1>__STATUS_TITLE__</h1>
+    <div class="meta">
+      __PRODUCT_LINE__ · read-only · auto-refresh 15s ·
+      <a href="{base}/room">__TAGLINE__</a> ·
+      <a href="{base}/healthz">healthz</a>
+      <span class="dim"> · __FOOTER_NOTE__</span>
+    </div>
   </div>
+  <button type="button" id="themebtn" title="toggle light/dark">☾ dark</button>
 </header>
 <main>
   <div class="summary{' bad' if not ok else ''}" id="summary">{status_line} · checked {now}</div>
@@ -5101,6 +5133,34 @@ document.querySelectorAll("button.copy").forEach(function(btn){{
     }}
   }});
 }});
+</script>
+<script id="emux-theme">
+(function(){{
+  var KEY="__THEME_STORAGE_KEY__";
+  var def="__DEFAULT_THEME__";
+  function pref(){{
+    try{{var s=localStorage.getItem(KEY); if(s==="light"||s==="dark")return s;}}catch(e){{}}
+    if(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
+    return (def==="dark")?"dark":"light";
+  }}
+  function apply(t){{
+    document.documentElement.setAttribute("data-theme", t);
+    var b=document.getElementById("themebtn");
+    if(b){{b.textContent=t==="dark"?"☀ light":"☾ dark";}}
+  }}
+  function toggle(){{
+    var cur=document.documentElement.getAttribute("data-theme")||pref();
+    var next=cur==="dark"?"light":"dark";
+    try{{localStorage.setItem(KEY,next);}}catch(e){{}}
+    apply(next);
+  }}
+  apply(pref());
+  document.addEventListener("DOMContentLoaded",function(){{
+    apply(pref());
+    var b=document.getElementById("themebtn");
+    if(b) b.addEventListener("click",toggle);
+  }});
+}})();
 </script>
 </body>
 </html>
