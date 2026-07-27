@@ -2959,6 +2959,8 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 #modalpanel{
   position:relative;flex:1 1 auto;width:100%;height:100%;min-height:0;min-width:0;
   display:flex;flex-direction:column;
+  /* clip: children (esp. #modalscreen) must scroll inside, not grow the panel */
+  overflow:hidden;
   background:var(--bg-raise);border:1px solid var(--amber-dim);
   box-shadow:0 0 50px color-mix(in srgb, var(--amber) 18%, transparent);
   animation:zoomin .16s ease-out;
@@ -2982,7 +2984,8 @@ body.solo-session #views,body.solo-session #chat,body.solo-session #composer,bod
 body.solo-session #modal{display:flex!important;padding:0}
 body.solo-session #modalback{display:none}
 body.solo-session #modalpanel{
-  width:100vw;height:100vh;border:none;box-shadow:none;border-radius:0;animation:none;
+  width:100vw;height:100vh;max-height:100vh;border:none;box-shadow:none;border-radius:0;animation:none;
+  overflow:hidden;
 }
 body.solo-session #modalpop{display:none} /* already in a tab */
 /* --- new-session modal --- */
@@ -3127,9 +3130,27 @@ body.solo-session #modalpop{display:none} /* already in a tab */
 #modaliterm:hover{color:var(--amber);border-color:var(--amber-dim)}
 #modaliterm:disabled{opacity:.6;cursor:default}
 #modalscreen{
-  flex:1 1 auto;min-height:0;overflow-y:auto;font:12.5px/1.45 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
-  white-space:pre-wrap;word-break:break-word;padding:6px 10px;background:var(--bg-card);
+  /* flex-basis:0 — not auto — so height is the free slot, not content size.
+     Without this the pane grows with the capture and body{overflow:hidden}
+     clips it: wheel does nothing, which feels like "can't scroll the terminal". */
+  flex:1 1 0;min-height:0;min-width:0;
+  overflow-x:auto;overflow-y:scroll; /* always show vertical rail so scroll is obvious */
+  overscroll-behavior:contain;
+  -webkit-overflow-scrolling:touch;
+  touch-action:pan-x pan-y;
+  font:12.5px/1.45 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
+  white-space:pre-wrap;word-break:break-word;padding:6px 10px 28px;background:var(--bg-card);
+  position:relative;
 }
+#modaljump{
+  display:none;position:absolute;left:50%;transform:translateX(-50%);
+  bottom:78px;z-index:12;padding:5px 14px;border-radius:14px;
+  background:var(--amber);color:var(--on-accent);border:none;
+  font:11px/1 "IBM Plex Mono",ui-monospace,monospace;letter-spacing:.6px;
+  cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.35);
+}
+#modaljump.on{display:block}
+#modaljump:hover{filter:brightness(1.08)}
 /* live classifier strip (emux judge) */
 #modaljudge{display:none;align-items:center;gap:10px;padding:4px 10px;flex:none;
   border-bottom:1px solid var(--line);background:var(--bg-raise);font:11px "IBM Plex Mono",monospace}
@@ -3449,7 +3470,8 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
       <div class="dgtext"></div>
       <div class="dgsugg"></div>
     </div>
-    <div id="modalscreen"></div>
+    <div id="modalscreen" tabindex="0" role="log" aria-label="session terminal"></div>
+    <button type="button" id="modaljump" title="jump to live bottom">↓ live</button>
     <div id="tchat" class="collapsed">
       <button id="tchatlauncher" onclick="tchatToggle()">💬<span id="tchatbadge"></span></button>
       <div id="tchatpanel">
@@ -4614,6 +4636,21 @@ $("#filter").addEventListener("input",e=>{filterStr=e.target.value.toLowerCase()
 // ---------- zoom-in steer modal ----------
 let modalSession=null, modalTimer=null;
 let digestErr=false, digestRetries=0;   // The Gist: recover from a failed summarize when the pane changes, capped at 10
+function modalScreenPinned(sc){
+  if(!sc)return true;
+  // 80px tolerance: live panes jitter; don't yank the user for a few pixels
+  return sc.scrollHeight-sc.scrollTop-sc.clientHeight<80;
+}
+function updateModalJump(){
+  const sc=$("#modalscreen"), j=$("#modaljump");
+  if(!sc||!j)return;
+  const show=modalSession&&!modalScreenPinned(sc)&&sc.scrollHeight>sc.clientHeight+40;
+  j.classList.toggle("on",!!show);
+}
+function modalScrollBottom(){
+  const sc=$("#modalscreen");if(!sc)return;
+  sc.scrollTop=sc.scrollHeight;updateModalJump();
+}
 function openModal(s){
   document.body.classList.remove("nav-open");   // mobile: dismiss the session drawer
   modalSession=s;
@@ -4621,7 +4658,7 @@ function openModal(s){
   $("#modalname").textContent=s.name;
   $("#modalagent").innerHTML=agentHTML(s);
   $("#modalstatus").textContent="connecting…";$("#modalstatus").style.color="";
-  const sc=$("#modalscreen");sc.textContent="";sc.dataset.last="";
+  const sc=$("#modalscreen");sc.textContent="";sc.dataset.last="";sc.dataset.userPinned="0";
   $("#modaldigest").className="";$("#modaldigest .dgtext").textContent="";$("#modaldigest .dgsugg").innerHTML="";
   setPending("");$("#modalthink").className="";clearModalClips();
   tOpts=[];tSugg=[];tchatCollapsed=false;tLoggedDigest="";$("#tchatlog").innerHTML="";
@@ -4629,6 +4666,7 @@ function openModal(s){
   $("#modalswitch").classList.toggle("hot",!!s.cost);   // highlight when this session is throttled
   $("#tchatsess").textContent=s.name;$("#tchat").className="collapsed";renderTChat();
   $("#modal").classList.add("open");
+  updateModalJump();
   modalRefresh();clearInterval(modalTimer);modalTimer=setInterval(modalRefresh,1200);
   loadDigest();                                  // the gist + suggested replies, up front
   syncURL();                                      // deep-link the open session
@@ -4636,20 +4674,27 @@ function openModal(s){
 }
 function closeModal(){
   $("#modal").classList.remove("open");
+  const j=$("#modaljump");if(j)j.classList.remove("on");
   clearInterval(modalTimer);modalTimer=null;modalSession=null;clearModalClips();
   syncURL();                                      // drop the session from the URL
 }
 async function modalRefresh(){
   if(!modalSession)return;
-  const sc=$("#modalscreen");const atBottom=sc.scrollHeight-sc.scrollTop-sc.clientHeight<60;
+  const sc=$("#modalscreen");
+  // Honor explicit scroll-up: once user leaves the bottom, stay there across
+  // live captures until they jump back (or scroll to bottom themselves).
+  const userPinned=sc.dataset.userPinned==="1";
+  const atBottom=!userPinned&&modalScreenPinned(sc);
+  const keepTop=sc.scrollTop;
   try{
-    const r=await api("/api/capture?session="+encodeURIComponent(modalSession.session)+"&lines=400");
+    const r=await api("/api/capture?session="+encodeURIComponent(modalSession.session)+"&lines=800");
     if(r.ok){
       $("#modalstatus").textContent="live";$("#modalstatus").style.color="";
       if(sc.dataset.last!==r.content){
         sc.dataset.last=r.content;sc.textContent=r.content.replace(/\s+$/,"")+"\n";
         const cur=document.createElement("span");cur.className="cursorblock";sc.appendChild(cur);
         if(atBottom)sc.scrollTop=sc.scrollHeight;
+        else sc.scrollTop=keepTop;  // textContent wipe resets scroll — restore
         // The Gist failed but the web changed — ok to try to recover, capped at 10
         if(digestErr&&digestRetries<10){digestRetries++;loadDigest();}
       }
@@ -4659,6 +4704,7 @@ async function modalRefresh(){
       if(pendingText&&r.content&&r.content.indexOf(pendingText.trim().slice(0,40))>=0)setPending("");
     }else{$("#modalstatus").textContent=r.error||"error";$("#modalstatus").style.color="var(--stale)";}
   }catch(e){$("#modalstatus").textContent="unreachable";$("#modalstatus").style.color="var(--stale)";}
+  updateModalJump();
   modalJudge();
 }
 // the gist: a reader's-digest of the session + clickable suggested replies, so
@@ -5142,6 +5188,23 @@ $("#newintent").addEventListener("keydown",e=>{if(e.key==="Enter")doSuggest();})
 $("#dgrefresh").onclick=loadDigest;
 $("#modalclose").onclick=closeModal;
 $("#modalback").onclick=closeModal;
+// Terminal scroll: track user pin + jump-to-live pill
+(function(){
+  const sc=$("#modalscreen"), j=$("#modaljump");
+  if(sc){
+    sc.addEventListener("scroll",()=>{
+      if(modalScreenPinned(sc))sc.dataset.userPinned="0";
+      else sc.dataset.userPinned="1";
+      updateModalJump();
+    },{passive:true});
+    // Wheel over the pane should always scroll the pane (not a parent).
+    sc.addEventListener("wheel",e=>{
+      // only stopPropagation so trackpads don't scroll a non-scrolling ancestor
+      e.stopPropagation();
+    },{passive:true});
+  }
+  if(j)j.onclick=()=>{const s=$("#modalscreen");if(s)s.dataset.userPinned="0";modalScrollBottom();};
+})();
 document.querySelectorAll("#modalchips .chip").forEach(ch=>ch.onclick=()=>modalKeys(ch.dataset.keys,false,false));
 
 // keyboard: Esc closes the modal first; otherwise 1-4 switch views
