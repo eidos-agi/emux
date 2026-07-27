@@ -184,26 +184,28 @@ _EMUX_DARK = Palette(
     on_accent="#0c0a07",
 )
 
-# Greenmark go door family: deep green + cream, dark forest night mode
+# Greenmark go door family: cool green (not emux amber/brown) + cream paper
+# Light accent is a clear forest green — pure #203C31 on cream can read muddy/brown.
 _GMUX_LIGHT = Palette(
-    bg="#f7f8f3",
-    bg_raise="#eef1ea",
+    bg="#f4f7f4",
+    bg_raise="#e8f0ea",
     bg_card="#ffffff",
-    accent="#203C31",
-    accent_dim="#3d6b55",
-    accent_faint="#d4e8dc",
-    text="#1d2b23",
-    text_dim="#5c6b61",
+    accent="#1b7a4e",       # interactive green (tabs, brand, hot tiles)
+    accent_dim="#2d6a4f",
+    accent_faint="#d4edda",
+    text="#14261c",
+    text_dim="#4d6356",
     live="#1a7a45",
-    stale="#8a6a2a",
-    line="#d5ddd6",
-    on_accent="#f7f8f3",
+    stale="#a67c2d",
+    line="#c5d6cb",
+    on_accent="#f4f7f4",
+    user="#203C31",         # deep brand green (go door)
 )
 _GMUX_DARK = Palette(
-    bg="#0f1a14",
-    bg_raise="#15241c",
-    bg_card="#1a2e24",
-    accent="#5fbf8f",
+    bg="#0c1611",
+    bg_raise="#132019",
+    bg_card="#1a2a21",
+    accent="#5fbf8f",       # mint on forest (go door pulse)
     accent_dim="#3d9a6e",
     accent_faint="#1e3d30",
     text="#e8f0ea",
@@ -211,7 +213,8 @@ _GMUX_DARK = Palette(
     live="#5fbf8f",
     stale="#c9a227",
     line="#2a4034",
-    on_accent="#0f1a14",
+    on_accent="#0c1611",
+    user="#5fbf8f",
 )
 
 _SKINS: dict[str, Skin] = {

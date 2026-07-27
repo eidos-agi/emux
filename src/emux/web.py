@@ -2026,7 +2026,7 @@ body{
   transition:border-color .15s, transform .15s;
 }
 .card:hover{border-color:var(--amber-dim);transform:translateX(2px)}
-.card.active{border-left-color:var(--amber);box-shadow:0 0 14px rgba(255,176,0,.12) inset}
+.card.active{border-left-color:var(--amber);box-shadow:0 0 14px color-mix(in srgb, var(--amber) 12%, transparent) inset}
 .card .nm{color:var(--amber);font-weight:600}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:1px}
 .dot.live{background:var(--live);box-shadow:0 0 6px var(--live)}
@@ -2048,7 +2048,7 @@ body{
   font-size:18px;cursor:pointer;line-height:1;padding:0 4px}
 #feedclose:hover{color:var(--amber)}
 #feedlist{flex:1;overflow-y:auto;padding:6px 0}
-.fev{display:flex;gap:8px;padding:5px 12px;border-bottom:1px solid rgba(255,176,0,.05);font-size:11px;align-items:baseline}
+.fev{display:flex;gap:8px;padding:5px 12px;border-bottom:1px solid color-mix(in srgb, var(--amber) 5%, transparent);font-size:11px;align-items:baseline}
 .fev .fage{color:var(--text-dim);font-size:9px;white-space:nowrap;min-width:26px}
 .fev .ftag{font-weight:700;white-space:nowrap}
 .fev .fsess{color:var(--amber-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:90px}
@@ -2058,7 +2058,7 @@ body{
 .fev.k-PROGRESS .ftag{color:var(--user)}
 .fev.k-op .ftag{color:var(--amber-dim)}
 .fev.fresh{animation:fevin .5s ease}
-@keyframes fevin{from{background:rgba(255,176,0,.18)}to{background:transparent}}
+@keyframes fevin{from{background:color-mix(in srgb, var(--amber) 18%, transparent)}to{background:transparent}}
 #topbar{
   flex:none;display:flex;align-items:center;gap:14px;flex-wrap:wrap;
   padding:10px 22px;border-bottom:1px solid var(--line);background:var(--bg-raise);
@@ -2080,7 +2080,7 @@ body{
   display:flex;flex-direction:column;transition:border-color .2s, box-shadow .4s;
 }
 .tile:hover{border-color:var(--amber-dim)}
-.tile.hot{border-color:var(--amber);box-shadow:0 0 16px rgba(255,176,0,.25)}
+.tile.hot{border-color:var(--amber);box-shadow:0 0 16px color-mix(in srgb, var(--amber) 25%, transparent)}
 .tile.dead{opacity:.45}
 /* WAITING ON YOU: marching ants around the edge + a slow breathing orb glow, so a
    session that needs your decision is impossible to miss on a wall of tiles. */
@@ -2098,7 +2098,7 @@ body{
   background-repeat:repeat-x, repeat-x, repeat-y, repeat-y;
   animation:ants .55s infinite linear}
 @keyframes ants{to{background-position:14px 0, -14px 100%, 0 -14px, 100% 14px}}
-@keyframes orb{0%,100%{box-shadow:0 0 6px rgba(255,176,0,.35)}50%{box-shadow:0 0 22px 3px rgba(255,176,0,.6)}}
+@keyframes orb{0%,100%{box-shadow:0 0 6px color-mix(in srgb, var(--amber) 35%, transparent)}50%{box-shadow:0 0 22px 3px color-mix(in srgb, var(--amber) 60%, transparent)}}
 .card.needy{border-left-color:var(--amber)}
 /* LOUD needs-you: a red ring + glow + a pulsing corner badge — red reads as
    "attention" against the amber theme, which amber-on-amber ants did not. */
@@ -2157,7 +2157,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .actrow .nm{color:var(--amber);font-weight:600;width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:none}
 .cells{display:flex;gap:2px;flex:1;min-width:0}
 .cell{width:9px;height:18px;background:var(--bg-card);flex:none}
-.cell.on{background:var(--amber);box-shadow:0 0 5px rgba(255,176,0,.6)}
+.cell.on{background:var(--amber);box-shadow:0 0 5px color-mix(in srgb, var(--amber) 60%, transparent)}
 .cell.recent{background:var(--user)}
 .actrow .age{font-size:11px;color:var(--text-dim);width:120px;text-align:right;flex:none;letter-spacing:1px}
 /* flow view — live mini-pane boxes over an SVG edge layer */
@@ -2169,7 +2169,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
   transition:border-color .2s, box-shadow .4s;
 }
 .fbox:hover{border-color:var(--amber-dim)}
-.fbox.hot{border-color:var(--amber);box-shadow:0 0 16px rgba(255,176,0,.25)}
+.fbox.hot{border-color:var(--amber);box-shadow:0 0 16px color-mix(in srgb, var(--amber) 25%, transparent)}
 .fbox.dead{opacity:.45}
 .fbox .ftitle{display:flex;align-items:center;gap:6px;padding:5px 9px;background:var(--bg-card);border-bottom:1px solid var(--line)}
 .fbox .ftitle .nm{color:var(--amber);font-weight:600;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -2200,7 +2200,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
   width:14px;height:14px;margin-right:6px;border-radius:50%;
   background:var(--amber);color:var(--on-accent);font-weight:800;font-size:10px;
   vertical-align:middle;animation:qpulse 1.1s ease-in-out infinite}
-@keyframes qpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,176,0,.5)}50%{box-shadow:0 0 0 4px rgba(255,176,0,0)}}
+@keyframes qpulse{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb, var(--amber) 50%, transparent)}50%{box-shadow:0 0 0 4px color-mix(in srgb, var(--amber) 1%, transparent)}}
 /* the summary rail — a thin always-on "what's happening", hover for the full text */
 .rail{position:relative;font-size:9.5px;line-height:1.5;padding:2px 10px;
   background:var(--bg-raise);border-bottom:1px solid var(--line);color:var(--text-dim);
@@ -2233,7 +2233,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .ag-grok{color:#e8e8e8}.ag-opencode{color:#b57bff}.ag-aider{color:#f0a020}
 .ag-hermes{color:#b07de0}.ag-shell{color:#8a8a72}.ag-editor{color:#8a8a72}
 .edge{stroke:var(--amber);stroke-width:2;fill:none;stroke-dasharray:7 5;animation:flow 1.1s linear infinite;
-  filter:drop-shadow(0 0 4px rgba(255,176,0,.4))}
+  filter:drop-shadow(0 0 4px color-mix(in srgb, var(--amber) 40%, transparent))}
 @keyframes flow{to{stroke-dashoffset:-12}}
 .rowlabel{fill:var(--text-dim);font:10px "IBM Plex Mono",monospace;letter-spacing:2px;text-transform:uppercase}
 .sep{stroke:var(--line);stroke-width:1;stroke-dasharray:3 5}
@@ -2257,10 +2257,10 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 }
 #screen.dimmed{opacity:.35}
 .cursorblock{display:inline-block;width:8px;height:14px;background:var(--amber);
-  vertical-align:-2px;animation:blink 1.1s steps(1) infinite;box-shadow:0 0 8px rgba(255,176,0,.8)}
+  vertical-align:-2px;animation:blink 1.1s steps(1) infinite;box-shadow:0 0 8px color-mix(in srgb, var(--amber) 80%, transparent)}
 @keyframes blink{50%{opacity:0}}
 #empty{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;color:var(--text-dim);height:100%}
-#empty .glyph{font-family:"VT323",monospace;font-size:80px;color:var(--amber-faint);text-shadow:0 0 30px rgba(255,176,0,.15)}
+#empty .glyph{font-family:"VT323",monospace;font-size:80px;color:var(--amber-faint);text-shadow:0 0 30px color-mix(in srgb, var(--amber) 15%, transparent)}
 #composer{flex:none;border-top:1px solid var(--line);background:var(--bg-raise);padding:12px 22px 16px}
 #chips{display:flex;gap:8px;margin-bottom:10px}
 .chip{
@@ -2273,12 +2273,12 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
   flex:1;background:var(--bg-card);border:1px solid var(--line);color:var(--text);
   font:14px "IBM Plex Mono",monospace;padding:11px 14px;outline:none;caret-color:var(--amber);
 }
-#input:focus{border-color:var(--amber-dim);box-shadow:0 0 12px rgba(255,176,0,.1)}
+#input:focus{border-color:var(--amber-dim);box-shadow:0 0 12px color-mix(in srgb, var(--amber) 10%, transparent)}
 #send{
   font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:0 26px;
   background:var(--amber);color:var(--on-accent);border:none;cursor:pointer;
 }
-#send:hover{box-shadow:0 0 18px rgba(255,176,0,.5)}
+#send:hover{box-shadow:0 0 18px color-mix(in srgb, var(--amber) 50%, transparent)}
 /* recency-tiered age coloring (#17) */
 .age.t-now{color:var(--amber)}
 .age.t-min{color:var(--amber-dim)}
@@ -2308,7 +2308,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
   position:absolute;left:50%;transform:translateX(-50%);bottom:96px;display:none;
   font-family:"VT323",monospace;font-size:16px;letter-spacing:1px;
   background:var(--amber);color:var(--on-accent);border:none;padding:4px 16px;cursor:pointer;
-  box-shadow:0 0 14px rgba(255,176,0,.5);z-index:5;
+  box-shadow:0 0 14px color-mix(in srgb, var(--amber) 50%, transparent);z-index:5;
 }
 /* zoom-in steer modal */
 #modal{position:fixed;inset:0;z-index:200;display:none;align-items:center;justify-content:center}
@@ -2316,7 +2316,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 #modalback{position:absolute;inset:0;background:rgba(6,4,2,.72);backdrop-filter:blur(2px)}
 #modalpanel{
   position:relative;width:min(900px,86vw);height:min(620px,82vh);display:flex;flex-direction:column;
-  background:var(--bg-raise);border:1px solid var(--amber-dim);box-shadow:0 0 50px rgba(255,176,0,.18);
+  background:var(--bg-raise);border:1px solid var(--amber-dim);box-shadow:0 0 50px color-mix(in srgb, var(--amber) 18%, transparent);
   animation:zoomin .16s ease-out;
 }
 @keyframes zoomin{from{transform:scale(.92);opacity:.4}to{transform:scale(1);opacity:1}}
@@ -2388,7 +2388,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .lane{font-size:10px;letter-spacing:.5px;padding:3px 10px;border:1px solid var(--line);
   color:var(--text-dim);cursor:pointer;user-select:none;border-radius:3px}
 .lane:hover{border-color:var(--amber-faint);color:var(--amber-dim)}
-.lane.on{border-color:var(--amber);color:var(--amber);background:rgba(255,176,0,.09)}
+.lane.on{border-color:var(--amber);color:var(--amber);background:color-mix(in srgb, var(--amber) 9%, transparent)}
 .lane b{font-weight:700;opacity:.7;margin-left:5px}
 .dirchoices{max-height:150px;overflow-y:auto;border:1px solid var(--line);margin-top:5px}
 .dirrow .meta{opacity:.55;margin-left:8px;font-size:10px}
@@ -2405,8 +2405,8 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 #guinote{font-size:10px;color:#ffb27d;margin-top:4px}
 #guinote:empty{display:none}
 .dirrow{padding:5px 9px;font-size:12px;color:var(--text-dim);cursor:pointer;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid rgba(255,176,0,.06)}
-.dirrow:hover{background:rgba(255,176,0,.07);color:var(--amber-dim)}
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid color-mix(in srgb, var(--amber) 6%, transparent)}
+.dirrow:hover{background:color-mix(in srgb, var(--amber) 7%, transparent);color:var(--amber-dim)}
 .dirrow.on{background:var(--amber);color:var(--on-accent);font-weight:700}
 .dirrow .ai{opacity:.75;margin-left:6px}
 /* orphans view + machine facet */
@@ -2433,7 +2433,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 #newfoot{padding:12px 16px;border-top:1px solid var(--line);display:flex;justify-content:flex-end}
 #newcreate{font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:5px 28px;
   background:var(--amber);border:none;color:var(--on-accent);cursor:pointer;font-weight:700}
-#newcreate:hover{box-shadow:0 0 18px rgba(255,176,0,.5)}
+#newcreate:hover{box-shadow:0 0 18px color-mix(in srgb, var(--amber) 50%, transparent)}
 #newcreate:disabled{opacity:.5;cursor:default;box-shadow:none}
 #modaliterm{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 11px;margin-left:10px}
 #modaliterm:hover{color:var(--amber);border-color:var(--amber-dim)}
@@ -2509,10 +2509,10 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 #modalrow{display:flex;gap:10px;padding:10px 16px 14px}
 #modalinput{flex:1;background:var(--bg-card);border:1px solid var(--line);color:var(--text);
   font:14px "IBM Plex Mono",monospace;padding:11px 14px;outline:none;caret-color:var(--amber)}
-#modalinput:focus{border-color:var(--amber-dim);box-shadow:0 0 12px rgba(255,176,0,.1)}
+#modalinput:focus{border-color:var(--amber-dim);box-shadow:0 0 12px color-mix(in srgb, var(--amber) 10%, transparent)}
 #modalsend{font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:0 24px;
   background:var(--amber);color:var(--on-accent);border:none;cursor:pointer}
-#modalsend:hover{box-shadow:0 0 18px rgba(255,176,0,.5)}
+#modalsend:hover{box-shadow:0 0 18px color-mix(in srgb, var(--amber) 50%, transparent)}
 ::-webkit-scrollbar{width:8px}
 ::-webkit-scrollbar-thumb{background:var(--amber-faint)}
 ::-webkit-scrollbar-track{background:transparent}

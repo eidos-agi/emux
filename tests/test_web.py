@@ -267,7 +267,8 @@ def test_gmux_skin_rebrands_without_forking():
     s = skin.get_skin("gmux")
     assert s.id == "gmux" and s.brand == "GMUX"
     assert s.engine_label == "emux" and "emux" in s.footer_note
-    assert s.light.accent == "#203C31" and s.dark.accent.startswith("#")
+    assert s.light.accent.startswith("#") and s.dark.accent.startswith("#")
+    assert s.light.accent.lower() != "#8e6129"  # not emux amber
     css = s.theme_css()
     assert "[data-theme=dark]" in css and s.light.bg in css and s.dark.bg in css
     assert "skin-logo" in s.logo_svg and "GMUX" in s.logo_html()
