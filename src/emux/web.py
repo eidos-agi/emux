@@ -2661,22 +2661,39 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
   background:var(--amber);color:var(--on-accent);border:none;padding:4px 16px;cursor:pointer;
   box-shadow:0 0 14px color-mix(in srgb, var(--amber) 50%, transparent);z-index:5;
 }
-/* zoom-in steer modal */
-#modal{position:fixed;inset:0;z-index:200;display:none;align-items:center;justify-content:center}
+/* zoom-in steer modal — fills most of the viewport (not a fixed 900×620 card) */
+#modal{position:fixed;inset:0;z-index:200;display:none;align-items:stretch;justify-content:stretch;padding:1vh 1vw;box-sizing:border-box}
 #modal.open{display:flex}
 #modalback{position:absolute;inset:0;background:rgba(6,4,2,.72);backdrop-filter:blur(2px)}
 #modalpanel{
-  position:relative;width:min(900px,86vw);height:min(620px,82vh);display:flex;flex-direction:column;
-  background:var(--bg-raise);border:1px solid var(--amber-dim);box-shadow:0 0 50px color-mix(in srgb, var(--amber) 18%, transparent);
+  position:relative;flex:1 1 auto;width:100%;height:100%;min-height:0;min-width:0;
+  display:flex;flex-direction:column;
+  background:var(--bg-raise);border:1px solid var(--amber-dim);
+  box-shadow:0 0 50px color-mix(in srgb, var(--amber) 18%, transparent);
   animation:zoomin .16s ease-out;
 }
-@keyframes zoomin{from{transform:scale(.92);opacity:.4}to{transform:scale(1);opacity:1}}
-#modalhead{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--line);background:var(--bg-card)}
-#modalhead .nm{font-family:"VT323",monospace;font-size:24px;color:var(--amber);letter-spacing:1px}
+@keyframes zoomin{from{transform:scale(.98);opacity:.4}to{transform:scale(1);opacity:1}}
+#modalhead{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--bg-card);flex:0 0 auto}
+#modalhead .nm{font-family:"VT323",monospace;font-size:22px;color:var(--amber);letter-spacing:1px}
 #modalhead .ag{color:var(--amber-dim);font-size:12px;letter-spacing:1px}
 #modalhead .st{margin-left:auto;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim)}
-#modalclose{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:14px;cursor:pointer;padding:2px 11px;margin-left:10px}
-#modalclose:hover{color:var(--amber);border-color:var(--amber-dim)}
+#modalclose,#modalpop{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 10px;margin-left:6px}
+#modalclose:hover,#modalpop:hover{color:var(--amber);border-color:var(--amber-dim)}
+/* solo tab: one session fills the Chrome tab — no fleet chrome */
+body.solo-session #side,
+body.solo-session #feed,
+body.solo-session #topbar,
+body.solo-session #costbanner,
+body.solo-session #scrim,
+body.solo-session #footer{display:none!important}
+body.solo-session #main{margin:0;padding:0;width:100%;height:100vh;overflow:hidden}
+body.solo-session #views,body.solo-session #chat,body.solo-session #composer,body.solo-session #jump{display:none!important}
+body.solo-session #modal{display:flex!important;padding:0}
+body.solo-session #modalback{display:none}
+body.solo-session #modalpanel{
+  width:100vw;height:100vh;border:none;box-shadow:none;border-radius:0;animation:none;
+}
+body.solo-session #modalpop{display:none} /* already in a tab */
 /* --- new-session modal --- */
 #newmodal{display:none;position:fixed;inset:0;z-index:60}
 #newmodal.open{display:block}
@@ -2815,15 +2832,15 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
   background:var(--amber);border:none;color:var(--on-accent);cursor:pointer;font-weight:700}
 #newcreate:hover{box-shadow:0 0 18px color-mix(in srgb, var(--amber) 50%, transparent)}
 #newcreate:disabled{opacity:.5;cursor:default;box-shadow:none}
-#modaliterm{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 11px;margin-left:10px}
+#modaliterm{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 10px;margin-left:6px}
 #modaliterm:hover{color:var(--amber);border-color:var(--amber-dim)}
 #modaliterm:disabled{opacity:.6;cursor:default}
 #modalscreen{
-  flex:1;overflow-y:auto;font:12.5px/1.45 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
-  white-space:pre-wrap;word-break:break-word;padding:14px 16px;background:var(--bg-card);
+  flex:1 1 auto;min-height:0;overflow-y:auto;font:12.5px/1.45 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
+  white-space:pre-wrap;word-break:break-word;padding:6px 10px;background:var(--bg-card);
 }
 /* live classifier strip (emux judge) */
-#modaljudge{display:none;align-items:center;gap:12px;padding:8px 16px;flex:none;
+#modaljudge{display:none;align-items:center;gap:10px;padding:4px 10px;flex:none;
   border-bottom:1px solid var(--line);background:var(--bg-raise);font:11px "IBM Plex Mono",monospace}
 #modaljudge.on{display:flex}
 #modaljudge .jstate{font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:12px;white-space:nowrap}
@@ -2866,10 +2883,10 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 #modalclips .cliphint{font-size:10px;color:var(--text-dim);letter-spacing:.3px}
 /* the gist — reader's-digest + suggested replies, so you know what to do */
 #modaldigest{display:none}
-#modaldigest.on{display:block;padding:11px 16px;background:var(--bg-raise);
-  border-bottom:1px solid var(--amber-faint)}
+#modaldigest.on{display:block;padding:6px 10px;background:var(--bg-raise);
+  border-bottom:1px solid var(--amber-faint);flex:0 0 auto}
 #modaldigest .dghead{display:flex;align-items:center;font-size:10px;letter-spacing:2px;
-  text-transform:uppercase;color:var(--amber-dim);margin-bottom:5px}
+  text-transform:uppercase;color:var(--amber-dim);margin-bottom:3px}
 #dgrefresh{margin-left:auto;background:transparent;border:none;color:var(--text-dim);
   font-size:13px;cursor:pointer}
 #dgrefresh:hover{color:var(--amber)}
@@ -2885,8 +2902,8 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .sgg:disabled{opacity:.45;cursor:default;box-shadow:none}
 /* clickable answer bubbles — overlay the chat when the agent shows a menu */
 #modalopts{display:none}
-#modalopts.on{display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px 2px;
-  border-top:1px solid var(--amber-faint);background:var(--bg-raise)}
+#modalopts.on{display:flex;flex-wrap:wrap;gap:6px;padding:6px 10px 2px;
+  border-top:1px solid var(--amber-faint);background:var(--bg-raise);flex:0 0 auto}
 #modalopts .ohint{flex-basis:100%;font-size:10px;letter-spacing:1px;text-transform:uppercase;
   color:var(--amber-dim);margin-bottom:2px}
 .obub{background:var(--amber);border:1.5px solid var(--amber);color:var(--on-accent);font-weight:650;
@@ -2898,12 +2915,14 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .obub.sel{box-shadow:0 0 0 3px var(--bg),0 0 0 5px var(--amber)}
 .obub:disabled{opacity:.45;cursor:default;box-shadow:none}
 .obub:disabled{opacity:.5;cursor:default}
-#modalchips{display:flex;gap:8px;padding:10px 16px 0}
-#modalrow{display:flex;gap:10px;padding:10px 16px 14px}
+#modalchips{display:flex;gap:6px;padding:6px 10px 0;flex:0 0 auto}
+#modalclips{padding:0 10px 4px}
+#modalpending.on{margin:0 10px 4px;padding:5px 8px}
+#modalrow{display:flex;gap:8px;padding:6px 10px 8px;flex:0 0 auto}
 #modalinput{flex:1;background:var(--bg-card);border:1px solid var(--line);color:var(--text);
-  font:14px "IBM Plex Mono",monospace;padding:11px 14px;outline:none;caret-color:var(--amber)}
+  font:14px "IBM Plex Mono",monospace;padding:8px 10px;outline:none;caret-color:var(--amber)}
 #modalinput:focus{border-color:var(--amber-dim);box-shadow:0 0 12px color-mix(in srgb, var(--amber) 10%, transparent)}
-#modalsend{font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:0 24px;
+#modalsend{font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:0 20px;
   background:var(--amber);color:var(--on-accent);border:none;cursor:pointer}
 #modalsend:hover{box-shadow:0 0 18px color-mix(in srgb, var(--amber) 50%, transparent)}
 ::-webkit-scrollbar{width:8px}
@@ -3130,6 +3149,7 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
       <span class="st" id="modalstatus">live</span>
       <button id="modalswitch" title="fail this session over to another Claude account (exits + relaunches + resumes)" onclick="switchPlan()">⇄ switch account</button>
       <button id="modaliterm" class="maconly" title="open this session in a new iTerm2 window (attached tmux)">⧉ iTerm2</button>
+      <button id="modalpop" type="button" title="open this session as its own browser tab">↗ tab</button>
       <button id="modalclose">✕ close</button>
     </div>
     <div id="modaljudge"></div>
@@ -3268,26 +3288,40 @@ function syncURL(){
     if(CH.q)p.set("ch_q",CH.q);
     if(CH.sort&&CH.sort!=="priority")p.set("ch_sort",CH.sort);
   }
+  if(soloMode)p.set("solo","1");
   const h=p.toString();
   if((location.hash.slice(1))!==h)
     history.replaceState(null,"",h?("#"+h):location.pathname+location.search);
 }
+let soloMode=false;
 function applyURL(){
   urlBooting=true;
   const p=new URLSearchParams(location.hash.slice(1));
+  soloMode=p.get("solo")==="1";
+  document.body.classList.toggle("solo-session",soloMode);
   activeCompany=p.get("company")||"";
   activeTag=p.get("tag")||"";
   filterStr=(p.get("q")||"").toLowerCase();
   const f=$("#filter");if(f)f.value=p.get("q")||"";
   skinForCompany();
-  setMode(p.get("view")||localStorage.getItem("emux_view")||"grid");
+  // solo tabs still need a grid load for session metadata; default view stays grid
+  setMode(soloMode?"grid":(p.get("view")||localStorage.getItem("emux_view")||"grid"));
   renderTagbar();renderSidebar();
   urlBooting=false;
   // deep-link to an open session modal — once the grid is loaded
   const sess=p.get("session");
   if(sess){const open=()=>{const s=grid.find(x=>x.name===sess);
-    if(s)openModal(s);else if(!grid.length)setTimeout(open,300);};open();}
+    if(s)openModal(s);else if(!grid.length)setTimeout(open,400);
+    else if(soloMode)setTimeout(open,800);};open();}
   else if(!modalSession){/* leave modal closed */}
+}
+function popOutSessionTab(){
+  if(!modalSession)return;
+  const p=new URLSearchParams();
+  p.set("session",modalSession.name);
+  p.set("solo","1");
+  const url=location.pathname+location.search+"#"+p.toString();
+  window.open(url,"_blank","noopener,noreferrer");
 }
 window.addEventListener("hashchange",()=>{if(!urlBooting)applyURL();});
 
@@ -4536,6 +4570,7 @@ $("#tchatinput").addEventListener("paste",e=>{
   if(!modalSession)return;
   handleComposerPaste(e,modalSession.session||modalSession.name);
 });
+$("#modalpop").onclick=()=>popOutSessionTab();
 $("#modaliterm").onclick=async()=>{
   if(!modalSession)return;
   const b=$("#modaliterm");const was=b.textContent;b.disabled=true;b.textContent="opening…";
