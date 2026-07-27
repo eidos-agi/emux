@@ -261,7 +261,7 @@ def test_format_text_empty():
     assert "No matching chats" in text
 
 
-def test_normalize_chat_cwd_and_resume_fleet(monkeypatch):
+def test_normalize_chat_cwd_and_resume_fleet(monkeypatch, tmp_path):
     from emux import web
 
     assert web._normalize_chat_cwd("Volumes/GREENMARK/foo") == "/Volumes/GREENMARK/foo"
@@ -275,6 +275,13 @@ def test_normalize_chat_cwd_and_resume_fleet(monkeypatch):
         return {"ok": True, "name": kwargs["name"], "session": kwargs["name"], "launched": True}
 
     monkeypatch.setattr(web._server, "tmux_spawn", fake_spawn)
+    # CI runners have no claude binary — pin absolute path like production EMUX_CLAUDE_BIN.
+    fake_claude = tmp_path / "claude"
+    fake_claude.write_text("#!/bin/sh\n")
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(web, "_resolve_cli", lambda name: str(fake_claude) if name == "claude" else None)
+    monkeypatch.setattr(web, "_wait_pane_command", lambda *a, **k: True)
+    monkeypatch.setattr(web, "send_payload", lambda *a, **k: None)
 
     import emux.chats as chat_find
 
@@ -290,9 +297,9 @@ def test_normalize_chat_cwd_and_resume_fleet(monkeypatch):
             "greenmark": True,
         }
     )
-    assert r["ok"] is True
+    assert r["ok"] is True, r
     assert r["name"].startswith("chat-claude-")
-    assert "claude --resume" in r["command"]
+    assert "claude" in r["command"] and "--resume" in r["command"]
     assert calls["cwd"] == "/Volumes/GREENMARK/Clouds/x"
     assert "chat-resume" in (calls.get("tags") or [])
     assert "greenmark" in (calls.get("tags") or [])
