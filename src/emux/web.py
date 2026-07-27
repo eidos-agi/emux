@@ -2627,9 +2627,9 @@ def steer_payload(data: dict[str, Any]) -> dict[str, Any]:
     session_id (Grok/Claude transcript uuid), cwd, timeout, tool.
 
     Modes:
-    - auto — Grok (tags/gsid) → headless; else PTY
+    - auto — Grok (tags/gsid) → **ACP then headless then PTY**; Claude → PTY
     - headless — ``grok -p`` one-shot (Phase B)
-    - acp — ``grok agent stdio`` ACP prompt (Phase C)
+    - acp — ``grok agent stdio`` ACP prompt (Phase C); no fallback unless auto
     - pty — tmux send-keys into live pane
     """
     prompt = (data.get("prompt") or data.get("keys") or data.get("text") or "").strip()
@@ -2639,9 +2639,10 @@ def steer_payload(data: dict[str, Any]) -> dict[str, Any]:
     if not session:
         return {"ok": False, "error": "missing_session"}
 
-    mode = (data.get("mode") or "auto").strip().lower()
-    if mode not in ("auto", "headless", "acp", "pty"):
-        mode = "auto"
+    requested = (data.get("mode") or "auto").strip().lower()
+    if requested not in ("auto", "headless", "acp", "pty"):
+        requested = "auto"
+    mode = requested
 
     tool_hint, gsid_reg, tags = _gsid_from_registry(session)
     tool = (data.get("tool") or tool_hint or "").strip().lower()
@@ -2653,72 +2654,109 @@ def steer_payload(data: dict[str, Any]) -> dict[str, Any]:
         timeout = 120.0
     timeout = max(10.0, min(600.0, timeout))
 
+    is_grok = tool == "grok" or bool(gsid) or "grok" in {str(t).lower() for t in tags}
     if mode == "auto":
-        want_headless = tool == "grok" or bool(gsid) or "grok" in tags
-        mode = "headless" if want_headless else "pty"
+        # Protocol-first for Grok: ACP → headless → PTY
+        mode = "acp" if is_grok else "pty"
+
+    fallbacks: list[str] = []
 
     if mode == "acp":
         try:
             from . import acp_grok as acp
             from . import grok_control as gc
         except ImportError as exc:
-            return {"ok": False, "error": f"acp_unavailable:{exc}", "mode": "acp"}
-        if not gc.resolve_grok_bin() and not data.get("bin_path"):
-            return {
-                "ok": False,
-                "error": "grok_not_found",
-                "mode": "acp",
-                "hint": "set EMUX_GROK_BIN or install grok",
-            }
-        result = acp.run_acp_prompt(
-            prompt,
-            session_id=gsid or None,
-            cwd=cwd,
-            bin_path=(data.get("bin_path") or None),
-            model=(data.get("model") or None),
-            timeout=timeout,
-            always_approve=bool(data.get("always_approve", True)),
-        )
-        result["tmux_session"] = session
-        result["tool"] = "grok"
-        if result.get("ok") and data.get("also_pty"):
-            send_payload(session, prompt, literal=True, enter=True, host=_session_host(session))
-        return result
+            if requested == "acp":
+                return {"ok": False, "error": f"acp_unavailable:{exc}", "mode": "acp"}
+            fallbacks.append(f"acp_unavailable:{exc}")
+            mode = "headless"
+        else:
+            if not gc.resolve_grok_bin() and not data.get("bin_path"):
+                if requested == "acp":
+                    return {
+                        "ok": False,
+                        "error": "grok_not_found",
+                        "mode": "acp",
+                        "hint": "set EMUX_GROK_BIN or install grok",
+                    }
+                fallbacks.append("acp_grok_not_found")
+                mode = "headless"
+            else:
+                result = acp.run_acp_prompt(
+                    prompt,
+                    session_id=gsid or None,
+                    cwd=cwd,
+                    bin_path=(data.get("bin_path") or None),
+                    model=(data.get("model") or None),
+                    timeout=timeout,
+                    always_approve=bool(data.get("always_approve", True)),
+                )
+                result["tmux_session"] = session
+                result["tool"] = "grok"
+                if result.get("ok"):
+                    if data.get("also_pty"):
+                        send_payload(
+                            session, prompt, literal=True, enter=True,
+                            host=_session_host(session),
+                        )
+                    if fallbacks:
+                        result["fallbacks_skipped"] = fallbacks
+                    return result
+                # ACP failed — cascade on auto only
+                if requested == "acp":
+                    result["tmux_session"] = session
+                    result["tool"] = "grok"
+                    return result
+                fallbacks.append(f"acp:{result.get('error') or 'failed'}")
+                mode = "headless"
 
     if mode == "headless":
         try:
             from . import grok_control as gc
         except ImportError as exc:
-            return {"ok": False, "error": f"grok_control_unavailable:{exc}", "mode": "headless"}
-        if not gc.resolve_grok_bin():
-            # Fall back to PTY rather than hard-fail fleet
-            if (data.get("mode") or "auto").strip().lower() == "headless":
-                return {
-                    "ok": False,
-                    "error": "grok_not_found",
-                    "mode": "headless",
-                    "hint": "set EMUX_GROK_BIN or install grok",
-                }
+            if requested == "headless":
+                return {"ok": False, "error": f"grok_control_unavailable:{exc}", "mode": "headless"}
+            fallbacks.append(f"headless_unavailable:{exc}")
             mode = "pty"
         else:
-            # Prefer resume id; without it still run -p in cwd (new-ish turn)
-            result = gc.run_headless_steer(
-                prompt,
-                session_id=gsid or None,
-                continue_recent=bool(data.get("continue_recent")) and not gsid,
-                cwd=cwd,
-                model=(data.get("model") or None),
-                timeout=timeout,
-                always_approve=bool(data.get("always_approve", True)),
-            )
-            result["tmux_session"] = session
-            result["tool"] = "grok"
-            # Optional: also mirror prompt into live TUI if requested
-            if result.get("ok") and data.get("also_pty"):
-                send_payload(session, prompt, literal=True, enter=True, host=_session_host(session))
-            return result
+            if not gc.resolve_grok_bin():
+                if requested == "headless":
+                    return {
+                        "ok": False,
+                        "error": "grok_not_found",
+                        "mode": "headless",
+                        "hint": "set EMUX_GROK_BIN or install grok",
+                    }
+                fallbacks.append("headless_grok_not_found")
+                mode = "pty"
+            else:
+                result = gc.run_headless_steer(
+                    prompt,
+                    session_id=gsid or None,
+                    continue_recent=bool(data.get("continue_recent")) and not gsid,
+                    cwd=cwd,
+                    model=(data.get("model") or None),
+                    timeout=timeout,
+                    always_approve=bool(data.get("always_approve", True)),
+                )
+                result["tmux_session"] = session
+                result["tool"] = "grok"
+                if result.get("ok"):
+                    if data.get("also_pty"):
+                        send_payload(
+                            session, prompt, literal=True, enter=True,
+                            host=_session_host(session),
+                        )
+                    if fallbacks:
+                        result["via_fallback"] = True
+                        result["fallbacks"] = fallbacks
+                    return result
+                if requested == "headless":
+                    return result
+                fallbacks.append(f"headless:{result.get('error') or 'failed'}")
+                mode = "pty"
 
-    # PTY path (Claude default, or Grok TUI)
+    # PTY path (Claude default, or Grok last resort)
     host = _session_host(session)
     r = send_payload(session, prompt, literal=True, enter=True, host=host)
     r["mode"] = "pty"
@@ -2726,6 +2764,9 @@ def steer_payload(data: dict[str, Any]) -> dict[str, Any]:
     r["tmux_session"] = session
     if gsid:
         r["session_id"] = gsid
+    if fallbacks:
+        r["via_fallback"] = True
+        r["fallbacks"] = fallbacks
     return r
 
 
@@ -5687,27 +5728,36 @@ function modalSubmit(){
   clearModalClips();
   setPending(text.length>180?text.slice(0,180)+"…":text);
   const st=$("#modalstatus");
-  // Phase B: Grok sessions prefer headless steer (no TUI paste race)
+  // Grok: control-plane cascade ACP → headless → PTY (server-side auto)
   if(modalIsGrok()){
-    if(st){st.textContent="headless steer…";st.style.color="";}
+    if(st){st.textContent="acp steer…";st.style.color="";}
     api("/api/steer",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({session:modalSession.session,prompt:text,mode:"auto",
         session_id:modalGsid()||undefined,cwd:modalSession.cwd||undefined,
         tool:"grok",timeout:180})}).then(r=>{
       if(r&&r.ok){
         setPending("");
-        if(st)st.textContent=(r.mode==="headless"?"headless ok":"sent")+(r.elapsed_ms?(" · "+r.elapsed_ms+"ms"):"");
+        const modeLabel=r.mode==="acp"?"acp ok":(r.mode==="headless"?"headless ok":"pty ok");
+        const via=r.via_fallback?" · via fallback":"";
+        if(st)st.textContent=modeLabel+via+(r.elapsed_ms?(" · "+r.elapsed_ms+"ms"):"");
+        if(r.session_id&&!modalGsid()){
+          // remember gsid on the live card for next steer
+          modalSession.tags=modalSession.tags||[];
+          if(!modalSession.tags.some(t=>String(t).startsWith("gsid:")))
+            modalSession.tags.push("gsid:"+r.session_id);
+        }
         if(r.text)setPending("↳ "+(r.text.length>160?r.text.slice(0,160)+"…":r.text));
         setTimeout(modalRefresh,400);
       }else{
-        // fallback PTY
+        // last-ditch PTY (server already tried cascade; still try paste)
+        if(st){st.textContent="steer cascade failed — trying pty…";st.style.color="";}
         modalKeys(text,true,true).then(ok=>{
           if(!ok){
             if(!i.value)i.value=body;
             if(paths.length)i.value=(paths.join("\n")+(i.value?"\n\n"+i.value:""));
             setPending("");
             if(st){st.textContent="steer failed — "+((r&&r.error)||"draft kept");st.style.color="var(--stale)";}
-          }
+          }else if(st){st.textContent="pty ok";st.style.color="";}
         });
       }
     }).catch(()=>{
