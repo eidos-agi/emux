@@ -4700,10 +4700,14 @@ def connect_command(
     import shlex
 
     sess = shlex.quote(session)
-    if socket_path:
+    # Prefer short form on the default server; pin -S/-L only when non-default.
+    if socket_name and socket_name not in ("default", "", "local"):
+        if socket_path:
+            tmux = f"tmux -S {shlex.quote(socket_path)} attach -t {sess}"
+        else:
+            tmux = f"tmux -L {shlex.quote(socket_name)} attach -t {sess}"
+    elif socket_path and not str(socket_path).endswith("/default"):
         tmux = f"tmux -S {shlex.quote(socket_path)} attach -t {sess}"
-    elif socket_name and socket_name not in ("default", "", "local"):
-        tmux = f"tmux -L {shlex.quote(socket_name)} attach -t {sess}"
     else:
         tmux = f"tmux attach -t {sess}"
     if ssh_host:
