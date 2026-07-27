@@ -1829,9 +1829,20 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
     # EID-881: prefer the durable ledger for sessions it has receipts for (driven
     # work) — the ledger knows a task is running even when the pane looks static.
     # Read-only: only open it if a writer (the drive path) has created it.
-    from . import mgmt_ledger
+    # Soft import: greenmux may ship an emux wheel that predates mgmt_ledger;
+    # grid must still load (FORBIDDEN_HOST-looking empty status was a 500 crash).
+    try:
+        from . import mgmt_ledger as _mgmt_ledger
+    except ImportError:
+        _mgmt_ledger = None  # type: ignore[assignment]
     _lpath = os.path.join(os.path.expanduser("~"), ".config", "emux", "ledger.db")
-    _led = mgmt_ledger.Ledger(_lpath) if os.path.exists(_lpath) else None
+    _green_lpath = os.path.join(os.path.expanduser("~"), ".config", "greenmux", "ledger.db")
+    _led = None
+    if _mgmt_ledger is not None:
+        for _cand in (_lpath, _green_lpath):
+            if os.path.exists(_cand):
+                _led = _mgmt_ledger.Ledger(_cand)
+                break
     # capture every stale/missing live pane IN PARALLEL (remotes are ssh hops).
     misses = []
     for item in base["sessions"]:
@@ -1854,9 +1865,9 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
             item["state"] = (ce or {}).get("state") or "idle"
             item["summary"] = (ce or {}).get("summary") or ""
             item["state_source"] = "classifier"
-            if _led is not None:
+            if _led is not None and _mgmt_ledger is not None:
                 try:
-                    _ls = mgmt_ledger.ui_state(_led.state(item["name"]))
+                    _ls = _mgmt_ledger.ui_state(_led.state(item["name"]))
                     if _ls is not None:               # ledger only speaks for driven work
                         item["state"] = _ls
                         item["state_source"] = "ledger"
@@ -4257,12 +4268,19 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
     def _host_allowed(self) -> bool:
         """Defeat DNS-rebinding: only serve requests whose Host header is a
         loopback name (or the explicit bind host). A rebound attacker domain
-        resolving to 127.0.0.1 carries its own name in Host and is rejected."""
+        resolving to 127.0.0.1 carries its own name in Host and is rejected.
+
+        Behind Caddy/Cloudflare also accept X-Forwarded-Host when it matches
+        the configured public_origin (proxy may rewrite Host to 127.0.0.1).
+        """
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
         public_host = urlparse(self.public_origin).hostname if self.public_origin else None
+        xfh = (self.headers.get("X-Forwarded-Host") or "").split(",")[0].strip()
+        xfh = xfh.rsplit(":", 1)[0].strip("[]") if xfh else ""
         return (host in _LOCALHOSTS
                 or (self.extra_host is not None and host == self.extra_host)
-                or (public_host is not None and host == public_host))
+                or (public_host is not None and host == public_host)
+                or (public_host is not None and xfh == public_host))
 
     def _origin_allowed(self) -> bool:
         """Block cross-site writes: a POST carrying an Origin from any non-local
