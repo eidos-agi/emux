@@ -243,10 +243,75 @@ def scan_grok(
     recent_hours: float = 24.0,
     now: float | None = None,
 ) -> list[ChatHit]:
+    """Scan ~/.grok/sessions via grok_control enrichment when available."""
     now = now if now is not None else time.time()
     live_ids = _grok_live_ids()
-    root = Path.home() / ".grok" / "sessions"
     hits: list[ChatHit] = []
+
+    try:
+        from . import grok_control as gc
+    except ImportError:
+        gc = None  # type: ignore[assignment]
+
+    if gc is not None:
+        root = gc.sessions_root()
+        grok_bin = gc.resolve_grok_bin()
+        if not root.is_dir():
+            return hits
+        for session_dir in gc.iter_session_dirs(root):
+            idx = gc.enrich_session_dir(session_dir)
+            if idx is None:
+                continue
+            sid = idx.session_id
+            resume_cwd = idx.cwd or idx.project_cwd or "~"
+            blob = (
+                f"{idx.cwd} {idx.project_cwd} {idx.summary} {idx.title} "
+                f"{idx.last_user_snippet} {idx.branch or ''}"
+            )
+            if not _match_path(blob, match):
+                continue
+            mtime = gc.mtime_from_index(idx, fallback_stat=session_dir / "summary.json")
+            age_h = max(0.0, (now - mtime) / 3600.0)
+            is_live = sid in live_ids
+            if is_live:
+                status = "live"
+            elif age_h <= recent_hours:
+                status = "recent"
+            else:
+                status = "stale"
+            title = clean_text(idx.title, max_len=100) or sid[:12]
+            summary_txt = clean_text(idx.summary or idx.title, max_len=240)
+            # Prefer CLI --resume (documented); absolute bin when resolved.
+            try:
+                resume = gc.resume_shell_command(
+                    sid, bin_path=grok_bin, cwd=resume_cwd, use_exec=False
+                )
+            except ValueError:
+                resume = f"grok --resume {sid}"
+            gm = bool(_GREENMARK_RE.search(blob))
+            hits.append(
+                ChatHit(
+                    tool="grok",
+                    session_id=sid,
+                    cwd=resume_cwd,
+                    title=title,
+                    summary=summary_txt,
+                    path=idx.path,
+                    mtime=mtime,
+                    age_hours=age_h,
+                    status=status,
+                    resume=resume,
+                    messages=idx.chat_messages or idx.messages,
+                    model=idx.model,
+                    branch=idx.branch,
+                    priority=_priority(status, gm, age_h, title),
+                    greenmark=gm,
+                )
+            )
+        return hits
+
+    # Fallback if grok_control missing (should not happen in-tree).
+    root = Path.home() / ".grok" / "sessions"
     if not root.is_dir():
         return hits
     for summary in root.rglob("summary.json"):
@@ -297,7 +362,7 @@ def scan_grok(
         title = clean_text(str(raw_title), max_len=100) or sid[:12]
         summary_txt = clean_text(str(data.get("session_summary") or raw_title), max_len=240)
         resume_cwd = cwd or project_cwd or "~"
-        resume = f'cd {json.dumps(resume_cwd)} && grok  # then /resume {sid}'
+        resume = f"cd {json.dumps(resume_cwd)} && grok --resume {sid}"
         gm = bool(_GREENMARK_RE.search(blob))
         hits.append(
             ChatHit(
@@ -615,7 +680,11 @@ def peek_chat(
         }
 
     if tool == "grok":
-        root = Path.home() / ".grok" / "sessions"
+        try:
+            from . import grok_control as gc
+        except ImportError:
+            gc = None  # type: ignore[assignment]
+        root = gc.sessions_root() if gc is not None else (Path.home() / ".grok" / "sessions")
         # session id is often the directory name
         if root.is_dir():
             for summary in root.rglob("summary.json"):
@@ -632,8 +701,13 @@ def peek_chat(
                     continue
         if path is None:
             return {"ok": False, "error": "not_found", "tool": tool, "session_id": sid}
-        # Prefer transcript.jsonl / messages if present
-        for name in ("transcript.jsonl", "messages.jsonl", "chat.jsonl"):
+        # Prefer chat_history.jsonl (canonical Grok transcript), then aliases.
+        for name in (
+            "chat_history.jsonl",
+            "transcript.jsonl",
+            "messages.jsonl",
+            "chat.jsonl",
+        ):
             tp = path / name
             if tp.is_file():
                 try:
@@ -661,16 +735,34 @@ def peek_chat(
                     pass
                 break
         if not turns:
-            # fall back to summary fields
-            try:
-                data = json.loads((path / "summary.json").read_text())
-                for key in ("session_summary", "generated_title", "last_message"):
-                    if data.get(key):
+            # fall back to enriched summary / last user snippet
+            if gc is not None:
+                idx = gc.enrich_session_dir(path)
+                if idx is not None:
+                    if idx.summary:
                         turns.append(
-                            {"role": "summary", "text": clean_text(str(data[key]), max_len=400)}
+                            {"role": "summary", "text": clean_text(idx.summary, max_len=400)}
                         )
-            except (json.JSONDecodeError, OSError):
-                pass
+                    if idx.last_user_snippet:
+                        turns.append(
+                            {
+                                "role": "user",
+                                "text": clean_text(idx.last_user_snippet, max_len=400),
+                            }
+                        )
+            if not turns:
+                try:
+                    data = json.loads((path / "summary.json").read_text())
+                    for key in ("session_summary", "generated_title", "last_message"):
+                        if data.get(key):
+                            turns.append(
+                                {
+                                    "role": "summary",
+                                    "text": clean_text(str(data[key]), max_len=400),
+                                }
+                            )
+                except (json.JSONDecodeError, OSError):
+                    pass
         turns = turns[-max_turns:]
         return {
             "ok": True,
@@ -710,7 +802,7 @@ def format_text(hits: list[ChatHit], *, title: str = "Abandoned / nonoperative a
         "",
         "1. Prefer **stale** rows with Greenmark cwd — those are likely dropped missions.",
         "2. **live** means a process still holds the session — attach/boss instead of re-opening.",
-        "3. Resume with the command in the last column (Claude: `--resume`; Grok: open cwd then `/resume <id>`).",
+        "3. Resume with the command in the last column (Claude: `claude --resume`; Grok: `grok --resume <id>`).",
         "4. Cross-check greenmux registry ghosts (`greenmux ls` / gmux status `?all=1`) — tmux dead ≠ chat dead.",
         "",
     ]

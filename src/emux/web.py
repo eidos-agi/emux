@@ -1135,9 +1135,10 @@ def _resume_chat_in_fleet(data: dict[str, Any]) -> dict[str, Any]:
     """Bring an abandoned Claude/Grok *transcript* back as a live fleet session.
 
     CHATS rows are disk transcripts, not tmux. Resume = spawn tmux on this host
-    (where the transcript lives), launch `claude --resume <id>` or `grok` +
-    `/resume <id>`, register under a chat-* name. Distinct from /api/adopt
-    (already-running tmux) and from copy-paste resume (no fleet registration).
+    (where the transcript lives), launch `claude --resume <id>` or
+    `grok --resume <id>` (absolute bin via _resolve_cli / grok_control),
+    register under a chat-* name. Distinct from /api/adopt (already-running
+    tmux) and from copy-paste resume (no fleet registration).
     """
     import asyncio
     import shlex
@@ -1214,14 +1215,27 @@ def _resume_chat_in_fleet(data: dict[str, Any]) -> dict[str, Any]:
             }
         command = f"exec {shlex.quote(bin_path)} --resume {shlex.quote(sid)}"
     else:
-        bin_path = _resolve_cli("grok")
+        # Prefer grok_control: absolute bin + documented `grok --resume <id>`.
+        try:
+            from . import grok_control as _gc
+        except ImportError:
+            _gc = None  # type: ignore[assignment]
+        bin_path = (
+            (_gc.resolve_grok_bin() if _gc is not None else None)
+            or _resolve_cli("grok")
+        )
         if not bin_path:
             return {
                 "ok": False,
                 "error": "grok_not_found",
                 "hint": "install grok or set EMUX_GROK_BIN to the absolute path",
             }
-        command = f"exec {shlex.quote(bin_path)}"
+        if _gc is not None:
+            command = _gc.resume_shell_command(
+                sid, bin_path=bin_path, cwd=None, use_exec=True
+            )
+        else:
+            command = f"exec {shlex.quote(bin_path)} --resume {shlex.quote(sid)}"
 
     try:
         r = asyncio.run(
@@ -1244,24 +1258,6 @@ def _resume_chat_in_fleet(data: dict[str, Any]) -> dict[str, Any]:
         return {**r, "tool": tool, "session_id": sid, "fleet_name": name}
 
     session = str(r.get("session") or name)
-    # Grok has no CLI --resume flag; open then /resume inside the TUI.
-    if tool == "grok":
-        time.sleep(2.5)
-        send = send_payload(session, f"/resume {sid}", literal=True, enter=True, host=None)
-        if not send.get("ok"):
-            return {
-                "ok": True,
-                "partial": True,
-                "warning": "grok_spawned_but_resume_send_failed",
-                "send_error": send.get("error"),
-                "name": name,
-                "session": session,
-                "tool": tool,
-                "session_id": sid,
-                "command": command,
-                "cwd": cwd,
-                **{k: v for k, v in r.items() if k not in ("ok", "name", "session")},
-            }
 
     # Wait until the pane is actually the agent (not a leftover zsh prompt).
     agent_up = _wait_pane_command(session, want=("claude", "node", "grok"), timeout=12.0)
@@ -4152,7 +4148,7 @@ async function resumeChatInFleet(c,btn){
     }
     btn.textContent="✓ IN FLEET · "+(r.name||"");
     if(errEl)errEl.textContent="resumed as “"+(r.name||"?")+"” · "+(r.command||"")
-      +(r.partial?" · (grok spawn ok, /resume may need a nudge)":"");
+      +(r.partial?" · (spawn ok, agent may need a nudge)":"");
     // refresh grid so the new session shows; jump to GRID so you can steer it
     try{await poll();}catch(_){}
     setTimeout(()=>{
@@ -4218,7 +4214,7 @@ function chatTile(c){
     bFleet.title="process still holds this chat — attach/boss, do not double-resume";
   }else{
     bFleet.textContent="⇤ RESUME IN FLEET";
-    bFleet.title="spawn tmux + register in fleet with "+(c.tool==="claude"?"claude --resume":"grok /resume");
+    bFleet.title="spawn tmux + register in fleet with "+(c.tool==="claude"?"claude --resume":"grok --resume");
     bFleet.onclick=e=>{e.stopPropagation();resumeChatInFleet(c,bFleet);};
   }
   const bCopy=document.createElement("button");bCopy.className="act";bCopy.textContent="⧉ COPY";

@@ -55,7 +55,7 @@ def test_find_chats_greenmark_filter(tmp_path, monkeypatch):
     assert "claude" in tools
     assert all(h.status == "stale" for h in hits)
     assert any("claude --resume" in h.resume for h in hits)
-    assert any("/resume" in h.resume for h in hits)
+    assert any("grok" in h.resume and "--resume" in h.resume for h in hits)
     assert all(h.greenmark for h in hits)
     assert all(h.priority > 0 for h in hits)
 
