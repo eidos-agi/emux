@@ -4266,21 +4266,38 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _host_allowed(self) -> bool:
-        """Defeat DNS-rebinding: only serve requests whose Host header is a
-        loopback name (or the explicit bind host). A rebound attacker domain
-        resolving to 127.0.0.1 carries its own name in Host and is rejected.
+        """Defeat DNS-rebinding on loopback; allow the configured public origin.
 
-        Behind Caddy/Cloudflare also accept X-Forwarded-Host when it matches
-        the configured public_origin (proxy may rewrite Host to 127.0.0.1).
+        Production go.greenmarkwaste.com is fronted by Railway (Host can be
+        *.up.railway.app). Caddy may also rewrite Host to 127.0.0.1. Trust:
+          - loopback Host
+          - Host / X-Forwarded-Host matching public_origin hostname
+          - Origin or Referer matching public_origin (browser SPA on the
+            real public URL) — only meaningful when public_origin is set;
+            the daemon remains loopback-bound so this is not a WAN open.
         """
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
-        public_host = urlparse(self.public_origin).hostname if self.public_origin else None
+        if host in _LOCALHOSTS:
+            return True
+        if self.extra_host is not None and host == self.extra_host:
+            return True
+        if not self.public_origin:
+            return False
+        public_host = urlparse(self.public_origin).hostname
+        if not public_host:
+            return False
         xfh = (self.headers.get("X-Forwarded-Host") or "").split(",")[0].strip()
         xfh = xfh.rsplit(":", 1)[0].strip("[]") if xfh else ""
-        return (host in _LOCALHOSTS
-                or (self.extra_host is not None and host == self.extra_host)
-                or (public_host is not None and host == public_host)
-                or (public_host is not None and xfh == public_host))
+        if host == public_host or xfh == public_host:
+            return True
+        origin = (self.headers.get("Origin") or "").rstrip("/")
+        if origin == self.public_origin.rstrip("/"):
+            return True
+        referer = self.headers.get("Referer") or ""
+        pub = self.public_origin.rstrip("/")
+        if referer == pub or referer.startswith(pub + "/"):
+            return True
+        return False
 
     def _origin_allowed(self) -> bool:
         """Block cross-site writes: a POST carrying an Origin from any non-local
@@ -4332,6 +4349,28 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                 return True
         return False
 
+    def _strip_public_path(self) -> None:
+        """Rewrite self.path so /gmux/api/* is handled like /api/* without Caddy.
+
+        The SPA stamps PUBLIC_PATH=/gmux and fetches absolute `/gmux/api/grid`.
+        Caddy handle_path strips that prefix; loopback, SSH tunnels, and chrime
+        do not. Without this strip the request never matches /api/* and the room
+        shows a hard failure (often misread as FORBIDDEN_HOST).
+        """
+        prefix = (getattr(self, "public_path", None) or "").rstrip("/")
+        if not prefix:
+            return
+        parts = urlparse(self.path)
+        path = parts.path or "/"
+        if path == prefix:
+            new_path = "/"
+        elif path.startswith(prefix + "/"):
+            new_path = path[len(prefix):] or "/"
+        else:
+            return
+        # rebuild path?query
+        self.path = new_path + (("?" + parts.query) if parts.query else "")
+
     def _simple_status_from_url(self, url) -> str:
         """Parse filter/peek query params for the simple status page."""
         qs = parse_qs(url.query or "")
@@ -4365,6 +4404,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         )
 
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
+        self._strip_public_path()
         url = urlparse(self.path)
         # AI mode: plain markdown diagnosis (also ?format=ai on status routes).
         if url.path in ("/ai", "/ai/", "/ai.md", "/diagnosis", "/diagnosis/"):
@@ -4547,6 +4587,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         self._json({"ok": False, "error": "not_found"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802
+        self._strip_public_path()
         url = urlparse(self.path)
         controller_submit = url.path == "/api/controller/v1/requests"
         controller_cancel = re.fullmatch(
