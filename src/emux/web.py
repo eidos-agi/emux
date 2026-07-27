@@ -2228,6 +2228,7 @@ def _probe_managed_planes(cfg: Any) -> dict[str, Any]:
     OIDC/Authentik redirects (3xx / non-JSON) are **auth_gated** degraded — still
     ok=True so workers_ok is not false for a gate, but degraded for honesty.
     """
+    import urllib.error
     import urllib.request
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -2376,17 +2377,30 @@ def _probe_managed_planes(cfg: Any) -> dict[str, Any]:
         for p in planes:
             pid = getattr(p, "id", None) or (p.get("id") if isinstance(p, dict) else None)
             if pid not in done_ids:
-                row = p.as_dict() if hasattr(p, "as_dict") else dict(p)
+                if hasattr(p, "as_dict"):
+                    row = p.as_dict()
+                elif isinstance(p, dict):
+                    row = dict(p)
+                else:
+                    row = {"id": pid}
                 results.append(
                     {**row, "ok": False, "degraded": True, "error": "probe_timeout",
                      "reason": "probe_timeout"}
                 )
-    order = {p.id: i for i, p in enumerate(planes)}
+    order = {
+        (getattr(p, "id", None) or (p.get("id") if isinstance(p, dict) else None)): i
+        for i, p in enumerate(planes)
+    }
     results.sort(key=lambda r: order.get(r.get("id"), 99))
     # workers_ok: reachable (ok) including auth_gated; only hard-down fails the fleet.
     workers_ok = all(r.get("ok") for r in results)
     auth_gated = sum(1 for r in results if r.get("reason") == "auth_gated")
     healthy = sum(1 for r in results if r.get("ok") and not r.get("degraded"))
+    mids = getattr(cfg, "managed_ids", None)
+    if callable(mids):
+        mid_list = sorted(mids())
+    else:
+        mid_list = sorted(mids or [])
     return {
         "role": "manager",
         "product": getattr(cfg, "product", None),
@@ -2396,7 +2410,7 @@ def _probe_managed_planes(cfg: Any) -> dict[str, Any]:
         "probed": len(results),
         "healthy": healthy,
         "auth_gated": auth_gated,
-        "managed_ids": sorted(getattr(cfg, "managed_ids", lambda: set)()),
+        "managed_ids": mid_list,
         "source": getattr(cfg, "source", None),
         "path": getattr(cfg, "path", None),
         "notes": (
@@ -3618,11 +3632,15 @@ body.solo-session #modalpop{display:none} /* already in a tab */
 #calbar .act{font-size:11px}
 #calbar h2{margin:0;font-size:15px;font-weight:600;letter-spacing:.3px;flex:1;min-width:140px}
 #calbody{display:flex;flex:1;min-height:0;overflow:hidden}
-#calseries{width:200px;flex:none;border-right:1px solid var(--line);overflow:auto;padding:10px 8px;background:var(--bg-raise)}
+#calseries{width:240px;flex:none;border-right:1px solid var(--line);overflow:auto;padding:10px 8px;background:var(--bg-raise)}
 #calseries h3{margin:0 0 8px;font-size:10px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase}
-.calser{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:12px;margin-bottom:4px}
+.calser{display:flex;align-items:flex-start;gap:8px;padding:8px;border-radius:6px;cursor:pointer;font-size:12px;margin-bottom:4px}
 .calser:hover{background:var(--bg-card)}
-.calser .dot{width:10px;height:10px;border-radius:3px;flex:none}
+.calser .dot{width:10px;height:10px;border-radius:3px;flex:none;margin-top:3px}
+.calser .calser-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.calser .calser-title{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.calser .calser-when{font-size:10px;line-height:1.3;color:var(--text-dim);white-space:normal}
+.calser .calser-cron{font-size:9px;color:var(--text-dim);opacity:.55;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .calser.off{opacity:.45}
 #calmain{flex:1;min-width:0;overflow:auto;padding:8px}
 #calweek{display:grid;grid-template-columns:56px repeat(7,1fr);gap:1px;background:var(--line);border:1px solid var(--line);min-height:520px}
