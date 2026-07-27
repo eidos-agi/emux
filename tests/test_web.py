@@ -310,6 +310,24 @@ def test_reevux_skin_personal_branding():
     skin.set_active_skin("emux")
 
 
+def test_amux_skin_aic_branding():
+    from emux import skin
+    s = skin.get_skin("amux")
+    assert s.id == "amux" and s.brand == "AMUX"
+    assert s.product == "amux" and "aic" in s.tagline.lower()
+    assert s.engine_label == "emux"
+    assert s.light.accent.lower() == "#2f6fdb"
+    assert s.light.accent.lower() != "#1b7a4e"  # not gmux green
+    assert s.light.accent.lower() != "#3b5ba5"  # not reevux slate
+    assert "skin-logo" in s.logo_svg and "AMUX" in s.logo_html()
+    stamped = s.apply("__BRAND__ · __STATUS_TITLE__ · __ENGINE__", "9.9.9")
+    assert "AMUX" in stamped and "amux status" in stamped and "emux 9.9.9" in stamped
+    assert skin.get_skin("aic").id == "amux"
+    skin.set_active_skin("amux")
+    assert skin.active_skin().product == "amux"
+    skin.set_active_skin("emux")
+
+
 def test_http_simple_filters_and_peek(daemon):
     """Default is live-only; peek=name captures pane (server-rendered)."""
     status, body = _get(daemon + "/simple")

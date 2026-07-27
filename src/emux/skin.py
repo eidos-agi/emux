@@ -81,6 +81,16 @@ _LOGO_REEVUX = (
     "</svg>"
 )
 
+# A-mark: AIC Holdings lane (AIC + emux → amux) — cool blue, distinct from gmux green / reevux navy
+_LOGO_AMUX = (
+    '<svg class="skin-logo" viewBox="0 0 64 64" width="36" height="36" '
+    'aria-hidden="true" xmlns="http://www.w3.org/2000/svg">'
+    '<rect x="4" y="4" width="56" height="56" rx="12" fill="currentColor" opacity=".12"/>'
+    '<path fill="currentColor" d="M32 18 L46 44 H40 L36.5 36 H27.5 L24 44 H18 L32 18 Z '
+    'M30 30 H34 L32 25 Z"/>'
+    "</svg>"
+)
+
 
 @dataclass(frozen=True)
 class Skin:
@@ -118,6 +128,8 @@ class Skin:
             bg = "0c0a07"
         elif self.id == "reevux":
             bg = "0e1218"
+        elif self.id == "amux":
+            bg = "0c1424"
         else:
             bg = "0f1a14"
         svg = (
@@ -233,6 +245,38 @@ _GMUX_DARK = Palette(
     user="#5fbf8f",
 )
 
+# AIC Holdings lane — cool blue (Linear amux project #4F8DF7 family; not gmux green / reevux slate)
+_AMUX_LIGHT = Palette(
+    bg="#eef3fb",
+    bg_raise="#e4ebf7",
+    bg_card="#dce6f5",
+    accent="#2f6fdb",
+    accent_dim="#4f8df7",
+    accent_faint="#c9daf5",
+    text="#121a2a",
+    text_dim="#5a6a82",
+    live="#2d8a5a",
+    stale="#b3503a",
+    line="#c2d0e6",
+    on_accent="#f4f8ff",
+    user="#2f6fdb",
+)
+_AMUX_DARK = Palette(
+    bg="#0c1424",
+    bg_raise="#121c30",
+    bg_card="#18243a",
+    accent="#6ba3ff",
+    accent_dim="#4f8df7",
+    accent_faint="#1e3050",
+    text="#e8f0fc",
+    text_dim="#8b9ab4",
+    live="#5fbf8f",
+    stale="#e07050",
+    line="#2a3c58",
+    on_accent="#0c1424",
+    user="#6ba3ff",
+)
+
 # Reeves personal lane — cool slate/navy (deliberately unlike gmux green / emux amber)
 _REEVUX_LIGHT = Palette(
     bg="#eef1f6",
@@ -311,6 +355,21 @@ _SKINS: dict[str, Skin] = {
         logo_svg=_LOGO_REEVUX,
         default_theme="light",
     ),
+    "amux": Skin(
+        id="amux",
+        brand="AMUX",
+        product="amux",
+        tagline="AIC Holdings fleet",
+        status_title="amux status",
+        room_title="amux — AIC Holdings fleet",
+        docs_title="amux documentation",
+        engine_label="emux",
+        footer_note="powered by emux · AIC lane only",
+        light=_AMUX_LIGHT,
+        dark=_AMUX_DARK,
+        logo_svg=_LOGO_AMUX,
+        default_theme="light",
+    ),
 }
 
 
@@ -326,6 +385,8 @@ def get_skin(name: str | None) -> Skin:
         key = "gmux"
     if key in ("reeves", "personal", "rvs"):
         key = "reevux"
+    if key in ("aic", "aic-holdings", "holdings"):
+        key = "amux"
     if key in _SKINS:
         return _SKINS[key]
     print(f"emux skin: unknown skin {name!r} — using emux", file=sys.stderr)

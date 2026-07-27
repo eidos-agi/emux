@@ -2105,7 +2105,8 @@ def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
     Query params (parse_qs style): match, status (comma-separated), tools,
     limit, recent_hours, q (text search), sort (priority|mtime),
     refresh=1 to force a full disk re-index into ~/.config/*/chats.db.
-    Default match: greenmark when skin is gmux; personal when skin is reevux.
+    Default match: greenmark when skin is gmux; personal when skin is reevux;
+    aic when skin is amux.
     """
     q = q or {}
     try:
@@ -2121,6 +2122,8 @@ def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
             match_raw = "greenmark"
         elif sk.id == "reevux":
             match_raw = "personal"
+        elif sk.id == "amux":
+            match_raw = "aic"
         else:
             match_raw = "all"
     status_raw = (q.get("status") or [""])[0].strip()
@@ -3748,7 +3751,7 @@ function shown(){
 // Fix: brand (eidos/greenmark/reeves) × mode (light/dark) both go through
 // applyTheme(), which sets the CSS variables for real.
 const SKIN_ID="__SKIN_ID__";
-const BRAND_DEFAULT=SKIN_ID==="gmux"?"greenmark":(SKIN_ID==="reevux"?"reeves":"eidos");
+const BRAND_DEFAULT=SKIN_ID==="gmux"?"greenmark":(SKIN_ID==="reevux"?"reeves":(SKIN_ID==="amux"?"aic":"eidos"));
 const MODE_KEY="emux_mode_"+SKIN_ID;
 const BRAND_KEY="emux_brand_"+SKIN_ID;
 const THEMES={
@@ -6518,7 +6521,8 @@ document.getElementById("copyai").onclick=function(){{
 def resolve_connect_ssh_host(public_path: str = "") -> str | None:
     """SSH destination for connect-copy.
 
-    Env wins. Else skin defaults: gmux → rentamac, reevux → mac-mini-01.
+    Env wins. Else skin defaults: gmux → rentamac, reevux → mac-mini-01,
+    amux → local (no remote ssh prefix).
     public_path without skin still defaults to rentamac (gmux go-door legacy).
     """
     env = (os.environ.get("EMUX_CONNECT_SSH") or os.environ.get("GREENMUX_HOST") or "").strip()
@@ -6531,6 +6535,8 @@ def resolve_connect_ssh_host(public_path: str = "") -> str | None:
             return "rentamac"
         if sid == "reevux":
             return "mac-mini-01"
+        if sid == "amux":
+            return None  # local laptop — plain tmux attach
     except Exception:
         pass
     if public_path:  # reverse-proxied status without skin ⇒ attach on mux host

@@ -1563,8 +1563,8 @@ def main(argv: list[str] | None = None) -> int:
         "--skin",
         default=None,
         help="product chrome only: emux (default), gmux (Greenmark), reevux "
-             "(personal/Reeves). Same engine. Also via $EMUX_SKIN. "
-             "Aliases: greenmux→gmux, reeves/personal→reevux.",
+             "(personal/Reeves), amux (AIC Holdings). Same engine. Also via "
+             "$EMUX_SKIN. Aliases: greenmux→gmux, reeves/personal→reevux, aic→amux.",
     )
     p_web.add_argument("--open", action="store_true", help="open the browser after starting")
     p_web.add_argument(

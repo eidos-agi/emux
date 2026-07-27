@@ -17,6 +17,9 @@ Greenmark filter: cwd/project path matches greenmark|gmw|cerebro|gms|greenmux
 
 Personal / Reeves filter (reevux): repos-personal, reeves-*, tally/dally, conduit
 personal roots — never repos-aic / greenmark workspaces (or --match regex).
+
+AIC Holdings filter (amux): repos-aic, AIC cockpits, zeus/meridian/tally-as-work —
+never repos-personal / greenmark / reeves workspaces (or --match regex).
 """
 
 from __future__ import annotations
@@ -47,6 +50,24 @@ _PERSONAL_RE = re.compile(
     r"(?:^|/)conduit(?:-|_|\b|/)|"
     r"personal-mgr|"
     r"reeves-apps|reeves-store|reeves-cockpit",
+    re.I,
+)
+
+# AIC Holdings lane — positive match only (personal + greenmark fall out).
+_AIC_RE = re.compile(
+    r"repos-aic|"
+    r"aic-software-engineer-cockpit|"
+    r"aic-director|"
+    r"aic-holdings|"
+    r"(?:^|/)aic(?:-|_|\b|/)|"
+    r"\bamux\b|"
+    r"zeus-v2|zeus_v2|"
+    r"meridian|"
+    r"aicync|"
+    r"(?:^|/)knox(?:-|_|\b|/)|"
+    r"bot-farm|"
+    r"sequoia|"
+    r"aic-mgr",
     re.I,
 )
 
@@ -246,6 +267,8 @@ def _match_pattern(match: str | None) -> re.Pattern[str] | None:
         return _GREENMARK_RE
     if key in ("personal", "reeves", "reevux", "rvs"):
         return _PERSONAL_RE
+    if key in ("aic", "amux", "holdings"):
+        return _AIC_RE
     return re.compile(match, re.I)
 
 

@@ -13,6 +13,7 @@ Authority:
 Default path: ~/.config/emux/chats.db
   * gmux / EMUX_SKIN=gmux → ~/.config/greenmux/chats.db
   * reevux / EMUX_SKIN=reevux → ~/.config/reevux/chats.db
+  * amux / EMUX_SKIN=amux → ~/.config/amux/chats.db
 """
 
 from __future__ import annotations
@@ -45,13 +46,27 @@ def _config_root_for_skin(skin_id: str) -> Path:
         return Path.home() / ".config" / "greenmux"
     if sid in ("reevux", "reeves", "personal", "rvs"):
         return Path.home() / ".config" / "reevux"
+    if sid in ("amux", "aic", "aic-holdings", "holdings"):
+        return Path.home() / ".config" / "amux"
     return Path.home() / ".config" / "emux"
 
 
 def default_chats_db_path() -> str:
     """Prefer product config dir when that skin is active."""
     skin = (os.environ.get("EMUX_SKIN") or "").strip().lower()
-    if skin in ("gmux", "greenmux", "greenmark", "reevux", "reeves", "personal", "rvs"):
+    if skin in (
+        "gmux",
+        "greenmux",
+        "greenmark",
+        "reevux",
+        "reeves",
+        "personal",
+        "rvs",
+        "amux",
+        "aic",
+        "aic-holdings",
+        "holdings",
+    ):
         root = _config_root_for_skin(skin)
     else:
         # if greenmux db already exists and emux does not, use it (rentamac)
@@ -65,6 +80,8 @@ def default_chats_db_path() -> str:
             root = Path.home() / ".config" / "greenmux"
         elif prod in ("reevux", "reeves", "personal"):
             root = Path.home() / ".config" / "reevux"
+        elif prod in ("amux", "aic", "aic-holdings", "holdings"):
+            root = Path.home() / ".config" / "amux"
         else:
             try:
                 from . import skin as _skin
