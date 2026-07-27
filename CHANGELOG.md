@@ -1,6 +1,11 @@
 # Changelog
 
 
+## v0.68.10
+
+### Features
+- **Linear issue links in chat (regex):** any `TEAM-123` key (AIC-*, EID-*, GMW-*, ARP-*, RVS-*, …) in CHATS titles/summaries/peeks, grid rails, head bubbles, and the live feed becomes a clickable link to `https://linear.app/eidos-agi/issue/TEAM-123`. No Linear API — pure client-side linkify with a small denylist for false positives (UTF-8, HTTP-2, …).
+
 ## v0.68.9
 
 ### Features

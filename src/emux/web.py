@@ -3610,6 +3610,11 @@ body.solo-session #modalpop{display:none} /* already in a tab */
 .tile.chat .gm{font-size:9px;letter-spacing:1px;color:var(--ok,#3dba6e);border:1px solid color-mix(in srgb, var(--ok,#3dba6e) 40%, var(--line));padding:0 4px;border-radius:2px}
 .tile.chat .sum{font-size:12px;color:var(--text);padding:4px 10px 6px;line-height:1.45;max-height:3.2em;overflow:hidden}
 .tile.chat .cwd{font-size:10px;color:var(--text-dim);padding:0 10px 4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Linear issue keys → clickable (AIC-284, EID-1112, GMW-950, …) */
+a.linlink{color:var(--amber);text-decoration:none;border-bottom:1px dotted color-mix(in srgb,var(--amber) 55%,transparent);font-weight:600}
+a.linlink:hover{color:var(--amber);border-bottom-style:solid;filter:brightness(1.08)}
+.tile.chat .sum a.linlink,.tile.chat .nm a.linlink,.tile.chat .peek a.linlink{font-weight:600}
+.bubble a.linlink,.rail a.linlink,.fev a.linlink{font-weight:600}
 .tile.chat .meta{font-size:10px;color:var(--text-dim);padding:0 10px 8px;display:flex;gap:10px;flex-wrap:wrap}
 .tile.chat .resume{font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;padding:0 10px 8px;color:var(--amber);word-break:break-all;opacity:.85}
 .tile.chat .peek{margin:0 10px 10px;padding:8px;background:color-mix(in srgb, var(--bg) 70%, #000);border:1px solid var(--line);border-radius:4px;max-height:180px;overflow:auto;font-size:11px;line-height:1.4}
@@ -4804,9 +4809,10 @@ function railHTML(s){
   const sum=s.summary||(s.live?"…":"gone");
   const i=sum.indexOf(" — ");
   const verb=i>0?sum.slice(0,i):sum, rest=i>0?sum.slice(i+3):"";
-  return '<div class="rail st-'+(s.state||"idle")+'"><span class="rv">'+esc(verb)+'</span>'
-    +(rest?' <span class="rt">'+esc(rest)+'</span>':'')
-    +'<div class="rfull"><b>'+esc(verb)+'</b>'+(rest?' — '+esc(rest):'')+'</div></div>';
+  // linkifyLinear already escapes; keep Linear keys clickable in the rail
+  return '<div class="rail st-'+(s.state||"idle")+'"><span class="rv">'+linkifyLinear(verb)+'</span>'
+    +(rest?' <span class="rt">'+linkifyLinear(rest)+'</span>':'')
+    +'<div class="rfull"><b>'+linkifyLinear(verb)+'</b>'+(rest?' — '+linkifyLinear(rest):'')+'</div></div>';
 }
 
 function makeTile(s){
@@ -4835,7 +4841,8 @@ function makeTile(s){
   }
   const rail=document.createElement("div");rail.className="railwrap";rail.innerHTML=railHTML(s);
   t.appendChild(h);t.appendChild(rail.firstChild);t.appendChild(p);
-  t.onclick=()=>openModal(s);
+  bindLinlinks(t);
+  t.onclick=e=>{if(e.target.closest("a.linlink"))return;openModal(s);};
   return t;
 }
 
@@ -5179,11 +5186,11 @@ function chatTile(c){
   const h=document.createElement("header");
   h.innerHTML='<span class="tool '+esc(c.tool||"")+'">'+esc(c.tool||"?")+'</span>'
     +(c.greenmark?'<span class="gm">GM</span>':"")
-    +'<span class="nm" title="'+esc(c.session_id||"")+'">'+esc(c.title||c.session_id||"")+'</span>'
+    +'<span class="nm" title="'+esc(c.session_id||"")+'">'+linkifyLinear(c.title||c.session_id||"")+'</span>'
     +'<span class="st-'+esc(st)+'">'+esc(st)+'</span>'
     +'<span class="age t-old">'+chatAge(c.age_hours)+'</span>';
   const sum=document.createElement("div");sum.className="sum";
-  sum.textContent=c.summary||c.title||"(no summary)";
+  sum.innerHTML=linkifyLinear(c.summary||c.title||"(no summary)");
   const cwd=document.createElement("div");cwd.className="cwd";cwd.title=c.cwd||"";
   cwd.textContent=c.cwd||"";
   const meta=document.createElement("div");meta.className="meta";
@@ -5196,7 +5203,9 @@ function chatTile(c){
   if(c.fleet_name)bits.push("fleet "+c.fleet_name);
   if(c.on_disk===false)bits.push("off-disk");
   if(c.source)bits.push(c.source);
-  meta.textContent=bits.join(" · ");
+  // Surface linked Linear issue from registry/resume metadata when present
+  if(c.linear&&c.linear.issue) bits.push(c.linear.issue);
+  meta.innerHTML=linkifyLinear(bits.join(" · "));
   const res=document.createElement("div");res.className="resume";res.textContent=c.resume||"";
   const acts=document.createElement("div");acts.className="actions";
   const bFleet=document.createElement("button");bFleet.className="act oattach";
@@ -5232,12 +5241,13 @@ function chatTile(c){
     else (cached.turns||[]).forEach(tr=>{
       const d=document.createElement("div");d.className="turn";
       d.innerHTML='<div class="role '+esc(tr.role||"")+'">'+esc(tr.role||"?")+'</div>'
-        +'<div>'+esc(tr.text||"")+'</div>';
+        +'<div class="body">'+linkifyLinear(tr.text||"")+'</div>';
       peek.appendChild(d);
     });
     t.appendChild(peek);
   }
-  t.onclick=e=>{if(e.target.closest("button"))return;toggleChatPeek(c,t);};
+  bindLinlinks(t);
+  t.onclick=e=>{if(e.target.closest("button,a.linlink"))return;toggleChatPeek(c,t);};
   return t;
 }
 function chChip(label,on,attrs){
@@ -5753,7 +5763,8 @@ function addBubble(cls,who,text){
     w.textContent=(cls==="user")?who+" · "+clockNow():who;   // timestamp user bubbles (#10)
     b.appendChild(w);
   }
-  const t=document.createElement("div");t.textContent=text;b.appendChild(t);
+  const t=document.createElement("div");t.innerHTML=linkifyLinear(text);b.appendChild(t);
+  bindLinlinks(b);
   const c=$("#head");
   if(screenEl&&screenEl.parentElement===c){c.insertBefore(b,screenEl);}else{c.appendChild(b);}
   scrollBottom();
@@ -6611,6 +6622,50 @@ let feedSeen="";   // signature of the newest event, to flash only what's new
 function fage(ts){const s=Math.max(0,Math.floor(Date.now()/1000-ts));
   return s<60?s+"s":(s<3600?Math.floor(s/60)+"m":(s<86400?Math.floor(s/3600)+"h":Math.floor(s/86400)+"d"));}
 function esc(x){return (x||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+// Linear issue keys (TEAM-123) → https://linear.app/<workspace>/issue/TEAM-123
+// Pure regex client-side — no API. Workspace is eidos-agi across AIC/Eidos fleet.
+const LINEAR_WS="eidos-agi";
+const LINEAR_ISSUE_RE=/\b([A-Z]{2,12}-\d{1,7})\b/g;
+// Common non-Linear TOKEN-n forms we must not turn into issue links.
+const LINEAR_SKIP_PREFIX=/^(UTF|HTTP|HTTPS|ISO|RFC|CPU|GPU|RAM|API|SDK|CLI|SSH|TLS|SSL|XML|JSON|HTML|CSS|PDF|URL|URI|UUID|SHA|MD5|AES|RSA|VPN|CDN|DNS|TCP|UDP|IPv?|OK|ID|US|UK|EU|AI|V\d+)$/i;
+function linearIssueUrl(key){
+  return "https://linear.app/"+LINEAR_WS+"/issue/"+encodeURIComponent(key);
+}
+function isLinearIssueKey(key){
+  const i=String(key||"").indexOf("-");
+  if(i<2) return false;
+  const pre=key.slice(0,i), num=key.slice(i+1);
+  if(LINEAR_SKIP_PREFIX.test(pre)) return false;
+  if(!/^\d{1,7}$/.test(num)) return false;
+  // Team keys are letters (Linear); reject mixed like "H2O-1"
+  if(!/^[A-Z]{2,12}$/.test(pre)) return false;
+  return true;
+}
+/** Escape + turn Linear keys (and bare http URLs) into <a class="linlink">. */
+function linkifyLinear(raw){
+  const s=String(raw==null?"":raw);
+  if(!s) return "";
+  // Split on existing URLs so we don't nest issue keys inside linear.app/… paths.
+  const parts=s.split(/(https?:\/\/[^\s<>"'`]+)/g);
+  return parts.map((part,i)=>{
+    if(i%2===1){
+      const e=esc(part);
+      return '<a class="linlink" href="'+e+'" target="_blank" rel="noopener noreferrer">'+e+'</a>';
+    }
+    return esc(part).replace(LINEAR_ISSUE_RE,m=>
+      isLinearIssueKey(m)
+        ?('<a class="linlink" href="'+linearIssueUrl(m)+'" target="_blank" rel="noopener noreferrer" title="Open '+m+' in Linear">'+m+'</a>')
+        :m
+    );
+  }).join("");
+}
+/** Bind linlinks so parent tile/card clicks do not fire. */
+function bindLinlinks(root){
+  if(!root) return;
+  root.querySelectorAll("a.linlink").forEach(a=>{
+    a.onclick=e=>{e.stopPropagation();};
+  });
+}
 async function pollFeed(){
   if(!$("#feed").classList.contains("open"))return;
   const r=await api("/api/events?limit=60");
@@ -6625,8 +6680,9 @@ async function pollFeed(){
       +'<span class="fage">'+fage(e.ts)+'</span>'
       +'<span class="ftag">'+esc(label)+'</span>'
       +(e.session?'<span class="fsess">'+esc(e.session)+'</span>':'')
-      +'<span class="ftext">'+esc(e.text)+'</span></div>';
+      +'<span class="ftext">'+linkifyLinear(e.text)+'</span></div>';
   }).join("")||'<div class="fev"><span class="ftext">no activity yet</span></div>';
+  bindLinlinks($("#feedlist"));
   feedSeen=newest;
 }
 function setFeed(open){
