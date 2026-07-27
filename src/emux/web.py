@@ -6018,10 +6018,12 @@ $("#modalback").onclick=closeModal;
 })();
 document.querySelectorAll("#modalchips .chip").forEach(ch=>ch.onclick=()=>modalKeys(ch.dataset.keys,false,false));
 
-// keyboard: Esc closes the modal first; otherwise 1-4 switch views
+// keyboard: Esc closes the topmost modal first; otherwise 1-4 switch views
 document.addEventListener("keydown",e=>{
   if($("#newmodal").classList.contains("open")){if(e.key==="Escape")closeNew();return;}
   if($("#modal").classList.contains("open")){if(e.key==="Escape")closeModal();return;}
+  // EID stress: Esc must dismiss settings (was missing → setmodal stuck, blocked SETTINGS re-click)
+  if($("#setmodal")&&$("#setmodal").classList.contains("open")){if(e.key==="Escape")closeSettings();return;}
   if(e.target.id==="filter"||e.target.id==="input"||e.target.id==="modalinput")return;
   if(e.target.closest&&e.target.closest("#newmodal"))return;
   const map={"1":"grid","2":"groups","3":"activity","4":"flow","5":"orphans","6":"chats"};
@@ -6156,8 +6158,14 @@ pollHancock();setInterval(pollHancock,3000);
 // --- model routing settings ---
 const TASK_LABELS={gist:"The Gist (session digest + suggested replies)",placement:"Session placement (new-session machine + name)"};
 async function openSettings(){
+  // Open immediately so Esc works during /api/models fetch (stress open/esc race).
+  $("#setmodal").classList.add("open");
+  $("#nimtestout").textContent="loading…";$("#nimtestout").className="";
   const r=await api("/api/models");
-  if(!r.ok)return;
+  if(!r.ok){
+    $("#nimtestout").textContent="failed to load models";$("#nimtestout").className="err";
+    return;
+  }
   const c=r.config;
   $("#nimurl").value=c.nim.base_url||"";$("#nimmodel").value=c.nim.model||"";$("#nimkey").value=c.nim.api_key||"";
   $("#setroutes").innerHTML=(r.tasks||[]).map(t=>{
@@ -6169,7 +6177,6 @@ async function openSettings(){
       +'</select></label>';
   }).join("");
   $("#nimtestout").textContent="";$("#setsaveout").textContent="";
-  $("#setmodal").classList.add("open");
 }
 function closeSettings(){$("#setmodal").classList.remove("open");}
 async function testNim(){
