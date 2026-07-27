@@ -28,10 +28,10 @@ import json
 import os
 import re
 import time
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
-
+from typing import Any
 
 _GREENMARK_RE = re.compile(
     r"greenmark|gmw|cerebro|gms|greenmux|rentamac|neutrino",

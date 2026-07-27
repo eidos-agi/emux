@@ -4,8 +4,6 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-import pytest
-
 
 def test_probe_prefers_loopback_healthy(monkeypatch):
     from emux import web
@@ -65,10 +63,11 @@ def test_probe_prefers_loopback_healthy(monkeypatch):
 
 
 def test_probe_auth_gated_public_is_ok_degraded(monkeypatch):
-    from emux import web
-    from emux.product_config import ManagedPlane, ProductConfig
     import urllib.error
     import urllib.request
+
+    from emux import web
+    from emux.product_config import ManagedPlane, ProductConfig
 
     def fake_urlopen(req, timeout=1.0):  # noqa: ANN001
         raise urllib.error.HTTPError(

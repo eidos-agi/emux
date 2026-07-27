@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -57,7 +57,7 @@ def test_is_due_respects_last_run(sched_dir: Path):
     assert sched.is_due(j) is False
     # pretend we never ran and previous slot is recent
     j.last_run_at = None
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     # force last far in past
     j.last_run_at = (now - timedelta(hours=2)).isoformat()
     # previous minute is within catchup? every minute prev is <60s ago so due
@@ -76,5 +76,5 @@ def test_skipped_late_not_due(sched_dir: Path):
         last_run_at=None,
     )
     # If "now" is mid-year, prev is months ago → not due (outside catchup)
-    mid = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    mid = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
     assert sched.is_due(j, mid) is False

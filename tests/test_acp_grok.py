@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 import textwrap
@@ -11,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from emux import acp_grok as acp
-
 
 FAKE_AGENT = textwrap.dedent(
     r"""

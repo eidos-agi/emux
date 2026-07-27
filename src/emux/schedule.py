@@ -34,7 +34,7 @@ import os
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -91,7 +91,7 @@ class Job:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
 def _parse_iso(s: str | None) -> datetime | None:
@@ -100,7 +100,7 @@ def _parse_iso(s: str | None) -> datetime | None:
     try:
         d = datetime.fromisoformat(s.replace("Z", "+00:00"))
         if d.tzinfo is None:
-            d = d.replace(tzinfo=timezone.utc)
+            d = d.replace(tzinfo=UTC)
         return d
     except ValueError:
         return None
@@ -179,7 +179,7 @@ def save_jobs(jobs: list[Job]) -> Path:
 
 def list_jobs(*, with_next: bool = True) -> list[dict[str, Any]]:
     jobs = load_jobs()
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     rows: list[dict[str, Any]] = []
     for j in jobs:
         row = j.as_dict()
@@ -258,7 +258,7 @@ def _next_fire_iso(job: Job, now_utc: datetime) -> str:
     nxt = itr.get_next(datetime)
     if nxt.tzinfo is None:
         nxt = nxt.replace(tzinfo=tz)
-    return nxt.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+    return nxt.astimezone(UTC).replace(microsecond=0).isoformat()
 
 
 def _prev_fire(job: Job, now_utc: datetime) -> datetime:
@@ -270,13 +270,13 @@ def _prev_fire(job: Job, now_utc: datetime) -> datetime:
     prev = itr.get_prev(datetime)
     if prev.tzinfo is None:
         prev = prev.replace(tzinfo=tz)
-    return prev.astimezone(timezone.utc)
+    return prev.astimezone(UTC)
 
 
 def is_due(job: Job, now_utc: datetime | None = None) -> bool:
     if not job.enabled:
         return False
-    now = now_utc or datetime.now(timezone.utc)
+    now = now_utc or datetime.now(UTC)
     try:
         prev = _prev_fire(job, now)
     except Exception:
@@ -351,7 +351,7 @@ def fire_by_id(job_id: str, *, force: bool = True) -> dict[str, Any]:
 
 def tick_once() -> list[dict[str, Any]]:
     """Check due jobs and fire them. Called from the web daemon poll loop."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     fired: list[dict[str, Any]] = []
     with _lock:
         jobs = load_jobs()
@@ -363,7 +363,7 @@ def tick_once() -> list[dict[str, Any]]:
         if job is None:
             continue
         # Re-check due (another tick may have won).
-        if not is_due(job, datetime.now(timezone.utc)):
+        if not is_due(job, datetime.now(UTC)):
             continue
         fired.append(fire_job(job, force=False))
     # Advance markers for jobs that missed the catch-up window so they don't
@@ -371,7 +371,7 @@ def tick_once() -> list[dict[str, Any]]:
     with _lock:
         jobs = load_jobs()
         changed = False
-        now2 = datetime.now(timezone.utc)
+        now2 = datetime.now(UTC)
         for j in jobs:
             if not j.enabled:
                 continue

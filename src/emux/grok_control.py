@@ -18,9 +18,10 @@ import json
 import os
 import re
 import shutil
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from urllib.parse import unquote
 
 # Session id shape used by Grok (UUID-ish, often UUID v7).

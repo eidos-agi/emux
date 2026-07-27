@@ -23,7 +23,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 VALID_ROLES = frozenset({"worker", "manager"})
 
 # Worker skins only — chats_match when no product.json.

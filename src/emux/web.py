@@ -44,6 +44,7 @@ import sys
 import threading
 import time
 from collections import deque
+from datetime import UTC
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -6871,8 +6872,9 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             # In-process cron message jobs (product-scoped schedule.json).
             # Optional ?from=&to= ISO expand occurrences for calendar views.
             try:
+                from datetime import datetime, timedelta
+
                 from . import schedule as _sched
-                from datetime import datetime, timedelta, timezone
 
                 qs = parse_qs(url.query)
                 payload: dict[str, Any] = {
@@ -6888,11 +6890,11 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                         start = datetime.fromisoformat(fr.replace("Z", "+00:00"))
                         end = datetime.fromisoformat(to.replace("Z", "+00:00"))
                         if start.tzinfo is None:
-                            start = start.replace(tzinfo=timezone.utc)
+                            start = start.replace(tzinfo=UTC)
                         if end.tzinfo is None:
-                            end = end.replace(tzinfo=timezone.utc)
+                            end = end.replace(tzinfo=UTC)
                     except ValueError:
-                        start = datetime.now(timezone.utc).replace(
+                        start = datetime.now(UTC).replace(
                             hour=0, minute=0, second=0, microsecond=0
                         )
                         end = start + timedelta(days=7)
@@ -7372,12 +7374,12 @@ def health_page_markdown(version: str, public_path: str = "") -> str:
     Each emux product instance (emux / amux / gmux / reevux / directrux) serves
     its own page under its public_path. Health *criteria* start minimal and grow.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from . import skin as _skin
 
     sk = _skin.active_skin()
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     base = public_path or ""
 
     # Cheap liveness — same core as /healthz (no pane peeks, no chat disk scan).
@@ -7502,7 +7504,7 @@ def health_page_markdown(version: str, public_path: str = "") -> str:
         "",
         "| # | criterion | status on this page |",
         "|---|-----------|---------------------|",
-        f"| 1 | Daemon answers HTTP | **checked** (you are reading this) |",
+        "| 1 | Daemon answers HTTP | **checked** (you are reading this) |",
         f"| 2 | Session inventory ok | **checked** → sessions_ok={sessions_ok} |",
         f"| 3 | Live session count (informational) | **reported** → {live_n} |",
         (
@@ -7642,12 +7644,12 @@ def ai_diagnosis_markdown(
     document: scope honesty, live vs ghost, unknown sockets, connect commands,
     optional short pane samples from LIVE sessions only.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from . import skin as _skin
 
     sk = _skin.active_skin()
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     payload = sessions_payload()
     sessions = payload.get("sessions") or []
     scope = payload.get("scope") or {}
@@ -7680,7 +7682,6 @@ def ai_diagnosis_markdown(
             planes = probe.get("planes") or []
             down = [p for p in planes if not p.get("ok")]
             deg = [p for p in planes if p.get("ok") and p.get("degraded")]
-            up = [p for p in planes if p.get("ok") and not p.get("degraded")]
             if not planes:
                 mgr_verdict = "FAIL"
             elif down:
@@ -7693,7 +7694,7 @@ def ai_diagnosis_markdown(
                 "",
                 "## Managed planes (manager allowlist — primary job)",
                 "",
-                f"- product role: **manager**",
+                "- product role: **manager**",
                 f"- config: `{cfg.path or 'default (no product.json)'}`",
                 f"- chats_match: `{cfg.chats_match}` (never worker dumps)",
                 f"- managed_ids: {', '.join(sorted(cfg.managed_ids())) or '(empty)'}",
@@ -8154,13 +8155,13 @@ def simple_status_html(
     were actually scanned — not "all work on the host".
     """
     import html as _html
-    from datetime import datetime, timezone
+    from datetime import datetime
     from urllib.parse import urlencode
 
     base = public_path or ""
     ssh_host = resolve_connect_ssh_host(public_path)
     now_ts = time.time()
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     payload = sessions_payload()
     all_sessions = payload.get("sessions") or []
     scope = payload.get("scope") or {}

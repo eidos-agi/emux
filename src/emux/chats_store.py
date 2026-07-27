@@ -23,22 +23,24 @@ import os
 import re
 import sqlite3
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .chats import (
-    ChatHit,
     _AIC_RE,
     _DIRECTRUX_RE,
     _GREENMARK_RE,
     _PERSONAL_RE,
+    ChatHit,
     _claude_live_ids,
     _grok_live_ids,
     _priority,
     clean_text,
+)
+from .chats import (
     find_chats_bundle as _scan_bundle,
 )
-
 
 _DEFAULT_FRESH_SECS = 15 * 60  # re-scan disk only when store older than this
 
@@ -521,9 +523,9 @@ class ChatStore:
                 if qn not in hay:
                     continue
 
-            def _col(name: str, default=None):
+            def _col(name: str, default=None, _row=row):
                 try:
-                    return row[name]
+                    return _row[name]
                 except (IndexError, KeyError):
                     return default
 
