@@ -1372,6 +1372,59 @@ def cmd_head(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_schedule(args: argparse.Namespace) -> int:
+    """Cron-style message jobs stored per product (e.g. ~/.config/amux/schedule.json)."""
+    from . import schedule as _sched
+
+    sub = getattr(args, "schedule_cmd", None)
+    if sub is None or sub == "list":
+        rows = _sched.list_jobs()
+        print(f"schedule file: {_sched.schedule_path()}  product={_sched._product_id()}")
+        if not rows:
+            print("(no jobs — add with: emux schedule add --cron '…' --target NAME --message '…')")
+            return 0
+        for r in rows:
+            en = "on" if r.get("enabled") else "off"
+            print(
+                f"{r['id']:24} {en:3} cron={r['cron']!r} tz={r.get('timezone')} "
+                f"target={r['target']} next={r.get('next_run_at') or '—'} "
+                f"last={r.get('last_status') or '—'}"
+            )
+        return 0
+    if sub == "add":
+        try:
+            job = _sched.add_job(
+                cron=args.cron,
+                target=args.target,
+                message=args.message,
+                timezone=args.timezone,
+                job_id=args.id,
+            )
+        except Exception as e:
+            print(f"emux schedule: {e}", file=sys.stderr)
+            return 1
+        print(f"added {job.id} → {_sched.schedule_path()}")
+        return 0
+    if sub == "rm":
+        if not _sched.remove_job(args.id):
+            print(f"emux schedule: unknown id {args.id}", file=sys.stderr)
+            return 1
+        print(f"removed {args.id}")
+        return 0
+    if sub == "run":
+        r = _sched.fire_by_id(args.id, force=True)
+        if getattr(args, "json", False):
+            print(json.dumps(r, indent=2))
+        elif r.get("ok"):
+            print(f"fired {args.id} → {r.get('target')}")
+        else:
+            print(f"emux schedule: fire failed: {r.get('error')}", file=sys.stderr)
+            return 1
+        return 0 if r.get("ok") else 1
+    print("emux schedule: need list|add|rm|run", file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="emux",
@@ -1806,6 +1859,40 @@ def main(argv: list[str] | None = None) -> int:
         help="print the tmux attach command without opening a terminal",
     )
 
+    p_sched = sub.add_parser(
+        "schedule",
+        help="cron-style message jobs (in-process; product-scoped schedule.json)",
+    )
+    sched_sub = p_sched.add_subparsers(dest="schedule_cmd")
+    sched_sub.add_parser("list", help="list jobs + next fire time")
+    p_sched_add = sched_sub.add_parser("add", help="add a cron message job")
+    p_sched_add.add_argument(
+        "--cron",
+        required=True,
+        help='5-field cron, e.g. "0 7 * * *" (minute hour dom mon dow)',
+    )
+    p_sched_add.add_argument(
+        "--target",
+        required=True,
+        help="registry name (preferred) or tmux session",
+    )
+    p_sched_add.add_argument(
+        "--message",
+        required=True,
+        help="text to send into the session (like typing a prompt)",
+    )
+    p_sched_add.add_argument(
+        "--timezone",
+        default="America/Chicago",
+        help="IANA timezone (default America/Chicago)",
+    )
+    p_sched_add.add_argument("--id", default=None, help="optional job id")
+    p_sched_rm = sched_sub.add_parser("rm", help="remove a job by id")
+    p_sched_rm.add_argument("id", help="job id")
+    p_sched_run = sched_sub.add_parser("run", help="fire a job now (does not wait for cron)")
+    p_sched_run.add_argument("id", help="job id")
+    p_sched_run.add_argument("--json", action="store_true", help="print result JSON")
+
     args = parser.parse_args(argv)
 
     if args.cmd is None:
@@ -1881,6 +1968,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_run(args)
     if args.cmd == "head":
         return cmd_head(args)
+    if args.cmd == "schedule":
+        return cmd_schedule(args)
     if args.cmd == "doctor":
         return cmd_doctor(args)
     if args.cmd == "gates":

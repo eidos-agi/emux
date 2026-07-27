@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     "mcp>=1.2.0",
     "textual>=0.40.0",
+    "croniter>=2.0.0",  # emux schedule — cron expressions for in-process message jobs
 ]
 
 [project.optional-dependencies]

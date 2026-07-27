@@ -6717,6 +6717,22 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         if url.path == "/api/chats/peek":
             self._json(chats_peek_payload(parse_qs(url.query)))
             return
+        if url.path in ("/api/schedule", "/api/schedule/"):
+            # In-process cron message jobs (product-scoped schedule.json).
+            try:
+                from . import schedule as _sched
+
+                self._json(
+                    {
+                        "ok": True,
+                        "path": str(_sched.schedule_path()),
+                        "product": _sched._product_id(),
+                        "jobs": _sched.list_jobs(),
+                    }
+                )
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+            return
         if url.path in ("/api/product", "/api/product/"):
             # Worker vs manager role + managed plane registry (config-driven).
             try:
@@ -6796,7 +6812,9 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                             "/api/adopt", "/api/reply", "/api/chats/resume",
                             "/api/clip-image", "/api/steer", "/api/scroll",
                             "/api/hancock/approve", "/api/hancock/deny",
-                            "/api/models", "/api/models/test", "/api/plan/switch"):
+                            "/api/models", "/api/models/test", "/api/plan/switch",
+                            "/api/schedule", "/api/schedule/",
+                            "/api/schedule/run", "/api/schedule/delete"):
             self._json({"ok": False, "error": "not_found"}, 404)
             return
         if not self._host_allowed():
@@ -6817,6 +6835,51 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/clip-image":
             self._json(_clip_image_save(data if isinstance(data, dict) else {}))
+            return
+        if url.path in ("/api/schedule", "/api/schedule/"):
+            # Add a cron message job: {cron, target, message, timezone?, id?}
+            try:
+                from . import schedule as _sched
+
+                body = data if isinstance(data, dict) else {}
+                job = _sched.add_job(
+                    cron=str(body.get("cron") or ""),
+                    target=str(body.get("target") or ""),
+                    message=str(body.get("message") or ""),
+                    timezone=str(body.get("timezone") or "America/Chicago"),
+                    job_id=(str(body["id"]).strip() if body.get("id") else None),
+                    enabled=bool(body.get("enabled", True)),
+                )
+                self._json({"ok": True, "job": job.as_dict(), "path": str(_sched.schedule_path())})
+            except ValueError as exc:
+                self._json({"ok": False, "error": str(exc)}, 400)
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+            return
+        if url.path == "/api/schedule/run":
+            try:
+                from . import schedule as _sched
+
+                jid = str((data or {}).get("id") or "").strip()
+                if not jid:
+                    self._json({"ok": False, "error": "missing_id"}, 400)
+                    return
+                self._json(_sched.fire_by_id(jid, force=True))
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+            return
+        if url.path == "/api/schedule/delete":
+            try:
+                from . import schedule as _sched
+
+                jid = str((data or {}).get("id") or "").strip()
+                if not jid:
+                    self._json({"ok": False, "error": "missing_id"}, 400)
+                    return
+                ok = _sched.remove_job(jid)
+                self._json({"ok": ok, "id": jid, **({} if ok else {"error": "unknown_job"})})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
             return
         if url.path == "/api/suggest":
             intent = (data.get("intent") or "").strip()
@@ -8406,11 +8469,22 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
     stop = threading.Event()
 
     def poll_loop() -> None:
+        # schedule tick every ~15s (not every pane poll) — cheap, message-only cron
+        schedule_every = max(1, int(15 / max(_POLL_INTERVAL, 0.5)))
+        n = 0
         while not stop.is_set():
             try:
                 poll_once(14)
             except Exception:  # noqa: BLE001 — a transient tmux error must not kill the loop
                 pass
+            n += 1
+            if n % schedule_every == 0:
+                try:
+                    from . import schedule as _sched
+
+                    _sched.tick_once()
+                except Exception:  # noqa: BLE001 — schedule must not kill the daemon
+                    pass
             stop.wait(_POLL_INTERVAL)
 
     poller = threading.Thread(target=poll_loop, daemon=True)

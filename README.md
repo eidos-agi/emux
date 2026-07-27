@@ -368,6 +368,33 @@ One background thread captures every live pane on a timer into a shared cache, s
 
 API: `GET /healthz` (unauthenticated liveness), `GET /api/sessions`, `GET /api/grid?lines=` (captures + activity for all live panes in one call), `GET /api/capture?session=&lines=`, `POST /api/send {session, keys, literal, enter}`. The `/api/*` routes enforce the Host/Origin guards above. Same operations the MCP server exposes, over HTTP.
 
+### Schedule (in-process cron → session messages)
+
+The web daemon can fire **cron-scheduled messages** into registered sessions
+(or raw tmux names). Uses the **`croniter`** package for expression parsing;
+the daemon's background loop ticks jobs every ~15s. Jobs are **product-scoped**
+(`EMUX_PRODUCT=amux` → `~/.config/amux/schedule.json`).
+
+```bash
+# list / add / fire / remove
+emux schedule list
+emux schedule add --cron '0 7 * * *' --timezone America/Chicago \
+  --target northstar-iran-daily \
+  --message 'Run the Iran War daily desk for today (SOP).'
+emux schedule run <id>     # fire now
+emux schedule rm <id>
+
+# HTTP (same Host/Origin guards as other POSTs)
+GET  /api/schedule
+POST /api/schedule        {cron, target, message, timezone?, id?}
+POST /api/schedule/run    {id}
+POST /api/schedule/delete {id}
+```
+
+v1 is **message inject only** (like typing into the seat). It does not spawn
+sessions. Missed fires older than 15 minutes are skipped (laptop sleep), not
+backfilled. Requires `emux web` / `amux web` running (launchd KeepAlive).
+
 ### Security
 
 Localhost is **not** a security boundary — any web page open in your browser can issue requests to a localhost port. So the API:
