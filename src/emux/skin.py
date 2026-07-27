@@ -81,13 +81,25 @@ _LOGO_REEVUX = (
     "</svg>"
 )
 
-# A-mark: AIC Holdings lane (AIC + emux → amux) — cool blue, distinct from gmux green / reevux navy
+# AIC feather mark (from AIC Holdings / Meridian brand plate) — leaf/quill, fill=currentColor
 _LOGO_AMUX = (
     '<svg class="skin-logo" viewBox="0 0 64 64" width="36" height="36" '
     'aria-hidden="true" xmlns="http://www.w3.org/2000/svg">'
-    '<rect x="4" y="4" width="56" height="56" rx="12" fill="currentColor" opacity=".12"/>'
-    '<path fill="currentColor" d="M32 18 L46 44 H40 L36.5 36 H27.5 L24 44 H18 L32 18 Z '
-    'M30 30 H34 L32 25 Z"/>'
+    # Soft plate so the white feather reads on light themes too
+    '<rect x="4" y="4" width="56" height="56" rx="12" fill="currentColor" opacity=".10"/>'
+    # Feather: curved body, pointed tip upper-right, soft trailing edge (matches brand mark)
+    '<path fill="currentColor" d="'
+    "M18 46 "
+    "C16 40 15 32 17 24 "
+    "C19 16 24 11 31 10 "
+    "C38 9 45 12 48 18 "
+    "C51 24 49 31 44 35 "
+    "C40 38 35 39 31 38 "
+    "C36 34 38 28 36 23 "
+    "C34 18 28 16 24 19 "
+    "C20 22 18 29 18 36 "
+    "C18 40 18 44 18 46 Z"
+    '"/>'
     "</svg>"
 )
 
@@ -129,7 +141,7 @@ class Skin:
         elif self.id == "reevux":
             bg = "0e1218"
         elif self.id == "amux":
-            bg = "0c1424"
+            bg = "151c36"  # AIC Holdings navy (brand plate)
         else:
             bg = "0f1a14"
         svg = (
@@ -245,36 +257,38 @@ _GMUX_DARK = Palette(
     user="#5fbf8f",
 )
 
-# AIC Holdings lane — cool blue (Linear amux project #4F8DF7 family; not gmux green / reevux slate)
+# AIC Holdings / Meridian brand plate:
+#   navy #151c36–#182148 (sampled from brand art), primary #143ca2 / #16438A (Meridian)
+#   logo: white feather on navy. Default theme dark to match brand plate.
 _AMUX_LIGHT = Palette(
-    bg="#eef3fb",
-    bg_raise="#e4ebf7",
-    bg_card="#dce6f5",
-    accent="#2f6fdb",
-    accent_dim="#4f8df7",
-    accent_faint="#c9daf5",
-    text="#121a2a",
-    text_dim="#5a6a82",
-    live="#2d8a5a",
-    stale="#b3503a",
-    line="#c2d0e6",
-    on_accent="#f4f8ff",
-    user="#2f6fdb",
+    bg="#f3f5fa",
+    bg_raise="#e8ecf5",
+    bg_card="#ffffff",
+    accent="#143ca2",       # Meridian primary
+    accent_dim="#16438a",
+    accent_faint="#d4dcf0",
+    text="#151c36",         # brand navy
+    text_dim="#5a6580",
+    live="#1a7a45",
+    stale="#a64b32",
+    line="#c5cde0",
+    on_accent="#ffffff",
+    user="#143ca2",
 )
 _AMUX_DARK = Palette(
-    bg="#0c1424",
-    bg_raise="#121c30",
-    bg_card="#18243a",
-    accent="#6ba3ff",
-    accent_dim="#4f8df7",
-    accent_faint="#1e3050",
-    text="#e8f0fc",
-    text_dim="#8b9ab4",
+    bg="#151c36",           # brand plate navy
+    bg_raise="#182148",
+    bg_card="#1c2747",
+    accent="#6b8fd4",       # light blue accent on navy (readable; white is logo-only)
+    accent_dim="#4a6fbf",
+    accent_faint="#243056",
+    text="#f0f3fa",         # brand white / near-white
+    text_dim="#9aa6c0",
     live="#5fbf8f",
     stale="#e07050",
-    line="#2a3c58",
-    on_accent="#0c1424",
-    user="#6ba3ff",
+    line="#2a3558",
+    on_accent="#151c36",
+    user="#e8eefc",         # user bubbles lean brand-white on navy
 )
 
 # Reeves personal lane — cool slate/navy (deliberately unlike gmux green / emux amber)
@@ -364,11 +378,11 @@ _SKINS: dict[str, Skin] = {
         room_title="amux — AIC Holdings fleet",
         docs_title="amux documentation",
         engine_label="emux",
-        footer_note="powered by emux · AIC lane only",
+        footer_note="powered by emux · AIC Holdings",
         light=_AMUX_LIGHT,
         dark=_AMUX_DARK,
         logo_svg=_LOGO_AMUX,
-        default_theme="light",
+        default_theme="dark",  # brand plate is navy
     ),
 }
 
