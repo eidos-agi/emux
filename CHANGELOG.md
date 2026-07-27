@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.68.16
+
+### Fixes / polish (EID-1142)
+- **Header hierarchy:** Linear issue is the hero title; seat name is secondary.
+- **One status banner:** classifier strip folded into a single calm `#modalbanner` (no double strip).
+- **Task rows:** key + title line + active pip + pursue / ↗ Linear actions (CSS actually applied to `div.mtask`).
+- **Gist stuck-on-reading:** keep prior digest while re-reading; client timeout + time-based retry when pane is stable; refresh forces recompute.
+
 ## v0.68.15
 
 ### Fixes

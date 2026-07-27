@@ -3521,23 +3521,32 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
   animation:zoomin .16s ease-out;
 }
 @keyframes zoomin{from{transform:scale(.98);opacity:.4}to{transform:scale(1);opacity:1}}
-#modalhead{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--bg-card);flex:0 0 auto;flex-wrap:wrap}
-#modalidents{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 auto}
-#modalhead .nmrow{display:flex;align-items:baseline;gap:8px;min-width:0}
-#modalhead .nm{font-family:"VT323",monospace;font-size:22px;color:var(--amber);letter-spacing:1px}
-#modalhead .ag{color:var(--amber-dim);font-size:12px;letter-spacing:1px}
-#modalhead .nmrow .nm{font-size:14px;opacity:.85;letter-spacing:.5px}
-#modalhead .issuerow{font-size:18px;color:var(--text);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:"VT323",monospace;letter-spacing:.5px}
-#modalhead .issuerow a{color:var(--amber);text-decoration:none;border-bottom:1px dotted color-mix(in srgb,var(--amber) 50%,transparent)}
-#modalhead .issuerow:not([hidden]){order:-1}
-#modalidents{display:flex;flex-direction:column-reverse;gap:2px;min-width:0;flex:1 1 auto}
-#modalhead .st{margin-left:auto;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim)}
+/* EID-1142: issue is hero; seat name is secondary identity */
+#modalhead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--bg-card);flex:0 0 auto;flex-wrap:wrap}
+#modalidents{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1 1 180px}
+#modalhead .nmrow{display:flex;align-items:center;gap:8px;min-width:0;order:2}
+#modalhead .nm{font-family:inherit;font-size:12px;font-weight:600;color:var(--text-dim);letter-spacing:.2px}
+#modalhead .ag{color:var(--text-dim);font-size:11px;letter-spacing:.3px;opacity:.85}
+#modalhead .issuerow{order:1;font-size:17px;line-height:1.25;color:var(--text);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:inherit;letter-spacing:.1px}
+#modalhead .issuerow a{color:var(--amber);text-decoration:none}
+#modalhead .issuerow a:hover{text-decoration:underline;text-underline-offset:2px}
+#modalhead .issuerow .issuetitle{color:var(--text);font-weight:600;margin-left:2px}
+#modalhead .issuerow .issuemeta{color:var(--text-dim);font-weight:500;font-size:12px;margin-left:4px}
+#modalhead .issuerow .linchat{margin-left:8px;vertical-align:middle}
+#modalhead .st{margin-left:auto;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim);font-variant-numeric:tabular-nums}
+#modalhead .st.live{color:var(--live)}
 #modalclose,#modalpop{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 10px;margin-left:6px}
 #modalclose:hover,#modalpop:hover{color:var(--amber);border-color:var(--amber-dim)}
-#modalbanner{display:none;padding:6px 12px;font-size:12px;border-bottom:1px solid var(--line);background:color-mix(in srgb, var(--bg-raise) 80%, var(--live) 8%);color:var(--text)}
-#modalbanner.on{display:block}
-#modalbanner .bbadge{font-size:9px;letter-spacing:.8px;text-transform:uppercase;border:1px solid var(--line);padding:1px 6px;border-radius:4px;margin-left:8px;color:var(--text-dim)}
-#modalbanner .bbadge.warn{border-color:#c45;color:#e88}
+/* One status banner (judge merged in) — never double strips */
+#modalbanner{display:none;align-items:center;gap:10px;padding:8px 14px;font-size:12.5px;line-height:1.35;
+  border-bottom:1px solid var(--line);background:color-mix(in srgb, var(--bg-raise) 88%, var(--live) 10%);color:var(--text);flex:0 0 auto}
+#modalbanner.on{display:flex}
+#modalbanner .bstate{font-weight:700;letter-spacing:.6px;text-transform:uppercase;font-size:11px;white-space:nowrap}
+#modalbanner .bconf{color:var(--text-dim);font-size:11px;white-space:nowrap;font-variant-numeric:tabular-nums}
+#modalbanner .bsum{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+#modalbanner .bbadge{font-size:9px;letter-spacing:.8px;text-transform:uppercase;border:1px solid var(--line);padding:2px 7px;border-radius:4px;color:var(--text-dim);white-space:nowrap;flex:0 0 auto}
+#modalbanner .bbadge.warn{border-color:#c45;color:#e88;background:color-mix(in srgb,#c45 12%,transparent)}
+#modaljudge{display:none!important} /* EID-1142: folded into #modalbanner */
 /* solo tab: one session fills the Chrome tab — no fleet chrome */
 body.solo-session #side,
 body.solo-session #feed,
@@ -3797,17 +3806,30 @@ button.linchat:disabled{opacity:.55;cursor:default}
 .dpane.on{display:flex}
 .dsubh{display:flex;align-items:center;gap:8px;padding:8px 10px 4px;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim)}
 .dsubh .act{margin-left:auto;font-size:14px;padding:0 8px}
-#modaltasklist{flex:1 1 0;min-height:0;overflow:auto;padding:4px 8px 8px}
-#modaltasklist .mtempty{font-size:11px;color:var(--text-dim);line-height:1.45;padding:6px 4px}
+#modaltasklist{flex:1 1 0;min-height:0;overflow:auto;padding:6px 10px 10px}
+#modaltasklist .mtempty{font-size:11px;color:var(--text-dim);line-height:1.45;padding:8px 4px}
+/* Task rows: key · title · pursue / Linear (EID-1142) */
 #modaltasklist .mtask{
-  display:flex;align-items:center;gap:8px;padding:8px 9px;margin-bottom:5px;
-  border:1px solid var(--line);border-radius:6px;background:var(--bg-card);
-  color:var(--text);font-size:12px;
+  display:flex;align-items:center;gap:10px;padding:9px 11px;margin-bottom:6px;
+  border:1px solid var(--line);border-radius:8px;background:var(--bg-card);
+  color:var(--text);font-size:12px;min-height:40px;
 }
 #modaltasklist .mtask:hover{border-color:var(--amber-dim);background:color-mix(in srgb, var(--amber) 8%, var(--bg-card))}
-#modaltasklist .mtask.active{border-color:var(--amber);box-shadow:inset 3px 0 0 var(--amber)}
-#modaltasklist .mtkey{font-weight:700;color:var(--amber);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px;text-decoration:none}
-#modaltasklist .mtgo{color:var(--text-dim);font-size:11px;text-decoration:none}
+#modaltasklist .mtask.active{border-color:var(--amber);box-shadow:inset 3px 0 0 var(--amber);background:color-mix(in srgb, var(--amber) 10%, var(--bg-card))}
+#modaltasklist .mtbody{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+#modaltasklist .mtkey{font-weight:700;color:var(--amber);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px;text-decoration:none;font-size:12.5px}
+#modaltasklist .mtkey:hover{text-decoration:underline;text-underline-offset:2px}
+#modaltasklist .mttitle{font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#modaltasklist .mtpip{width:8px;height:8px;border-radius:50%;background:var(--live);flex:0 0 auto;box-shadow:0 0 0 2px color-mix(in srgb,var(--live) 25%,transparent)}
+#modaltasklist .mtask:not(.active) .mtpip{display:none}
+#modaltasklist .mtacts{display:flex;gap:6px;margin-left:auto;align-items:center;flex:0 0 auto}
+#modaltasklist .mtchat{
+  border:1px solid var(--amber-dim);background:transparent;color:var(--amber);
+  font-size:10px;padding:3px 8px;border-radius:5px;cursor:pointer;font-family:inherit;letter-spacing:.2px;
+}
+#modaltasklist .mtchat:hover{background:color-mix(in srgb, var(--amber) 18%, transparent)}
+#modaltasklist .mtgo{color:var(--text-dim);font-size:11px;text-decoration:none;padding:2px 4px}
+#modaltasklist .mtgo:hover{color:var(--amber)}
 #drawerauth{flex:0 0 auto;padding:8px 10px 12px;border-top:1px solid var(--line)}
 #drawerauth select,#modalauth{
   width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);
@@ -3873,18 +3895,15 @@ button.linchat:disabled{opacity:.55;cursor:default}
 }
 #modaljump.on{display:block}
 #modaljump:hover{filter:brightness(1.08)}
-/* live classifier strip (emux judge) */
-#modaljudge{display:none;align-items:center;gap:10px;padding:4px 10px;flex:0 0 auto;
-  border-bottom:1px solid var(--line);background:var(--bg-raise);font:11px "IBM Plex Mono",monospace}
-#modaljudge.on{display:flex}
-#modaljudge .jstate{font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:12px;white-space:nowrap}
-#modaljudge .jconf{color:var(--text-dim);font-size:10px;white-space:nowrap}
-#modaljudge .jsum{color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#modaljudge .jflag{border:1px solid #7a3a1a;color:#ff9f43;padding:0 5px;font-size:10px;
-  text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
+/* judge strip kept for DOM score but always hidden (merged into #modalbanner) */
+#modaljudge{display:none!important;align-items:center;gap:10px;padding:0;flex:0 0 auto;height:0;overflow:hidden;border:0}
 .s-running{color:#8fd88f}.s-done_idle{color:#8a8a72}.s-error{color:#ff5f56}
 .s-thrashing{color:#ff9f43}.s-stuck{color:#ffb000}.s-waiting_human{color:#38d9ff}
 .s-waiting_external{color:#7a8fd8}.s-planning{color:#d0b24a}.s-editing{color:#d0b24a}.s-dead{color:#666}
+#modalbanner .bstate.s-running{color:#8fd88f}
+#modalbanner .bstate.s-waiting_human{color:#38d9ff}
+#modalbanner .bstate.s-error,#modalbanner .bstate.s-stuck{color:#ff5f56}
+#modalbanner .bstate.s-thrashing{color:#ff9f43}
 /* thinking indicator — movement + a live timer while the agent is generating */
 #modalthink{display:none;align-items:center;gap:7px;margin-left:14px;font-size:11px;
   color:var(--live);letter-spacing:.5px}
@@ -3917,16 +3936,18 @@ button.linchat:disabled{opacity:.55;cursor:default}
 #modalclips .cliphint{font-size:10px;color:var(--text-dim);letter-spacing:.3px}
 /* the gist — reader's-digest + suggested replies, so you know what to do */
 #modaldigest{display:none;flex:0 0 auto;max-height:22vh;overflow:hidden}
-#modaldigest.on{display:block;padding:6px 10px;background:var(--bg-raise);
+#modaldigest.on{display:block;padding:8px 14px;background:var(--bg-raise);
   max-height:22vh;overflow-y:auto; /* never starve #modalshell of height */
   border-bottom:1px solid var(--amber-faint)}
 #modaldigest .dghead{display:flex;align-items:center;font-size:10px;letter-spacing:2px;
-  text-transform:uppercase;color:var(--amber-dim);margin-bottom:3px}
+  text-transform:uppercase;color:var(--amber-dim);margin-bottom:4px;gap:8px}
+#modaldigest .dghead .dgspin{display:none;font-size:10px;color:var(--text-dim);letter-spacing:.4px;text-transform:none;font-style:italic}
+#modaldigest.loading .dghead .dgspin{display:inline}
 #dgrefresh{margin-left:auto;background:transparent;border:none;color:var(--text-dim);
-  font-size:13px;cursor:pointer}
+  font-size:13px;cursor:pointer;padding:2px 6px}
 #dgrefresh:hover{color:var(--amber)}
 #modaldigest .dgtext{font-size:13px;line-height:1.5;color:var(--text)}
-#modaldigest.loading .dgtext{color:var(--text-dim);font-style:italic}
+#modaldigest.loading .dgtext.placeholder{color:var(--text-dim);font-style:italic}
 #modaldigest .dgsugg{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
 #modaldigest .dgsugg:empty{display:none}
 .sgg{background:var(--amber);border:1.5px solid var(--amber);color:var(--on-accent);font-weight:650;
@@ -3953,10 +3974,12 @@ button.linchat:disabled{opacity:.55;cursor:default}
 #modalchips{display:flex;gap:6px;padding:6px 10px 0;flex:0 0 auto}
 #modalclips{padding:0 10px 4px}
 #modalpending.on{margin:0 10px 4px;padding:5px 8px}
-#modalrow{display:flex;gap:8px;padding:6px 10px 8px;flex:0 0 auto}
-#modalinput{flex:1;background:var(--bg-card);border:1px solid var(--line);color:var(--text);
-  font:14px "IBM Plex Mono",monospace;padding:8px 10px;outline:none;caret-color:var(--amber)}
+#modalrow{display:flex;gap:8px;padding:8px 12px 10px;flex:0 0 auto;align-items:center}
+#modalinput{flex:1;min-width:0;background:var(--bg-card);border:1px solid var(--line);color:var(--text);
+  font:14px "IBM Plex Mono",monospace;padding:9px 12px;outline:none;caret-color:var(--amber);border-radius:6px}
 #modalinput:focus{border-color:var(--amber-dim);box-shadow:0 0 12px color-mix(in srgb, var(--amber) 10%, transparent)}
+#modalauth{max-width:150px;border-radius:6px;padding:8px}
+#modalqueue,#modalsend{border-radius:6px;padding:8px 14px}
 #modalsend{font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:0 20px;
   background:var(--amber);color:var(--on-accent);border:none;cursor:pointer}
 #modalsend:hover{box-shadow:0 0 18px color-mix(in srgb, var(--amber) 50%, transparent)}
@@ -4094,13 +4117,6 @@ button.linchat:disabled{opacity:.55;cursor:default}
   flex:0 0 auto;align-self:flex-end;margin-bottom:4px;
 }
 #tchat-addfab:hover{filter:brightness(1.08)}
-#modaltasklist a.mtask .mtacts{display:flex;gap:4px;margin-left:auto;align-items:center}
-#modaltasklist a.mtask .mtchat{
-  border:1px solid var(--amber-dim);background:transparent;color:var(--amber);
-  font-size:10px;padding:2px 7px;border-radius:4px;cursor:pointer;font-family:inherit;
-}
-#modaltasklist a.mtask .mtchat:hover{background:color-mix(in srgb, var(--amber) 18%, transparent)}
-#modaltasklist a.mtask .mtgo{margin-left:0}
 .happrove:disabled,.hdeny:disabled{opacity:.4;cursor:default}
 
 /* ── macOS-only controls (iTerm2 driven by AppleScript) — hidden anywhere the
@@ -4226,9 +4242,9 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
       <button id="modalclose">✕ close</button>
     </div>
     <div id="modalbanner" class="off" aria-live="polite"></div>
-    <div id="modaljudge"></div>
+    <div id="modaljudge" aria-hidden="true"></div>
     <div id="modaldigest">
-      <div class="dghead"><span>◆ the gist</span><button id="dgrefresh" title="re-read">↻</button></div>
+      <div class="dghead"><span>◆ the gist</span><span class="dgspin">reading…</span><button id="dgrefresh" title="re-read">↻</button></div>
       <div class="dgtext"></div>
       <div class="dgsugg"></div>
     </div>
@@ -4444,7 +4460,11 @@ window.addEventListener("hashchange",()=>{if(!urlBooting)applyURL();});
 // PUBLIC_PATH is injected by the daemon when published under a reverse-proxy
 // path prefix (e.g. /gmux). Empty string keeps loopback root behavior.
 const PUBLIC_PATH="__PUBLIC_PATH__";
-async function api(path,opts){const r=await fetch(PUBLIC_PATH+path,opts);return r.json();}
+async function api(path,opts){
+  const r=await fetch(PUBLIC_PATH+path,opts||{});
+  if(!r.ok&&r.status===0) throw new Error("unreachable");
+  try{return await r.json();}catch(e){return {ok:false,error:"bad_json"};}
+}
 
 function ageLabel(a){
   if(a===null||a===undefined)return "—";
@@ -6172,7 +6192,9 @@ async function loadModalHistory(s){
 function openModal(s){
   document.body.classList.remove("nav-open");   // mobile: dismiss the session drawer
   modalSession=s;
-  digestErr=false;digestRetries=0;
+  digestErr=false;digestRetries=0;digestHasBody=false;
+  try{if(digestInflight) digestInflight.abort();}catch(_){}
+  digestInflight=null;
   modalBook=[];modalScrollMode="app";modalHistoryText="";
   modalOpenedAt=Date.now();
   activeSideChatId="reply";
@@ -6180,10 +6202,13 @@ function openModal(s){
   $("#modalname").textContent=s.name;
   $("#modalagent").innerHTML=agentHTML(s);
   $("#modalstatus").textContent="connecting…";$("#modalstatus").style.color="";
+  $("#modalstatus").className="st";
   const iss=$("#modalissue"); if(iss){iss.hidden=true;iss.innerHTML="";}
   const ban=$("#modalbanner"); if(ban){ban.className="off";ban.textContent="";}
   const sc=$("#modalscreen");sc.textContent="";sc.dataset.last="";sc.dataset.userPinned="0";
-  $("#modaldigest").className="";$("#modaldigest .dgtext").textContent="";$("#modaldigest .dgsugg").innerHTML="";
+  $("#modaldigest").className="";
+  const dgt0=$("#modaldigest .dgtext"); if(dgt0){dgt0.className="dgtext";dgt0.textContent="";}
+  $("#modaldigest .dgsugg").innerHTML="";
   setPending("");$("#modalthink").className="";clearModalClips();
   tOpts=[];tSugg=[];tLoggedDigest="";
   sideChats=[];sideChatSeq=0;
@@ -6283,23 +6308,66 @@ async function modalRefresh(){
 }
 // the gist: a reader's-digest of the session + clickable suggested replies, so
 // you don't have to read a wall of text and invent a response.
-async function loadDigest(){
+// EID-1142: never wipe a good digest while re-reading; timeout so "reading…" can't stick forever.
+let digestInflight=null;   // AbortController for the active load
+let digestHasBody=false;   // true once we have real text in .dgtext
+async function loadDigest(opts){
   if(!modalSession)return;
-  const el=$("#modaldigest");el.className="on loading";
-  $("#modaldigest .dgtext").textContent="reading the session…";
-  $("#modaldigest .dgsugg").innerHTML="";
+  const force=!!(opts&&opts.force);
+  // Dedup concurrent loads for the same session (open + refresh race)
+  if(digestInflight&&!force) return;
+  if(digestInflight&&force){try{digestInflight.abort();}catch(_){}}
+  const el=$("#modaldigest");
+  const dgt=$("#modaldigest .dgtext");
+  const spin=$("#modaldigest .dgspin");
+  el.className="on loading";
+  if(spin) spin.textContent=force?"re-reading…":"reading…";
+  // Only show placeholder if we have nothing useful yet
+  if(dgt&&!digestHasBody){
+    dgt.className="dgtext placeholder";
+    dgt.textContent="reading the session…";
+  }
   const sess=modalSession.session;
-  const r=await api("/api/reply",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({session:sess})});
+  const ctrl=typeof AbortController!=="undefined"?new AbortController():null;
+  digestInflight=ctrl;
+  // Hard client timeout: model call is 45s server-side; don't hang the UI past 55s
+  let timedOut=false;
+  const to=setTimeout(()=>{timedOut=true;try{ctrl&&ctrl.abort();}catch(_){}},55000);
+  let r=null;
+  try{
+    r=await api("/api/reply",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({session:sess,force:force}),signal:ctrl?ctrl.signal:undefined});
+  }catch(e){
+    r={ok:false,error:timedOut?"timeout":((e&&e.name==="AbortError")?"aborted":"unreachable")};
+  }finally{
+    clearTimeout(to);
+    if(digestInflight===ctrl) digestInflight=null;
+  }
   if(!modalSession||modalSession.session!==sess)return;   // modal changed while thinking
   el.className="on";
-  if(!r.ok){
-    digestErr=true;   // stuck — modalRefresh will retry (≤10x) when the pane content next changes
-    const more=digestRetries<10?" · will retry when the session moves":"";
-    $("#modaldigest .dgtext").textContent="(couldn't summarize — "+(r.error||"")+")"+more;return;}
+  if(!r||!r.ok){
+    digestErr=true;   // stuck — retry on pane change OR timed retry below
+    const err=(r&&r.error)||"error";
+    // Keep prior good body; only overwrite placeholder / previous error
+    if(!digestHasBody&&dgt){
+      const more=digestRetries<10?" · will retry shortly":"";
+      dgt.className="dgtext placeholder";
+      dgt.textContent="(couldn't summarize — "+err+")"+more;
+    }
+    // Time-based retry even if pane is stable (was the stuck-on-reading root cause)
+    if(digestRetries<10){
+      digestRetries++;
+      setTimeout(()=>{if(modalSession&&modalSession.session===sess&&digestErr) loadDigest();},4000+digestRetries*1500);
+    }
+    return;
+  }
   digestErr=false;digestRetries=0;   // recovered
-  const dgt=$("#modaldigest .dgtext");
-  if(dgt){dgt.innerHTML=linkifyLinear(r.digest||"(nothing notable)");bindLinlinks(dgt);}
+  if(dgt){
+    dgt.className="dgtext";
+    dgt.innerHTML=linkifyLinear(r.digest||"(nothing notable)");
+    bindLinlinks(dgt);
+    digestHasBody=!!(r.digest&&String(r.digest).trim());
+  }
   renderModalTasks(); // gist often names the Linear issue
   if(r.digest&&r.digest!==tLoggedDigest){tchatLog("bot",r.digest);tLoggedDigest=r.digest;}  // the gist opens the chat
   setSuggestions(r.suggestions||[]);   // gist replies become chips (with confidence pies)
@@ -6594,30 +6662,37 @@ function tchatSend(){ sideChatSend("reply"); }
 function renderTChat(){ renderSideChats(); }
 async function modalJudge(){
   if(!modalSession)return;
-  const el=$("#modaljudge");
+  // EID-1142: single calm banner — judge strip is hidden; content lives in #modalbanner only
+  const ban=$("#modalbanner");
+  const el=$("#modaljudge"); // keep for DOM checks / score, never show
   try{
     const r=await api("/api/classify?name="+encodeURIComponent(modalSession.name));
     if(r&&r.ok&&r.state){
-      const flags=(r.flags||[]).map(f=>'<span class="jflag">'+f.replace(/_/g," ")+'</span>').join("");
-      el.innerHTML='<span class="jstate s-'+r.state+'">'+r.state.replace(/_/g,"·")+'</span>'
-        +'<span class="jconf">'+Math.round((r.confidence||0)*100)+'% · '+(r.recommended_action||"")+'</span>'
-        +'<span class="jsum">'+(r.summary||"")+'</span>'+flags;
-      el.className="on";
-      // Target UX status banner (leave-alone / needs you)
-      const ban=$("#modalbanner");
-      if(ban){
-        const conf=Math.round((r.confidence||0)*100);
-        const action=(r.recommended_action||"").replace(/_/g," ");
-        const sum=(r.summary||r.state||"").toString();
-        let badge="";
-        if(/false.?busy|thrash/i.test(sum+action+r.state)) badge='<span class="bbadge warn">false busy</span>';
-        else if(r.state==="running") badge='<span class="bbadge">running · '+conf+'%</span>';
-        else if(r.state==="waiting_human") badge='<span class="bbadge warn">needs you</span>';
-        ban.innerHTML=esc(action||r.state)+(sum?(" — "+esc(sum.slice(0,160))):"")+badge;
-        ban.className="on";
+      const conf=Math.round((r.confidence||0)*100);
+      const action=(r.recommended_action||"").replace(/_/g," ");
+      const sum=(r.summary||"").toString();
+      const stateLabel=String(r.state).replace(/_/g," ");
+      let badges="";
+      const flags=r.flags||[];
+      for(const f of flags){
+        const fl=String(f).replace(/_/g," ");
+        const warn=/false.?busy|thrash|stuck|error/i.test(fl);
+        badges+='<span class="bbadge'+(warn?" warn":"")+'">'+esc(fl)+'</span>';
       }
-    }else{el.className="";el.innerHTML="";}
-  }catch(e){el.className="";}
+      if(!flags.length){
+        if(/false.?busy|thrash/i.test(sum+action+r.state)) badges='<span class="bbadge warn">false busy</span>';
+        else if(r.state==="waiting_human") badges='<span class="bbadge warn">needs you</span>';
+      }
+      const html='<span class="bstate s-'+esc(r.state)+'">'+esc(stateLabel)+'</span>'
+        +'<span class="bconf">'+conf+'%'+(action?(" · "+esc(action)):"")+'</span>'
+        +'<span class="bsum">'+(sum?esc(sum.slice(0,200)):"")+'</span>'
+        +badges;
+      if(ban){ban.innerHTML=html;ban.className="on";}
+      if(el){el.innerHTML=html;el.className="on";} // score can still see it
+    }else if(ban&&!ban.classList.contains("on")){
+      ban.className="off";ban.textContent="";
+    }
+  }catch(e){/* classify is best-effort */}
 }
 async function modalScrollTmux(direction,amount){
   if(!modalSession)return false;
@@ -7084,7 +7159,7 @@ $("#newcmd").addEventListener("input",()=>{NS.cmd=$("#newcmd").value;nsRender();
 $("#newname").addEventListener("input",()=>{NS.name=$("#newname").value.trim();nsRender();});
 $("#newintent").addEventListener("keydown",e=>{if(e.key==="Enter")doSuggest();});
 
-$("#dgrefresh").onclick=loadDigest;
+$("#dgrefresh").onclick=()=>{digestHasBody=false;loadDigest({force:true});};
 $("#modalclose").onclick=closeModal;
 $("#modalback").onclick=closeModal;
 // Terminal scroll: HTML book when tall; else app/tmux scroll which feeds the book.
@@ -7382,9 +7457,10 @@ function updateModalIssueHeader(){
   const key=primaryLinearIssue(modalSession);
   if(!key){el.hidden=true;el.innerHTML="";return;}
   el.hidden=false;
-  // Hero line (mock: ARP-24 · title) — title optional until hydrate
+  // Hero line (mock: ARP-24 · Define all five…) — title placeholder until Linear hydrate (EID-1143)
+  const titleHint=modalTaskTitleHint(key);
   el.innerHTML='<a class="linlink" href="'+linearIssueUrl(key)+'" target="_blank" rel="noopener noreferrer">'+esc(key)+'</a>'
-    +' <span style="opacity:.7;font-weight:500;font-size:13px;font-family:inherit">· active work</span>'
+    +'<span class="issuetitle"> · '+(titleHint?esc(titleHint):"active work")+'</span>'
     +' <button type="button" class="linchat" data-linear="'+key+'" title="Load + pursue">💬</button>';
   bindLinlinks(el);
   // Wall-clock while modal open (EID-1144 partial — honest elapsed, not fake %)
@@ -7393,12 +7469,30 @@ function updateModalIssueHeader(){
     const sec=Math.max(0,Math.floor((Date.now()-modalOpenedAt)/1000));
     const mm=Math.floor(sec/60), ss=sec%60;
     const elap=(mm?mm+"m ":"")+ss+"s open";
-    if(!/\d+m |\d+s open/.test(st.textContent||"")){
-      /* append once-ish via refresh */
-    }
     const base=(st.textContent||"").replace(/\s*·\s*\d+m?\s*\d*s open/g,"").trim();
     st.textContent=base+(base?" · ":"")+elap;
+    if(/live/i.test(base)) st.className="st live";
   }
+}
+/** Best-effort title from pane/gist context near a key (offline, no Linear API). */
+function modalTaskTitleHint(key){
+  if(!key) return "";
+  const blobs=[];
+  const dig=$("#modaldigest .dgtext"); if(dig&&dig.textContent) blobs.push(dig.textContent);
+  const sc=$("#modalscreen"); if(sc&&sc.dataset.last) blobs.push(sc.dataset.last.slice(-8000));
+  if(typeof modalHistoryText==="string"&&modalHistoryText) blobs.push(modalHistoryText.slice(0,4000));
+  const escKey=key.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  const re=new RegExp(escKey+"\\s*[·:\\-–—]?\\s+([^\\n\\r]{8,90})","i");
+  for(const b of blobs){
+    const m=String(b||"").match(re);
+    if(m&&m[1]){
+      let t=m[1].replace(/\s+/g," ").trim();
+      // cut at punctuation that looks like next sentence
+      t=t.replace(/\s*[|•].*$/,"").replace(/\s{2,}.*$/,"").trim();
+      if(t.length>=8&&t.length<=80&&!/^https?:/i.test(t)) return t;
+    }
+  }
+  return "";
 }
 function renderModalTasks(){
   const list=$("#modaltasklist"), countEl=$("#modaltaskcount"), badge=$("#modaltaskbadge");
@@ -7416,14 +7510,20 @@ function renderModalTasks(){
   if(!keys.length){
     list.innerHTML='<div class="mtempty">No Linear tasks mentioned yet. When the head cites <b>AIC-123</b>… they land here. Use <b>💬</b> on a key to load/pursue, or Chat tab <b>+</b> for any topic.</div>';
   }else{
-    list.innerHTML=keys.map(k=>
-      '<div class="mtask'+(k===primary?" active":"")+'" data-key="'+esc(k)+'">'
-      +'<a class="linlink mtkey" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer" title="Open in Linear">'+esc(k)+'</a>'
-      +'<span class="mtacts">'
-      +'<button type="button" class="mtchat" data-act="pursue" title="Side chat + load this issue so the head can pursue it">💬 pursue</button>'
-      +'<a class="mtgo linlink" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer">↗</a>'
-      +'</span></div>'
-    ).join("");
+    list.innerHTML=keys.map(k=>{
+      const title=modalTaskTitleHint(k);
+      const isPri=k===primary;
+      return '<div class="mtask'+(isPri?" active":"")+'" data-key="'+esc(k)+'">'
+        +'<div class="mtbody">'
+        +'<a class="linlink mtkey" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer" title="Open in Linear">'+esc(k)+'</a>'
+        +'<span class="mttitle">'+(title?esc(title):(isPri?"active work":"mentioned in session"))+'</span>'
+        +'</div>'
+        +(isPri?'<span class="mtpip" title="active"></span>':'')
+        +'<span class="mtacts">'
+        +'<button type="button" class="mtchat" data-act="pursue" title="Side chat + load this issue so the head can pursue it">💬 pursue</button>'
+        +'<a class="mtgo linlink" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer" title="Open in Linear">↗ Linear</a>'
+        +'</span></div>';
+    }).join("");
     list.querySelectorAll(".mtchat").forEach(btn=>{
       btn.onclick=e=>{
         e.preventDefault();e.stopPropagation();
@@ -8474,7 +8574,8 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             if not sess:
                 self._json({"ok": False, "error": "missing_session"}, 400)
                 return
-            self._json(_reply_suggestions(sess, _session_host(sess)))
+            force = bool(data.get("force"))
+            self._json(_reply_suggestions(sess, _session_host(sess), force=force))
             return
         if url.path == "/api/adopt":
             self._json(_adopt_session(data))
