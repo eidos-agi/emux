@@ -605,19 +605,68 @@ def _extract_json(text: str) -> dict[str, Any]:
         return {"_error": "unparseable JSON", "raw": m.group(0)[:300]}
 
 
+def _agent_path_prefix() -> str:
+    """Dirs launchd usually omits — prepend so which/spawn can find claude/grok."""
+    home = Path.home()
+    return os.pathsep.join(
+        [
+            str(home / ".local" / "bin"),
+            str(home / "bin"),
+            str(home / ".grok" / "bin"),
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+        ]
+    )
+
+
+def _resolve_cli(name: str) -> str | None:
+    """Absolute path to a CLI (claude/grok). launchd PATH is often /usr/bin:/bin only."""
+    import shutil
+
+    env_key = f"EMUX_{name.upper()}_BIN"
+    override = (os.environ.get(env_key) or "").strip()
+    if override and Path(override).is_file():
+        return override
+    # Prefer an augmented PATH over bare which() under launchd.
+    search_path = _agent_path_prefix() + os.pathsep + (os.environ.get("PATH") or "")
+    found = shutil.which(name, path=search_path)
+    if found:
+        return found
+    for cand in (
+        Path.home() / ".local" / "bin" / name,
+        Path.home() / "bin" / name,
+        Path("/opt/homebrew/bin") / name,
+        Path("/usr/local/bin") / name,
+    ):
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
+
+
+def _ensure_agent_path_env() -> None:
+    """Mutate process PATH once so gist/spawn children see claude (launchd-safe)."""
+    prefix = _agent_path_prefix()
+    cur = os.environ.get("PATH") or ""
+    if prefix.split(os.pathsep)[0] in cur.split(os.pathsep):
+        return
+    os.environ["PATH"] = prefix + os.pathsep + cur if cur else prefix
+
+
 def _claude_json(prompt: str, timeout: int = 90) -> dict[str, Any]:
     """One fixed-cost `claude -p` call that must answer with a JSON object.
     Never the API — the CLI only."""
-    import shutil
     import subprocess
-    claude = shutil.which("claude")
+
+    _ensure_agent_path_env()
+    claude = _resolve_cli("claude")
     if claude is None:
-        return {"_error": "claude CLI not on PATH"}
+        return {"_error": "claude CLI not on PATH (checked ~/.local/bin, brew, EMUX_CLAUDE_BIN)"}
     try:
         proc = subprocess.run(
             [claude, "-p", prompt, "--model",
              os.environ.get("EMUX_NAV_MODEL", "claude-haiku-4-5-20251001")],
             capture_output=True, text=True, timeout=timeout,
+            env={**os.environ, "PATH": os.environ.get("PATH", "")},
         )
     except (subprocess.TimeoutExpired, OSError) as e:
         return {"_error": f"claude -p failed: {e}"}
@@ -1117,19 +1166,24 @@ def _resume_chat_in_fleet(data: dict[str, Any]) -> dict[str, Any]:
     except ImportError as exc:
         return {"ok": False, "error": f"chats_unavailable: {exc}"}
 
-    if tool == "claude" and sid.lower() in chat_find._claude_live_ids():
+    force = bool(data.get("force"))
+    if (
+        tool == "claude"
+        and not force
+        and sid.lower() in chat_find._claude_live_ids()
+    ):
         return {
             "ok": False,
             "error": "already_live",
-            "hint": "process still holds this chat — attach/boss it, do not re-resume",
+            "hint": "CLI still holds this chat — attach/boss it, or pass force=true to re-spawn",
             "session_id": sid,
             "tool": tool,
         }
-    if tool == "grok" and sid in chat_find._grok_live_ids():
+    if tool == "grok" and not force and sid in chat_find._grok_live_ids():
         return {
             "ok": False,
             "error": "already_live",
-            "hint": "process still holds this chat — attach/boss it, do not re-resume",
+            "hint": "process still holds this chat — attach/boss it, or pass force=true",
             "session_id": sid,
             "tool": tool,
         }
@@ -1147,10 +1201,27 @@ def _resume_chat_in_fleet(data: dict[str, Any]) -> dict[str, Any]:
         tags.append("greenmark")
     desc = f"resumed {tool} transcript · {title}"
 
+    _ensure_agent_path_env()
+    # Absolute binary + exec: launchd/tmux often lack ~/.local/bin; bare `claude`
+    # then fails and keys dump into zsh (looks "stuck" with a shell prompt).
     if tool == "claude":
-        command = f"claude --resume {shlex.quote(sid)}"
+        bin_path = _resolve_cli("claude")
+        if not bin_path:
+            return {
+                "ok": False,
+                "error": "claude_not_found",
+                "hint": "install claude or set EMUX_CLAUDE_BIN to the absolute path",
+            }
+        command = f"exec {shlex.quote(bin_path)} --resume {shlex.quote(sid)}"
     else:
-        command = "grok"
+        bin_path = _resolve_cli("grok")
+        if not bin_path:
+            return {
+                "ok": False,
+                "error": "grok_not_found",
+                "hint": "install grok or set EMUX_GROK_BIN to the absolute path",
+            }
+        command = f"exec {shlex.quote(bin_path)}"
 
     try:
         r = asyncio.run(
@@ -1192,6 +1263,15 @@ def _resume_chat_in_fleet(data: dict[str, Any]) -> dict[str, Any]:
                 **{k: v for k, v in r.items() if k not in ("ok", "name", "session")},
             }
 
+    # Wait until the pane is actually the agent (not a leftover zsh prompt).
+    agent_up = _wait_pane_command(session, want=("claude", "node", "grok"), timeout=12.0)
+    if not agent_up:
+        # One retry: clear line and re-exec absolute binary
+        send_payload(session, "C-c", literal=False, enter=False, host=None)
+        time.sleep(0.3)
+        send_payload(session, command, literal=True, enter=True, host=None)
+        agent_up = _wait_pane_command(session, want=("claude", "node", "grok"), timeout=10.0)
+
     # Durable memory: never re-discover this mission as "new abandoned" work
     try:
         from . import chats_store
@@ -1204,18 +1284,69 @@ def _resume_chat_in_fleet(data: dict[str, Any]) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
 
-    return {
+    out = {
         "ok": True,
         "name": name,
         "session": session,
         "tool": tool,
         "session_id": sid,
         "command": command,
+        "bin": bin_path,
         "cwd": cwd,
         "tags": tags,
         "description": desc,
+        "agent_up": agent_up,
         **{k: v for k, v in r.items() if k not in ("ok", "name", "session")},
     }
+    if not agent_up:
+        out["partial"] = True
+        out["warning"] = (
+            "spawned but pane not yet running agent binary — "
+            "wait a few seconds or attach; do not send prompts into a bare shell"
+        )
+    return out
+
+
+def _wait_pane_command(
+    session: str,
+    want: tuple[str, ...],
+    timeout: float = 10.0,
+    host: str | None = None,
+) -> bool:
+    """True if pane looks like an agent (not bare shell) within timeout.
+
+    Claude Code sometimes reports pane_current_command as a version string
+    (e.g. 2.1.218) rather than 'claude' — also accept capture containing
+    'Claude Code'.
+    """
+    deadline = time.time() + timeout
+    want_l = {w.lower() for w in want}
+    shells = {"zsh", "bash", "sh", "-zsh", "-bash", "fish", ""}
+    while time.time() < deadline:
+        try:
+            code, out, _err = _server._run_tmux(
+                ["display-message", "-p", "-t", session, "#{pane_current_command}"],
+                host=host,
+            )
+            cmd = (out or "").strip().lower()
+            if code == 0 and any(w in cmd for w in want_l):
+                return True
+            # non-shell process name (versioned claude binary, node, …)
+            if code == 0 and cmd and cmd not in shells and not cmd.startswith("-"):
+                # confirm with a short capture when command name is odd
+                c2, pane, _e2 = _server._run_tmux(
+                    ["capture-pane", "-p", "-t", session, "-J"],
+                    host=host,
+                )
+                blob = (pane or "")
+                if "Claude Code" in blob or "claude" in cmd or "node" in cmd:
+                    return True
+                if c2 == 0 and cmd[0].isdigit():  # e.g. 2.1.218
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.4)
+    return False
 
 
 # which tool-calls are worth showing in the live feed — the fleet's meaningful
@@ -2252,6 +2383,17 @@ def send_payload(session: str, keys: str, literal: bool = True, enter: bool = Tr
     those characters; literal=False interprets tmux key names (UI control chips)."""
     if host is None and _server._resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
+    shell_warn = False
+    try:
+        code, cmd, _e = _server._run_tmux(
+            ["display-message", "-p", "-t", session, "#{pane_current_command}"],
+            host=host,
+        )
+        c = (cmd or "").strip().lower()
+        if code == 0 and c in ("zsh", "bash", "sh", "-zsh", "-bash", "fish"):
+            shell_warn = True
+    except Exception:  # noqa: BLE001
+        pass
     if literal:
         if keys:
             code, _, err = _server._run_tmux(["send-keys", "-t", session, "-l", keys], host=host)
@@ -2274,7 +2416,14 @@ def send_payload(session: str, keys: str, literal: bool = True, enter: bool = Tr
         code, _, err = _server._run_tmux(args, host=host)
         if code != 0:
             return {"ok": False, "error": "tmux_send_failed", "stderr": err}
-    return {"ok": True, "session": session, "sent": keys, "literal": literal, "enter": enter}
+    return {
+        "ok": True,
+        "session": session,
+        "sent": keys,
+        "literal": literal,
+        "enter": enter,
+        "shell_warn": shell_warn,
+    }
 
 
 def _switch_plan(session: str, host: str | None = None, to: str | None = None,
@@ -4466,6 +4615,10 @@ async function modalKeys(keys,literal,enter){
   try{
     const r=await api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({session:modalSession.session,keys,literal,enter})});
+    if(r&&r.shell_warn){
+      const st=$("#modalstatus");
+      if(st){st.textContent="⚠ pane looks like a shell — agent may not be running";st.style.color="var(--stale)";}
+    }
     setTimeout(modalRefresh,250);
     return !!(r&&r.ok);
   }catch(e){return false;}   // daemon down / network error
@@ -6439,8 +6592,15 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
     from . import skin as _skin
 
     active = _skin.set_active_skin(skin)  # None → $EMUX_SKIN → emux
+    # launchd often ships PATH=/usr/bin:/bin — gist + resume need ~/.local/bin/claude
+    _ensure_agent_path_env()
     if _server._resolve_tmux() is None:
         print("emux web: tmux not found on PATH — the UI will load but show nothing.", file=sys.stderr)
+    claude_bin = _resolve_cli("claude")
+    if claude_bin:
+        print(f"emux web: claude → {claude_bin}", file=sys.stderr)
+    else:
+        print("emux web: claude CLI not found — gist/resume may degrade.", file=sys.stderr)
     if public_origin:
         parsed = urlparse(public_origin)
         if (parsed.scheme not in {"http", "https"} or not parsed.hostname

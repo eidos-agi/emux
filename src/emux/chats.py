@@ -161,7 +161,11 @@ def _grok_live_ids() -> set[str]:
 
 
 def _claude_live_ids() -> set[str]:
-    """Best-effort: session UUIDs appearing in running claude-related cmdlines."""
+    """Best-effort: session UUIDs from *CLI* claude processes only.
+
+    Ignores Claude Desktop (Electron), helpers, and remote bridges — those
+    otherwise false-positive "already_live" and block RESUME IN FLEET.
+    """
     live: set[str] = set()
     try:
         import subprocess
@@ -178,8 +182,27 @@ def _claude_live_ids() -> set[str]:
         r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
         re.I,
     )
+    # CLI: …/claude --resume <uuid>  or  claude <args with uuid>
+    # Not: Claude.app, Helper, remote/srv, chrome_crashpad, etc.
+    skip_frags = (
+        "claude.app/",
+        "claude helper",
+        "claude/remote/",
+        "crashpad",
+        "electron",
+        "gpu-process",
+        "type=renderer",
+    )
     for line in out.splitlines():
-        if "claude" not in line.lower() and "anthropic" not in line.lower():
+        low = line.lower()
+        if "claude" not in low:
+            continue
+        if any(s in low for s in skip_frags):
+            continue
+        # Prefer lines that look like the CLI binary (path or bare name + resume)
+        if not re.search(r"(?:^|\s)(?:\S*/)?claude(?:\s|$)", line, re.I):
+            continue
+        if "claude.app" in low:
             continue
         for m in uuid_re.findall(line):
             live.add(m.lower())
