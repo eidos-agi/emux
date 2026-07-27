@@ -1,12 +1,15 @@
-"""emux web — a persistent local daemon with monitoring + chat views.
+"""emux web — a persistent local daemon with monitoring + head views.
+
+Vocabulary (see docs/vocabulary.md):
+  Sessions run. Heads are how you attach. CHATS are past transcripts.
 
 `emux web` starts a long-running HTTP server (the daemon) that exposes the
 same registry + tmux operations as the MCP server, plus a browser UI with
 several views over the sessions emux knows about:
 
-- chat     — one session as a live screen you can type into. The pane updates
-             in place (it is the rendered terminal, not a growing transcript);
-             your keystrokes are logged as a chat above it.
+- head     — one session as a live head you can type into. The pane updates
+             in place (rendered terminal, not a growing transcript);
+             keystrokes are logged above the live screen. (legacy mode=chat)
 - grid     — every session as a live mini-pane tile, all streaming at once.
 - groups   — the same tiles sectioned by registry tag.
 - activity — change-detection strips per session: which panes moved, when.
@@ -14,9 +17,8 @@ several views over the sessions emux knows about:
              edges (orchestrators on top, the agents they drive below);
              sessions with no relationships sit in an "unconnected" row.
 - orphans  — live tmux sessions emux does not know about yet (per host).
-- chats    — Claude Code + Grok Build transcripts on disk that are not live
-             (dropped missions). Complements orphans (tmux) and the grid
-             (registry): different surface, same control-room job.
+- chats    — CHATS: Claude/Grok transcripts on disk that are not live
+             (past missions). Resume into a session, then open a head.
 
 Design principles (same as the MCP server):
 - Operates on EXISTING tmux sessions only. Never spawns, never kills.
@@ -2099,6 +2101,87 @@ def poll_once(lines: int = 14) -> None:
         pass
 
 
+def _probe_managed_planes(cfg: Any) -> dict[str, Any]:
+    """Manager glance: probe **only** product.json allowlist (fail closed if empty)."""
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    planes = list(getattr(cfg, "managed_planes", ()) or [])
+    if not planes:
+        return {
+            "role": "manager",
+            "product": getattr(cfg, "product", None),
+            "chats_match": getattr(cfg, "chats_match", None),
+            "planes": [],
+            "workers_ok": False,
+            "probed": 0,
+            "error": "no_managed_planes",
+            "hint": "install ~/.config/<product>/product.json with managed_planes allowlist",
+            "source": getattr(cfg, "source", None),
+            "path": getattr(cfg, "path", None),
+        }
+
+    def one(plane: Any) -> dict[str, Any]:
+        row = plane.as_dict() if hasattr(plane, "as_dict") else dict(plane)
+        url = (row.get("healthz") or "").strip()
+        out = {
+            **row,
+            "ok": False,
+            "degraded": True,
+            "version": None,
+            "live_sessions": None,
+            "http_status": None,
+            "error": None,
+        }
+        if not url:
+            out["error"] = "no_healthz_url"
+            return out
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": f"emux-manager/{__version__}"})
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                code = getattr(resp, "status", None) or resp.getcode()
+                out["http_status"] = code
+                try:
+                    parsed = json.loads(body)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, dict) and parsed.get("ok"):
+                    out["ok"] = True
+                    out["degraded"] = False
+                    out["version"] = parsed.get("version")
+                    out["live_sessions"] = parsed.get("live_sessions")
+                elif code and int(code) < 500:
+                    out["ok"] = True
+                    out["degraded"] = True
+                    out["error"] = f"non_json_health ({code})"
+                else:
+                    out["error"] = f"http_{code}"
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = str(exc)[:200]
+        return out
+
+    results: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=min(6, len(planes))) as pool:
+        futs = {pool.submit(one, p): p for p in planes}
+        for fut in as_completed(futs):
+            results.append(fut.result())
+    order = {p.id: i for i, p in enumerate(planes)}
+    results.sort(key=lambda r: order.get(r.get("id"), 99))
+    workers_ok = all(r.get("ok") for r in results)
+    return {
+        "role": "manager",
+        "product": getattr(cfg, "product", None),
+        "chats_match": getattr(cfg, "chats_match", None),
+        "planes": results,
+        "workers_ok": workers_ok,
+        "probed": len(results),
+        "managed_ids": sorted(getattr(cfg, "managed_ids", lambda: set)()),
+        "source": getattr(cfg, "source", None),
+        "path": getattr(cfg, "path", None),
+    }
+
+
 def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
     """Claude Code + Grok chats — durable index first, disk scan only when stale.
 
@@ -2106,7 +2189,8 @@ def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
     limit, recent_hours, q (text search), sort (priority|mtime),
     refresh=1 to force a full disk re-index into ~/.config/*/chats.db.
     Default match: greenmark when skin is gmux; personal when skin is reevux;
-    aic when skin is amux.
+    aic when skin is amux; directrux-only when skin is directrux (meta — NOT all);
+    all when bare emux.
     """
     q = q or {}
     try:
@@ -2118,14 +2202,22 @@ def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
     sk = _skin.active_skin()
     match_raw = (q.get("match") or [""])[0].strip()
     if not match_raw:
-        if sk.id == "gmux":
-            match_raw = "greenmark"
-        elif sk.id == "reevux":
-            match_raw = "personal"
-        elif sk.id == "amux":
-            match_raw = "aic"
-        else:
-            match_raw = "all"
+        # Product config (worker vs manager) owns the default — managers never "all".
+        try:
+            from . import product_config as _pc
+
+            match_raw = _pc.default_chats_match_for_skin(sk.id)
+        except Exception:
+            if sk.id == "gmux":
+                match_raw = "greenmark"
+            elif sk.id == "reevux":
+                match_raw = "personal"
+            elif sk.id == "amux":
+                match_raw = "aic"
+            elif sk.id == "directrux":
+                match_raw = "directrux"
+            else:
+                match_raw = "all"
     status_raw = (q.get("status") or [""])[0].strip()
     statuses = [s.strip() for s in status_raw.split(",") if s.strip()] or None
     tools_raw = (q.get("tools") or ["claude,grok"])[0]
@@ -2673,6 +2765,9 @@ body{
   background:var(--bg-raise);border-right:1px solid var(--line);
 }
 #brand{padding:18px 18px 10px}
+#brand .brand-top{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+}
 #brand .brand-mark{
   display:flex;align-items:center;gap:10px;color:var(--amber);
 }
@@ -2682,7 +2777,43 @@ body{
   color:var(--amber);line-height:1;
   text-shadow:0 0 18px color-mix(in srgb, var(--amber) 45%, transparent);
 }
-#brand small{display:block;margin-top:6px;color:var(--text-dim);font-size:11px;letter-spacing:3px;text-transform:uppercase}
+/* Manager vs worker — structural role mark (not color-alone) */
+.rolechip{
+  display:inline-block;font:700 10px/1 "IBM Plex Mono",monospace;
+  letter-spacing:1.2px;text-transform:uppercase;
+  padding:4px 8px;border-radius:999px;border:1px solid var(--amber);
+  color:var(--on-accent);background:var(--amber);vertical-align:middle;
+}
+.rolechip.worker{
+  background:transparent;color:var(--text-dim);border-color:var(--line);font-weight:600;
+}
+#brand small,#brand #brandtag{
+  display:block;margin-top:6px;color:var(--text-dim);font-size:11px;
+  letter-spacing:.5px;text-transform:none;line-height:1.35;
+}
+/* Manager allowlist — primary surface for manager products */
+#managed{margin-top:10px;display:flex;flex-direction:column;gap:6px}
+#managed[hidden]{display:none!important}
+#managed .mhd{
+  font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-dim);
+  margin:2px 0 0;
+}
+.mplane{
+  border:1px solid var(--line);border-left:3px solid var(--amber);
+  background:var(--bg-card);padding:8px 10px;border-radius:4px;
+  display:grid;grid-template-columns:1fr auto;gap:2px 8px;align-items:center;
+}
+.mplane .mid{font-weight:700;color:var(--amber);font-size:12px;letter-spacing:.3px}
+.mplane .mlane{font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.8px}
+.mplane .mstat{font-size:10px;grid-column:1/-1;color:var(--text-dim)}
+.mplane .mstat.up{color:var(--live)}
+.mplane .mstat.down{color:var(--stale)}
+.mplane .mstat.deg{color:var(--amber)}
+.mplane a.mopen{
+  grid-column:1/-1;font-size:10px;color:var(--amber);text-decoration:none;
+  border-top:1px dashed var(--line);padding-top:5px;margin-top:2px;
+}
+.mplane a.mopen:hover{text-decoration:underline}
 #tagbar{display:flex;flex-wrap:wrap;gap:4px;padding:4px 8px 0;max-height:26vh;overflow-y:auto}  /* EID-880: cap tag noise so the session list isn't buried */
 #tagbar:empty{display:none}
 .tagchip{font-size:10px;letter-spacing:.5px;padding:2px 7px;border:1px solid var(--line);
@@ -2921,7 +3052,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .sep{stroke:var(--line);stroke-width:1;stroke-dasharray:3 5}
 #flowhint{color:var(--text-dim);font-size:11px;font-style:italic;margin-top:6px}
 #flowhint code{color:var(--amber-dim);font-style:normal}
-#chat{flex:1;overflow-y:auto;padding:22px;display:none;flex-direction:column;gap:12px}
+#head{flex:1;overflow-y:auto;padding:22px;display:none;flex-direction:column;gap:12px}
 .bubble{max-width:88%;padding:10px 14px;border:1px solid var(--line);position:relative}
 .bubble .who{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);margin-bottom:5px}
 .bubble.user{
@@ -3020,7 +3151,7 @@ body.solo-session #costbanner,
 body.solo-session #scrim,
 body.solo-session #footer{display:none!important}
 body.solo-session #main{margin:0;padding:0;width:100%;height:100vh;overflow:hidden}
-body.solo-session #views,body.solo-session #chat,body.solo-session #composer,body.solo-session #jump{display:none!important}
+body.solo-session #views,body.solo-session #head,body.solo-session #composer,body.solo-session #jump{display:none!important}
 body.solo-session #modal{display:flex!important;padding:0}
 body.solo-session #modalback{display:none}
 body.solo-session #modalpanel{
@@ -3442,7 +3573,11 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
   </div>
 </div>
 <aside id="side">
-  <div id="brand">__LOGO_HTML__<small>__TAGLINE__</small></div>
+  <div id="brand">
+    <div class="brand-top">__LOGO_HTML__<span id="rolechip" class="rolechip" hidden></span></div>
+    <small id="brandtag">__TAGLINE__</small>
+    <div id="managed" hidden></div>
+  </div>
   <input id="filter" placeholder="filter sessions…" autocomplete="off" spellcheck="false">
   <div id="tagbar"></div>
   <div id="sessions"></div>
@@ -3473,7 +3608,7 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
   <div id="happrovals" style="display:none"><div id="htabs"></div><div id="hdetail"></div></div>
   <div id="htoast"></div>
   <div id="views"></div>
-  <div id="chat"></div>
+  <div id="head"></div>
   <button id="jump">↓ jump to bottom</button>
   <div id="composer" style="display:none">
     <div id="chips">
@@ -3505,7 +3640,7 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
       <span id="modalthink"><span class="tdots"><i></i><i></i><i></i></span>thinking <b>0s</b></span>
       <span class="st" id="modalstatus">live</span>
       <button id="modalswitch" title="fail this session over to another Claude account (exits + relaunches + resumes)" onclick="switchPlan()">⇄ switch account</button>
-      <button id="modaliterm" class="maconly" title="open this session in a new iTerm2 window (attached tmux)">⧉ iTerm2</button>
+      <button id="modaliterm" class="maconly" title="open a head on this session in iTerm2 (emux head / tmux attach)">⧉ OPEN HEAD</button>
       <button id="modalpop" type="button" title="open this session as its own browser tab">↗ tab</button>
       <button id="modalclose">✕ close</button>
     </div>
@@ -3516,7 +3651,7 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
       <div class="dgsugg"></div>
     </div>
     <div id="modalshell">
-      <div id="modalscreen" tabindex="0" role="log" aria-label="session terminal"></div>
+      <div id="modalscreen" tabindex="0" role="log" aria-label="session head"></div>
       <button type="button" id="modaljump" title="jump to live bottom">↓ live</button>
     </div>
     <div id="tchat" class="collapsed">
@@ -3667,7 +3802,8 @@ function applyURL(){
   const f=$("#filter");if(f)f.value=p.get("q")||"";
   skinForCompany();
   // solo tabs still need a grid load for session metadata; default view stays grid
-  setMode(soloMode?"grid":(p.get("view")||localStorage.getItem("emux_view")||"grid"));
+  // view=chat is a legacy alias for live head mode (see docs/vocabulary.md)
+  setMode(soloMode?"grid":(function(v){return (v==="chat")?"head":v;})(p.get("view")||localStorage.getItem("emux_view")||"grid"));
   renderTagbar();renderSidebar();
   urlBooting=false;
   // deep-link to an open session modal — once the grid is loaded
@@ -3738,26 +3874,75 @@ function components(){
 // shown: the filter, but CONNECTION-AWARE. If any terminal in a group matches,
 // the WHOLE group shows — even members that aren't in the filtered set — so a
 // manager and everything it manages stay together on screen.
+//
+// Manager products default to QUIET scope: only standing health / manager-tagged
+// sessions — not the whole laptop + rentamac fleet (that noise belongs in worker rooms).
+let managerFleet=false;  // false = quiet (default for role=manager); restored after SKIN_ID
+function isManagerQuiet(){
+  return PRODUCT_INFO.role==="manager" && !managerFleet;
+}
+function isManagerScoped(s){
+  const name=(s.name||"").toLowerCase();
+  const sess=(s.session||"").toLowerCase();
+  const tags=(s.tags||[]).map(t=>String(t).toLowerCase());
+  const desc=(s.description||"").toLowerCase();
+  const hc=PRODUCT_INFO.health_chat||{};
+  const vp=PRODUCT_INFO.vp||{};
+  if(hc.name&&name===String(hc.name).toLowerCase())return true;
+  if(hc.session&&(name===String(hc.session).toLowerCase()||sess===String(hc.session).toLowerCase()))return true;
+  if(vp.name&&name===String(vp.name).toLowerCase())return true;
+  if(vp.session&&(name===String(vp.session).toLowerCase()||sess===String(vp.session).toLowerCase()))return true;
+  if(name.includes("directrux"))return true;
+  if(tags.some(t=>t==="manager"||t==="directrux"||t==="health"||t==="vp"))return true;
+  if(desc.includes("managed_planes")||desc.includes("directrux manager")||desc.includes("directrux vp"))return true;
+  return false;
+}
+function setManagerFleet(on){
+  managerFleet=!!on;
+  try{localStorage.setItem("emux_manager_fleet_"+SKIN_ID,managerFleet?"1":"0");}catch(e){}
+  activeTag="";activeCompany="";activeHost="";
+  renderTagbar();renderSidebar();if(mode!=="head")render();syncURL();
+}
 function shown(){
-  if(!(filterStr||activeTag||activeCompany||activeHost))return grid.slice();
-  const comp=components(),hot=new Set();
-  grid.forEach(s=>{if(baseMatch(s))hot.add(comp[s.name]);});
-  return grid.filter(s=>baseMatch(s)||hot.has(comp[s.name]));
+  let pool=grid.slice();
+  if(isManagerQuiet())pool=pool.filter(isManagerScoped);
+  if(!(filterStr||activeTag||activeCompany||activeHost))return pool;
+  // connection-aware within the (possibly quiet) pool only
+  const parent={};pool.forEach(s=>parent[s.name]=s.name);
+  const find=x=>{while(parent[x]!==x){parent[x]=parent[parent[x]];x=parent[x];}return x;};
+  const uni=(a,b)=>{if(parent[a]!==undefined&&parent[b]!==undefined)parent[find(a)]=find(b);};
+  const byKey={};pool.forEach(s=>{byKey[s.name]=s.name;if(!(s.session in byKey))byKey[s.session]=s.name;});
+  pool.forEach(s=>(s.manages||[]).forEach(t=>{const tn=byKey[t];if(tn)uni(s.name,tn);}));
+  const comp={};pool.forEach(s=>comp[s.name]=find(s.name));
+  const hot=new Set();
+  pool.forEach(s=>{if(baseMatch(s))hot.add(comp[s.name]);});
+  return pool.filter(s=>baseMatch(s)||hot.has(comp[s.name]));
 }
 
 // ---- Brand + light/dark mode ----
-// Bug we hit: the ☾/☀ button only set data-theme=light|dark, while company
-// themes painted INLINE --amber etc. Inline wins → toggle looked broken.
-// Fix: brand (eidos/greenmark/reeves/aic) × mode (light/dark) both go through
-// applyTheme(), which sets the CSS variables for real.
-// Product skins (gmux/reevux/amux) lock to their brand pack — company pills
-// filter the grid but must NOT repaint the room as Eidos brown / Greenmark green.
+// Source of truth for product skins is server-stamped <style id="skin-theme">
+// from skin.py (dynamic). JS must NOT hardcode brand hex and stomp it.
+//
+// Product skins (gmux / reevux / amux / directrux / any non-emux):
+//   - company pills FILTER only — never recolor the room
+//   - light/dark only flips data-theme; CSS vars come from skin-theme
+// Bare emux: company pills may still rebrand via THEMES fallback packs.
 const SKIN_ID="__SKIN_ID__";
 const DEFAULT_MODE="__DEFAULT_THEME__";
-const BRAND_DEFAULT=SKIN_ID==="gmux"?"greenmark":(SKIN_ID==="reevux"?"reeves":(SKIN_ID==="amux"?"aic":"eidos"));
-const PRODUCT_SKIN=SKIN_ID==="gmux"||SKIN_ID==="reevux"||SKIN_ID==="amux";
+const PRODUCT_SKIN=SKIN_ID!=="emux" && SKIN_ID!=="";
+const BRAND_DEFAULT=SKIN_ID==="gmux"?"greenmark"
+  :(SKIN_ID==="reevux"?"reeves"
+  :(SKIN_ID==="amux"?"aic"
+  :(SKIN_ID==="directrux"?"directrux"
+  :"eidos")));
 const MODE_KEY="emux_mode_"+SKIN_ID;
 const BRAND_KEY="emux_brand_"+SKIN_ID;
+try{managerFleet=localStorage.getItem("emux_manager_fleet_"+SKIN_ID)==="1";}catch(e){}
+// Vars that applyTheme may set/clear. Keep in sync with skin.Palette.css_block.
+const THEME_VARS=["--bg","--bg-raise","--bg-card","--amber","--amber-dim","--amber-faint",
+  "--text","--text-dim","--live","--stale","--line","--user","--on-accent",
+  "--on","--ink","--dim","--card","--pill"];
+// Bare-emux company rebrand packs only (product skins ignore these).
 const THEMES={
   eidos:{
     light:{"--bg":"#f0ebe4","--bg-raise":"#e9e3db","--bg-card":"#e4ded6",
@@ -3789,7 +3974,6 @@ const THEMES={
       "--text":"#e8eef8","--text-dim":"#8b96ab","--live":"#5fbf8f","--stale":"#e07050",
       "--line":"#2a3444","--user":"#7aa2ff","--on-accent":"#0e1218"},
   },
-  // AIC Holdings / Meridian brand plate (matches skin.py amux palettes)
   aic:{
     light:{"--bg":"#f3f5fa","--bg-raise":"#e8ecf5","--bg-card":"#ffffff",
       "--amber":"#143ca2","--amber-dim":"#16438a","--amber-faint":"#d4dcf0",
@@ -3804,26 +3988,36 @@ const THEMES={
 const CO_BRAND={"":BRAND_DEFAULT,"eidos":"eidos","greenmark":"greenmark","reeves":"reeves","aic":"aic"};
 let uiMode=(DEFAULT_MODE==="dark")?"dark":"light";
 let uiBrand=BRAND_DEFAULT;
+function clearInlineThemeVars(r){
+  for(const k of THEME_VARS) r.style.removeProperty(k);
+}
 function applyTheme(){
-  const pack=THEMES[uiBrand]||THEMES[BRAND_DEFAULT]||THEMES.eidos;
-  const t=pack[uiMode]||pack.light;
   const r=document.documentElement;
-  for(const k in t) r.style.setProperty(k,t[k]);
-  // also keep --on/--ink/--dim/--card/--pill in sync (used by older rules)
-  r.style.setProperty("--on",t["--amber"]);
-  r.style.setProperty("--ink",t["--text"]);
-  r.style.setProperty("--dim",t["--text-dim"]);
-  r.style.setProperty("--card",t["--bg-card"]);
-  r.style.setProperty("--pill",t["--amber-faint"]);
-  r.setAttribute("data-theme",uiMode);   // light | dark — real CSS hooks
+  r.setAttribute("data-theme",uiMode);
   r.dataset.brand=uiBrand;
+  r.dataset.skin=SKIN_ID;
+  if(PRODUCT_SKIN){
+    // Dynamic: let <style id="skin-theme"> (from skin.py) own the colors.
+    // Clear any prior inline stomps (eidos/etc.) so CSS wins.
+    clearInlineThemeVars(r);
+  } else {
+    // Bare emux only: company pill may rebrand via hardcoded THEMES packs.
+    const pack=THEMES[uiBrand]||THEMES[BRAND_DEFAULT]||THEMES.eidos;
+    const t=pack[uiMode]||pack.light;
+    for(const k in t) r.style.setProperty(k,t[k]);
+    r.style.setProperty("--on",t["--amber"]);
+    r.style.setProperty("--ink",t["--text"]);
+    r.style.setProperty("--dim",t["--text-dim"]);
+    r.style.setProperty("--card",t["--bg-card"]);
+    r.style.setProperty("--pill",t["--amber-faint"]);
+  }
   try{localStorage.setItem(MODE_KEY,uiMode);localStorage.setItem(BRAND_KEY,uiBrand);}catch(e){}
   const b=document.getElementById("themebtn");
   if(b){b.textContent=uiMode==="dark"?"☀ light":"☾ dark";b.title="switch to "+(uiMode==="dark"?"light":"dark")+" mode";}
 }
 function toggleMode(){uiMode=uiMode==="dark"?"light":"dark";applyTheme();}
 function skinForCompany(){
-  // Product skins keep fixed brand chrome; company is a filter only.
+  // Product skins: company is a filter only — chrome stays the active skin.
   if(PRODUCT_SKIN){ uiBrand=BRAND_DEFAULT; }
   else { uiBrand=CO_BRAND[activeCompany]||BRAND_DEFAULT; }
   applyTheme();
@@ -3845,10 +4039,24 @@ function skinForCompany(){
 })();
 
 function applyFilters(){localStorage.setItem("emux_company",activeCompany);
-  skinForCompany();renderTagbar();renderSidebar();if(mode!=="chat")render();syncURL();}
+  skinForCompany();renderTagbar();renderSidebar();if(mode!=="head")render();syncURL();}
 
 function renderTagbar(){
   const box=$("#tagbar");if(!box)return;
+  // Manager quiet: one line, not 40 company/tag chips.
+  if(PRODUCT_INFO.role==="manager"&&!managerFleet){
+    const n=grid.length;
+    const scoped=grid.filter(isManagerScoped).length;
+    box.innerHTML='<span class="tagchip on" title="manager default">manager scope · '
+      +scoped+' shown</span>'
+      +'<span class="tagchip" id="fleetnoise" title="Show every session on this host (noisy)">show full fleet · '
+      +n+'…</span>';
+    const b=$("#fleetnoise");if(b)b.onclick=()=>setManagerFleet(true);
+    return;
+  }
+  if(PRODUCT_INFO.role==="manager"&&managerFleet){
+    // prepend hide chip; fall through to normal chips on full grid
+  }
   // companies (colored, from cwd) then tags — both filter the whole view
   const comp=new Map();   // key -> {label,color,n}
   grid.forEach(s=>{const c=s.company||{};if(c.company){
@@ -3858,8 +4066,12 @@ function renderTagbar(){
   // machines are a facet too — every session runs SOMEWHERE
   const hosts=new Map();
   grid.forEach(s=>{const h=s.host||"local";hosts.set(h,(hosts.get(h)||0)+1);});
-  if(!comp.size&&!counts.size&&!activeTag&&!activeCompany&&!activeHost){box.innerHTML="";return;}
+  if(!comp.size&&!counts.size&&!activeTag&&!activeCompany&&!activeHost
+      &&!(PRODUCT_INFO.role==="manager"&&managerFleet)){box.innerHTML="";return;}
   let html="";
+  if(PRODUCT_INFO.role==="manager"&&managerFleet){
+    html+='<span class="tagchip on" id="fleetquiet" title="Back to manager-only sessions">✕ hide fleet noise</span>';
+  }
   if(activeTag||activeCompany||activeHost)html+='<span class="tagchip clr" data-clear="1">✕ all</span>';
   if(hosts.size>1||activeHost)[...hosts.keys()].sort().forEach(h=>{
     html+='<span class="tagchip hostchip'+(h===activeHost?" on":"")+'" data-host="'+esc(h)+'">⌨ '+esc(h)
@@ -3876,6 +4088,7 @@ function renderTagbar(){
       +'<span class="cnt">'+counts.get(t)+'</span></span>';
   });
   box.innerHTML=html;
+  const fq=$("#fleetquiet");if(fq)fq.onclick=()=>setManagerFleet(false);
   box.querySelectorAll("[data-clear]").forEach(el=>el.onclick=()=>{activeTag="";activeCompany="";activeHost="";applyFilters();});
   box.querySelectorAll(".hostchip").forEach(el=>el.onclick=()=>{
     activeHost=el.dataset.host===activeHost?"":el.dataset.host;applyFilters();});
@@ -3886,17 +4099,18 @@ function renderTagbar(){
 }
 
 function setMode(m){
-  if(m!=="chat"&&!BASE_TAB[m])m="grid";   // a renamed/removed view saved in localStorage → blank screen
-  mode=m;current=(m==="chat")?current:null;
-  if(m!=="chat")localStorage.setItem("emux_view",m);   // remember last view (#6)
-  $("#chat").style.display=(m==="chat")?"flex":"none";
-  $("#views").style.display=(m==="chat")?"none":"";
-  $("#composer").style.display=(m==="chat")?"":"none";
-  $("#attachbtn").style.display=(m==="chat")?"":"none";
+  if(m==="chat")m="head";  // legacy alias for live head
+  if(m!=="head"&&!BASE_TAB[m])m="grid";   // a renamed/removed view saved in localStorage → blank screen
+  mode=m;current=(m==="head")?current:null;
+  if(m!=="head")localStorage.setItem("emux_view",m);   // remember last view (#6)
+  $("#head").style.display=(m==="head")?"flex":"none";
+  $("#views").style.display=(m==="head")?"none":"";
+  $("#composer").style.display=(m==="head")?"":"none";
+  $("#attachbtn").style.display=(m==="head")?"":"none";
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.mode===m));
   document.querySelectorAll(".card").forEach(el=>el.classList.toggle("active",!!(current&&el.dataset.name===current.name)));
   clearInterval(chatTimer);chatTimer=null;
-  if(m!=="chat"){$("#title").textContent=m;$("#views").innerHTML="";flowSig=null;render();}
+  if(m!=="head"){$("#title").textContent=m;$("#views").innerHTML="";flowSig=null;render();}
   syncURL();
 }
 document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setMode(t.dataset.mode));
@@ -3904,8 +4118,22 @@ document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setMode(t.dataset.mod
 function updateChrome(){         // title, footer, tab counts (#1 #3 #4)
   const liveN=grid.filter(s=>s.live).length;
   const actN=grid.filter(s=>s.live&&hot(s)).length;
-  if(!flashOn)document.title="__PRODUCT__ · "+liveN+" live";
-  $("#footer").textContent="__PRODUCT_LINE__ · v__VERSION__ · "+grid.length+" sessions";
+  const isMgr=PRODUCT_INFO.role==="manager";
+  if(!flashOn){
+    document.title=isMgr
+      ?("__PRODUCT__ · manager · "+liveN+" live")
+      :("__PRODUCT__ · "+liveN+" live");
+  }
+  let foot="__PRODUCT_LINE__ · v__VERSION__ · "+grid.length+" sessions";
+  if(isMgr){
+    const n=(PRODUCT_INFO.managed_planes||[]).length;
+    const scoped=grid.filter(isManagerScoped).filter(s=>s.live).length;
+    foot="__PRODUCT__ · manager · v__VERSION__ · "+n+" plane"+(n===1?"":"s")
+      +(isManagerQuiet()
+        ?(" · quiet · "+scoped+" scoped live")
+        :(" · full fleet · "+liveN+" live"));
+  }
+  $("#footer").textContent=foot;
   document.querySelectorAll(".tab").forEach(t=>{
     const m=t.dataset.mode;
     if(m==="activity"&&actN)t.textContent=BASE_TAB[m]+" · "+actN;
@@ -3913,6 +4141,129 @@ function updateChrome(){         // title, footer, tab counts (#1 #3 #4)
       t.textContent=BASE_TAB[m]+" · "+CH.counts.stale;
     else t.textContent=BASE_TAB[m];
   });
+}
+
+// ---- Product role chrome (manager vs worker) — driven by /api/product + /api/managed
+// Permanent seats (vp/health/engine) must reflect LIVE inventory truth, not only
+// product.json intent. "Always" is the policy; grid liveness is the fact.
+const PRODUCT_INFO={role:null,managed_planes:[],health:{},loaded:false};
+function permanentSeatStatus(name){
+  // Match registered name or tmux session name against current grid poll.
+  const n=(name||"").trim();
+  if(!n) return {cls:"deg", txt:"unconfigured"};
+  const s=(typeof grid!=="undefined"&&grid||[]).find(x=>x&&(x.name===n||x.session===n));
+  if(!s) return {cls:"down", txt:"DOWN · missing — ensure should restart ≤60s"};
+  if(s.live) return {cls:"up", txt:"UP · live · tmux attach -t "+n};
+  return {cls:"down", txt:"DOWN · session gone — permanent seat broken"};
+}
+function renderProductChrome(){
+  const chip=$("#rolechip"), tag=$("#brandtag"), box=$("#managed");
+  if(!chip||!box)return;
+  if(PRODUCT_INFO.role==="manager"){
+    chip.hidden=false;
+    chip.textContent="MANAGER";
+    chip.className="rolechip manager";
+    const planes=PRODUCT_INFO.managed_planes||[];
+    const ids=planes.map(p=>p.id);
+    if(tag) tag.textContent=ids.length
+      ?("manages "+ids.join(" · "))
+      :"manager · no planes in product.json";
+    box.hidden=false;
+    const hc=PRODUCT_INFO.health_chat||{};
+    const vp=PRODUCT_INFO.vp||{};
+    const eng=PRODUCT_INFO.engine_seat||{};
+    const hname=hc.name||hc.session||"directrux-health";
+    const vname=vp.name||vp.session||"directrux-vp";
+    const ename=eng.name||eng.session||"";
+    const vst=permanentSeatStatus(vname);
+    const hst=permanentSeatStatus(hname);
+    const est=ename?permanentSeatStatus(ename):null;
+    // If any permanent seat is DOWN, manager chrome must scream — not look "always fine".
+    let html='<div class="mhd">Permanent seats <span class="dim">(intent from product.json · truth from live inventory)</span></div>'
+      +'<div class="mplane" data-seat="'+esc(vname)+'">'
+      +'<span class="mid">'+esc(vname)+'</span>'
+      +'<span class="mlane">vp seat</span>'
+      +'<span class="mstat '+vst.cls+'">'+esc(vst.txt)+'</span>'
+      +'</div>'
+      +'<div class="mplane" data-seat="'+esc(hname)+'">'
+      +'<span class="mid">'+esc(hname)+'</span>'
+      +'<span class="mlane">health</span>'
+      +'<span class="mstat '+hst.cls+'">'+esc(hst.txt)+'</span>'
+      +'<a class="mopen" href="__PUBLIC_PATH__/health.html" target="_blank" rel="noopener">/health →</a>'
+      +'<a class="mopen" href="__PUBLIC_PATH__/ai.html" target="_blank" rel="noopener">/ai →</a>'
+      +'</div>';
+    if(ename){
+      html+='<div class="mplane" data-seat="'+esc(ename)+'">'
+        +'<span class="mid">'+esc(ename)+'</span>'
+        +'<span class="mlane">engine</span>'
+        +'<span class="mstat '+est.cls+'">'+esc(est.txt)+'</span>'
+        +'</div>';
+    }
+    if(vst.cls==="down"||hst.cls==="down"||(est&&est.cls==="down")){
+      html+='<div class="mplane"><span class="mid">!</span>'
+        +'<span class="mstat down">permanent seat DOWN is a product failure — run ensure-vp / ensure-health-chat / ensure-engine</span></div>';
+    }
+    html+='<div class="mhd">Managed planes</div>';
+    if(!planes.length){
+      html+='<div class="mplane"><span class="mid">—</span>'
+        +'<span class="mstat down">empty allowlist · edit product.json</span></div>';
+    }else{
+      planes.forEach(p=>{
+        const h=PRODUCT_INFO.health[p.id]||{};
+        const ok=!!h.ok, deg=!!h.degraded;
+        let stCls="down", stTxt="unreachable";
+        if(ok&&!deg){stCls="up";stTxt="up"+(h.live_sessions!=null?(" · "+h.live_sessions+" live"):"");}
+        else if(ok&&deg){stCls="deg";stTxt="degraded"+(h.error?(" · "+h.error):"");}
+        else if(h.error){stTxt=String(h.error).slice(0,48);}
+        else if(!PRODUCT_INFO.health[p.id]){stCls="deg";stTxt="probing…";}
+        const room=p.room||h.room||"";
+        html+='<div class="mplane" data-plane="'+esc(p.id)+'">'
+          +'<span class="mid">'+esc(p.id)+'</span>'
+          +'<span class="mlane">'+esc(p.lane||"?")+'</span>'
+          +'<span class="mstat '+stCls+'">'+esc(stTxt)+'</span>'
+          +(room?('<a class="mopen" href="'+esc(room)+'" target="_blank" rel="noopener">open worker room →</a>'):'')
+          +'</div>';
+      });
+    }
+    box.innerHTML=html;
+  }else if(PRODUCT_INFO.role==="worker"){
+    chip.hidden=false;
+    const lane=(PRODUCT_INFO.chats_match&&PRODUCT_INFO.chats_match!=="all")
+      ?PRODUCT_INFO.chats_match:"";
+    chip.textContent=lane?("WORKER · "+lane):"WORKER";
+    chip.className="rolechip worker";
+    box.hidden=true;box.innerHTML="";
+  }else{
+    chip.hidden=true;box.hidden=true;box.innerHTML="";
+  }
+  updateChrome();
+}
+async function loadProductChrome(){
+  try{
+    const r=await api("/api/product");
+    if(!r||!r.ok)return;
+    PRODUCT_INFO.role=r.role||null;
+    PRODUCT_INFO.managed_planes=r.managed_planes||[];
+    PRODUCT_INFO.chats_match=r.chats_match||"";
+    PRODUCT_INFO.health_chat=r.health_chat||null;
+    PRODUCT_INFO.vp=r.vp||null;
+    PRODUCT_INFO.engine_seat=r.engine_seat||null;
+    PRODUCT_INFO.loaded=true;
+    renderProductChrome();
+    // Apply quiet manager scope once role is known (avoid full-fleet flash sticking).
+    renderTagbar();renderSidebar();if(mode!=="head")render();
+    if(PRODUCT_INFO.role==="manager") await loadManagedHealth();
+  }catch(_){}
+}
+async function loadManagedHealth(){
+  if(PRODUCT_INFO.role!=="manager")return;
+  try{
+    const r=await api("/api/managed");
+    if(!r||!r.ok)return;
+    PRODUCT_INFO.health={};
+    (r.planes||[]).forEach(p=>{if(p&&p.id)PRODUCT_INFO.health[p.id]=p;});
+    renderProductChrome();
+  }catch(_){}
 }
 
 async function poll(){
@@ -3923,7 +4274,9 @@ async function poll(){
     grid=r.sessions;cacheMeta();updateCostBanner();
     $("#status").textContent=grid.filter(s=>s.live).length+" live · polling";$("#status").className="";
     updateChrome();renderTagbar();renderSidebar();
-    if(mode!=="chat")render();
+    // Permanent seats in manager chrome must track grid truth every poll.
+    if(PRODUCT_INFO.role==="manager") renderProductChrome();
+    if(mode!=="head")render();
   }catch(e){$("#status").textContent="daemon unreachable";$("#status").className="err";}
 }
 
@@ -3966,7 +4319,7 @@ function renderSidebar(){
   document.querySelectorAll(".tagjump").forEach(el=>el.onclick=ev=>{   // click a card's tag → filter to it
     ev.stopPropagation();const tag=el.dataset.tag;
     activeTag=tag===activeTag?"":tag;
-    renderTagbar();renderSidebar();if(mode!=="chat")render();
+    renderTagbar();renderSidebar();if(mode!=="head")render();
   });
 }
 
@@ -4308,12 +4661,12 @@ async function mvPickHost(h){
   if(gen===MV.gen)renderOrphans();
 }
 async function mvAdopt(s,btn){
-  btn.disabled=true;btn.textContent="ATTACHING…";
+  btn.disabled=true;btn.textContent="OPENING HEAD…";
   const r=await api("/api/adopt",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({session:s,host:MV.host,name:s,
                          description:"orphan adopted from "+MV.host,
                          tags:["adopted",MV.host]})});
-  if(!r.ok){btn.disabled=false;btn.textContent="⇤ ATTACH";
+  if(!r.ok){btn.disabled=false;btn.textContent="⇤ OPEN HEAD";
     $("#mverr").textContent=r.error||"adopt failed";return;}
   MV.rows=MV.rows.filter(x=>x.name!==s);    // no longer an orphan
   renderOrphans();refresh();                // grid/sidebar pick it up
@@ -4325,7 +4678,7 @@ function orphanTile(s){
     +'<span class="nm">'+esc(s.name)+(s.attached?'<span class="att">●</span>':"")+'</span>'
     +'<span class="hosttag">⌨ '+esc(MV.host)+'</span>'
     +'<span class="age t-old">'+ago(s.age_sec)+'</span>';
-  const b=document.createElement("button");b.className="act oattach";b.textContent="⇤ ATTACH";
+  const b=document.createElement("button");b.className="act oattach";b.textContent="⇤ OPEN HEAD";
   b.onclick=e=>{e.stopPropagation();mvAdopt(s.name,b);};
   h.appendChild(b);
   const p=document.createElement("pre");
@@ -4509,13 +4862,27 @@ function renderChats(){
     ["claude","claude"+(tc.claude!=null?" · "+tc.claude:"")],
     ["grok","grok"+(tc.grok!=null?" · "+tc.grok:"")],
   ];
-  const matches=[["greenmark","greenmark"],["all","all paths"]];
+  // Match chips follow active product skin (dynamic). Default is lane-tight.
+  const skinMatch=SKIN_ID==="gmux"?"greenmark"
+    :(SKIN_ID==="reevux"?"personal"
+    :(SKIN_ID==="amux"?"aic"
+    :(SKIN_ID==="directrux"?"directrux":"all")));
+  const matches=SKIN_ID==="directrux"
+    ?[["directrux","directrux only"],["all","all paths (unsafe)"]]
+    :(SKIN_ID==="gmux"
+      ?[["greenmark","greenmark"],["all","all paths"]]
+      :(SKIN_ID==="reevux"
+        ?[["personal","personal"],["all","all paths"]]
+        :(SKIN_ID==="amux"
+          ?[["aic","aic"],["all","all paths"]]
+          :[["all","all paths"],["aic","aic"],["personal","personal"],["greenmark","greenmark"],["directrux","directrux"]])));
   const sorts=[["priority","by urgency"],["mtime","by recency"]];
+  const activeMatch=CH.match||skinMatch;
   v.innerHTML='<div id="chbar">'
     +'<div class="row" id="chstrow">'+sts.map(([k,l])=>chChip(l,CH.status===k,'data-st="'+k+'"')).join("")
     +'<span class="hint">disk → fleet: RESUME IN FLEET spawns tmux · click tile to peek</span></div>'
     +'<div class="row" id="chtoolrow">'+tools.map(([k,l])=>chChip(l,CH.tool===k,'data-tool="'+k+'"')).join("")
-    +matches.map(([k,l])=>chChip(l,(CH.match||"greenmark")===k,'data-match="'+k+'"')).join("")
+    +matches.map(([k,l])=>chChip(l,activeMatch===k,'data-match="'+k+'"')).join("")
     +sorts.map(([k,l])=>chChip(l,CH.sort===k,'data-sort="'+k+'"')).join("")
     +'</div>'
     +'<div class="row">'
@@ -4542,9 +4909,13 @@ function renderChats(){
   if(CH.loading&&!CH.rows.length){v.insertAdjacentHTML("beforeend",
     '<div id="empty"><div class="glyph">💬</div><div>scanning Claude + Grok stores…</div></div>');return;}
   if(!CH.loading&&!CH.rows.length){v.insertAdjacentHTML("beforeend",
-    '<div id="empty"><div class="glyph">💬</div><div>no matching chats'
-    +(cnt.stale!=null?(" · "+cnt.stale+" stale on disk"):"")
-    +'<br><span style="font-size:12px">try “all paths” or clear search</span></div></div>');return;}
+    '<div id="empty"><div class="glyph">💬</div><div>no matching chats for this skin'
+    +(activeMatch?(' · match=<b>'+esc(activeMatch)+'</b>'):'')
+    +'<br><span style="font-size:12px">'
+    +(SKIN_ID==="directrux"
+      ?'Directrux only shows meta/directrux work — not the whole machine. “all paths” is opt-in and unsafe.'
+      :'try another match chip or clear search')
+    +'</span></div></div>');return;}
   const g=document.createElement("div");g.className="tilegrid";
   CH.rows.forEach(c=>g.appendChild(chatTile(c)));
   v.appendChild(g);
@@ -4558,7 +4929,7 @@ async function loadChats(forceRefresh){
   CH.loading=true;const gen=++CH.gen;renderChats();
   let q="/api/chats?limit=80&recent_hours=24&sort="+encodeURIComponent(CH.sort||"priority");
   if(CH.status&&CH.status!=="all")q+="&status="+encodeURIComponent(CH.status);
-  // empty match → server defaults (greenmark on gmux skin, all otherwise)
+  // empty match → server defaults per skin (directrux → directrux only, not all)
   if(CH.match)q+="&match="+encodeURIComponent(CH.match);
   if(CH.tool)q+="&tools="+encodeURIComponent(CH.tool);
   if(CH.q)q+="&q="+encodeURIComponent(CH.q);
@@ -4603,10 +4974,27 @@ function render(){
   // orphans/chats are manual: the 2s poll must not rebuild them mid-click
   else if(mode==="orphans"){if(!document.getElementById("mvhosts"))openOrphans();}
   else if(mode==="chats"){if(!document.getElementById("chbar"))openChats();}
+  // Manager quiet + empty grid: show a calm empty state (not 40 offline tiles).
+  if(isManagerQuiet()&&mode==="grid"){
+    const v=$("#views");
+    if(v&&!shown().filter(s=>s.live).length&&!v.querySelector(".mgr-empty")){
+      // renderGrid may have filled tiles; if zero live scoped, reinforce empty message
+      if(!shown().length){
+        v.innerHTML='<div class="mgr-empty" style="padding:2rem;max-width:36rem;color:var(--text-dim);font-size:13px;line-height:1.5">'
+          +'<div style="color:var(--amber);font-weight:700;letter-spacing:1px;margin-bottom:8px">MANAGER SCOPE</div>'
+          +'Primary surface is the <b>managed planes</b> strip (left). '
+          +'Local session list is quiet on purpose — only standing health / manager-tagged work. '
+          +'Worker fleets live in <b>amux / gmux / reevux</b> rooms. '
+          +'<br><br><span class="tagchip" style="cursor:pointer" onclick="setManagerFleet(true)">show full fleet…</span>'
+          +' · <a href="__PUBLIC_PATH__/ai.html" style="color:var(--amber)">diagnosis /ai</a>'
+          +'</div>';
+      }
+    }
+  }
 }
 
-function pinned(){const c=$("#chat");return c.scrollHeight-c.scrollTop-c.clientHeight<60;}
-function scrollBottom(){const c=$("#chat");c.scrollTop=c.scrollHeight;$("#jump").style.display="none";}
+function pinned(){const c=$("#head");return c.scrollHeight-c.scrollTop-c.clientHeight<60;}
+function scrollBottom(){const c=$("#head");c.scrollTop=c.scrollHeight;$("#jump").style.display="none";}
 function clockNow(){const d=new Date();return d.toTimeString().slice(0,5);}  // HH:MM (#10)
 
 function addBubble(cls,who,text){
@@ -4617,7 +5005,7 @@ function addBubble(cls,who,text){
     b.appendChild(w);
   }
   const t=document.createElement("div");t.textContent=text;b.appendChild(t);
-  const c=$("#chat");
+  const c=$("#head");
   if(screenEl&&screenEl.parentElement===c){c.insertBefore(b,screenEl);}else{c.appendChild(b);}
   scrollBottom();
 }
@@ -4645,18 +5033,18 @@ async function refreshScreen(){
   }catch(e){$("#status").textContent="daemon unreachable";$("#status").className="err";}
 }
 
-function openChat(sess){
+function openHead(sess){
   current=sess;
-  setMode("chat");
-  $("#title").textContent=sess.name;
+  setMode("head");
+  $("#title").textContent="HEAD · "+sess.name;
   $("#status").textContent="connecting…";$("#status").className="";
-  const c=$("#chat");c.innerHTML="";screenEl=null;
+  const c=$("#head");c.innerHTML="";screenEl=null;
   screenEl=document.createElement("div");screenEl.id="screen-bubble";screenEl.className="bubble";
   screenEl.innerHTML='<div class="who"></div><div id="screen"></div>';
-  screenEl.querySelector(".who").textContent=sess.name+" · live screen (updates in place)";
+  screenEl.querySelector(".who").textContent=sess.name+" · live head (updates in place)";
   c.appendChild(screenEl);
   applyWrap();
-  addBubble("sys",null,"monitoring tmux session “"+sess.session+"”"+(sess.description?" — "+sess.description:""));
+  addBubble("sys",null,"head on session “"+sess.session+"”"+(sess.description?" — "+sess.description:"")+" — type to drive");
   document.querySelectorAll(".card").forEach(el2=>el2.classList.toggle("active",el2.dataset.name===sess.name));
   refreshScreen();chatTimer=setInterval(refreshScreen,1500);
   $("#input").focus();
@@ -4707,9 +5095,9 @@ $("#attachbtn").onclick=()=>{
 $("#refreshbtn").onclick=()=>{poll();if(current)refreshScreen();};
 // jump to bottom pill (#11)
 $("#jump").onclick=scrollBottom;
-$("#chat").addEventListener("scroll",()=>{if(pinned())$("#jump").style.display="none";});
+$("#head").addEventListener("scroll",()=>{if(pinned())$("#jump").style.display="none";});
 // sidebar filter (#7)
-$("#filter").addEventListener("input",e=>{filterStr=e.target.value.toLowerCase();renderSidebar();if(mode!=="chat")render();syncURL();});
+$("#filter").addEventListener("input",e=>{filterStr=e.target.value.toLowerCase();renderSidebar();if(mode!=="head")render();syncURL();});
 // ---------- zoom-in steer modal ----------
 let modalSession=null, modalTimer=null;
 let digestErr=false, digestRetries=0;   // The Gist: recover from a failed summarize when the pane changes, capped at 10
@@ -5500,7 +5888,9 @@ async function saveSettings(quiet){
 }
 
 applyURL();   // restore view + filters + open session from the URL (falls back to localStorage)
+loadProductChrome();                     // MANAGER chip + managed-planes strip (product.json)
 poll();gridTimer=setInterval(poll,2000);
+setInterval(loadManagedHealth,30000);    // refresh managed plane health on managers
 </script>
 <script id="emux-theme">
 // Wire the topbar button to the real applyTheme() (brand × light/dark).
@@ -5712,6 +6102,19 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         self._strip_public_path()
         url = urlparse(self.path)
         # AI mode: plain markdown diagnosis (also ?format=ai on status routes).
+        # Per-product health page (standing, cheap). Distinct from /healthz (JSON
+        # probe) and /ai (deep diagnosis with pane/chat scans). Criteria evolve.
+        if url.path in ("/health", "/health/", "/health.md"):
+            qs = parse_qs(url.query or "")
+            want_html = (qs.get("view") or [""])[0].lower() in ("html", "1", "yes")
+            if want_html:
+                self._send_html(health_page_html(__version__, self.public_path or ""))
+            else:
+                self._send_text(health_page_markdown(__version__, self.public_path or ""))
+            return
+        if url.path in ("/health.html", "/health.html/"):
+            self._send_html(health_page_html(__version__, self.public_path or ""))
+            return
         if url.path in ("/ai", "/ai/", "/ai.md", "/diagnosis", "/diagnosis/"):
             md = ai_diagnosis_markdown(__version__, self.public_path or "")
             # /ai.html or browser navigation → readable wrapper; raw path → markdown
@@ -5756,7 +6159,19 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             # Unguarded on purpose: leaks nothing, lets launchd/monitoring probe liveness.
             live = sessions_payload()
             n = len([s for s in live.get("sessions", []) if s.get("live")]) if live.get("ok") else 0
-            self._json({"ok": True, "version": __version__, "live_sessions": n})
+            body: dict[str, Any] = {"ok": True, "version": __version__, "live_sessions": n}
+            try:
+                from . import product_config as _pc
+                from . import skin as _skin
+
+                cfg = _pc.load_product_config(_skin.active_skin().id)
+                body["product"] = cfg.product
+                body["role"] = cfg.role
+                if cfg.is_manager:
+                    body["managed_planes"] = [p.id for p in cfg.managed_planes]
+            except Exception:
+                pass
+            self._json(body)
             return
         if url.path.startswith("/api/"):
             if not self._host_allowed():
@@ -5895,6 +6310,39 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/chats/peek":
             self._json(chats_peek_payload(parse_qs(url.query)))
+            return
+        if url.path in ("/api/product", "/api/product/"):
+            # Worker vs manager role + managed plane registry (config-driven).
+            try:
+                from . import product_config as _pc
+                from . import skin as _skin
+
+                cfg = _pc.load_product_config(_skin.active_skin().id)
+                self._json({"ok": True, **cfg.as_dict()})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+            return
+        if url.path in ("/api/managed", "/api/managed/"):
+            # Manager-only: probe configured planes (healthz URLs from product.json).
+            try:
+                from . import product_config as _pc
+                from . import skin as _skin
+
+                cfg = _pc.load_product_config(_skin.active_skin().id)
+                if not cfg.is_manager:
+                    self._json(
+                        {
+                            "ok": False,
+                            "error": "not_a_manager",
+                            "role": cfg.role,
+                            "hint": "only manager products expose /api/managed",
+                        },
+                        400,
+                    )
+                    return
+                self._json({"ok": True, **_probe_managed_planes(cfg)})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
             return
         self._json({"ok": False, "error": "not_found"}, 404)
 
@@ -6240,6 +6688,268 @@ def connect_command(
     return tmux
 
 
+def health_page_markdown(version: str, public_path: str = "") -> str:
+    """Standing per-product health page — cheap, product-stamped, evolvable.
+
+    Distinct from:
+      - /healthz  — machine JSON liveness probe
+      - /ai       — deep diagnosis (pane peeks, chat scans, full playbook)
+
+    Each emux product instance (emux / amux / gmux / reevux / directrux) serves
+    its own page under its public_path. Health *criteria* start minimal and grow.
+    """
+    from datetime import datetime, timezone
+
+    from . import skin as _skin
+
+    sk = _skin.active_skin()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    base = public_path or ""
+
+    # Cheap liveness — same core as /healthz (no pane peeks, no chat disk scan).
+    live_n = 0
+    sessions_ok = False
+    sessions_err = ""
+    try:
+        payload = sessions_payload()
+        sessions_ok = bool(payload.get("ok"))
+        sessions_err = str(payload.get("error") or "")
+        if sessions_ok:
+            live_n = len([s for s in (payload.get("sessions") or []) if s.get("live")])
+    except Exception as exc:  # noqa: BLE001
+        sessions_err = str(exc)[:200]
+
+    role = "worker"
+    product = sk.product
+    chats_match = ""
+    cfg_path = ""
+    managed_section = ""
+    mgr_verdict = ""
+    try:
+        from . import product_config as _pc
+
+        cfg = _pc.load_product_config(sk.id)
+        product = cfg.product or product
+        role = cfg.role or role
+        chats_match = cfg.chats_match or ""
+        cfg_path = str(cfg.path or "")
+        if cfg.is_manager:
+            probe = _probe_managed_planes(cfg)
+            planes = probe.get("planes") or []
+            down = [p for p in planes if not p.get("ok")]
+            deg = [p for p in planes if p.get("ok") and p.get("degraded")]
+            if not planes:
+                mgr_verdict = "FAIL"
+            elif down:
+                mgr_verdict = "FAIL"
+            elif deg:
+                mgr_verdict = "DEGRADED"
+            else:
+                mgr_verdict = "HEALTHY"
+            rows = [
+                "",
+                "## Managed planes",
+                "",
+                "| plane | lane | host | ok | degraded | live | healthz |",
+                "|---|---|---|---|---|---|---|",
+            ]
+            for p in planes:
+                rows.append(
+                    f"| {p.get('id') or '—'} | {p.get('lane') or '—'} | {p.get('host') or '—'} | "
+                    f"{p.get('ok')} | {p.get('degraded')} | "
+                    f"{p.get('live_sessions') if p.get('live_sessions') is not None else '—'} | "
+                    f"{p.get('healthz') or '—'} |"
+                )
+            if not planes:
+                rows.append("| _(empty allowlist)_ | | | | | | |")
+            rows += [
+                "",
+                f"- managed_verdict: **{mgr_verdict}**",
+                f"- workers_ok: {probe.get('workers_ok')}",
+                "",
+            ]
+            managed_section = "\n".join(rows)
+    except Exception as exc:  # noqa: BLE001
+        managed_section = f"\n## Managed planes\n\n_(probe failed: {exc})_\n"
+
+    # Minimal evolving criteria (v0). Expand over time — do not pretend completeness.
+    reasons: list[str] = []
+    if not sessions_ok and not mgr_verdict:
+        verdict = "FAIL"
+        reasons.append(f"session inventory not ok: {sessions_err or 'unknown'}")
+    elif mgr_verdict == "FAIL":
+        verdict = "FAIL"
+        reasons.append("one or more managed worker planes DOWN or allowlist empty")
+    elif mgr_verdict == "DEGRADED":
+        verdict = "DEGRADED"
+        reasons.append("managed plane(s) degraded (reachable but not clean health JSON)")
+    elif not sessions_ok:
+        verdict = "DEGRADED"
+        reasons.append(f"local session inventory flaky: {sessions_err or 'unknown'}")
+    else:
+        verdict = "HEALTHY"
+        if mgr_verdict == "HEALTHY":
+            reasons.append("all managed worker planes healthy")
+        reasons.append(f"daemon up · {live_n} live local session(s) counted")
+
+    lines = [
+        f"# {product} health",
+        "",
+        f"- generated: {now}",
+        f"- product: **{product}** (skin=`{sk.id}`)",
+        f"- role: **{role}**",
+        f"- engine: emux {version}",
+        f"- public_path: `{base or '/'}`",
+        f"- chats_match: `{chats_match or '(engine default)'}`",
+        f"- product_config: `{cfg_path or '(none)'}`",
+        f"- live_sessions: {live_n}",
+        f"- verdict: **{verdict}**",
+        "",
+        "## Why this verdict",
+        "",
+    ]
+    for r in reasons:
+        lines.append(f"- {r}")
+    if managed_section:
+        lines.append(managed_section)
+
+    lines += [
+        "",
+        "## Health criteria (evolving)",
+        "",
+        "These are the **current** checks. Expect this list to grow; absence of a",
+        "check does not mean the concern is irrelevant — only that we have not",
+        "automated it on this page yet.",
+        "",
+        "| # | criterion | status on this page |",
+        "|---|-----------|---------------------|",
+        f"| 1 | Daemon answers HTTP | **checked** (you are reading this) |",
+        f"| 2 | Session inventory ok | **checked** → sessions_ok={sessions_ok} |",
+        f"| 3 | Live session count (informational) | **reported** → {live_n} |",
+        (
+            f"| 4 | Managed worker healthz (manager only) | "
+            f"**{'checked → ' + mgr_verdict if mgr_verdict else 'n/a (worker)'}** |"
+        ),
+        "| 5 | Abandoned / stale agent chats | *not yet — use `/ai` or `emux chats`* |",
+        "| 6 | Pane gates / stuck sessions | *not yet — use `/ai` or room* |",
+        "| 7 | Disk / launchd / Tailscale serve | *not yet* |",
+        "| 8 | Cross-lane isolation (no hat mix) | *policy — not automated here* |",
+        "",
+        "## Links",
+        "",
+        f"- health (this page, markdown): `{base}/health`",
+        f"- health (HTML): `{base}/health.html`",
+        f"- healthz (JSON probe): `{base}/healthz`",
+        f"- deep diagnosis (AI): `{base}/ai` · `{base}/ai.html`",
+        f"- status table: `{base}/` or `{base}/status`",
+        f"- control room: `{base}/room`",
+        "",
+        "## How to use",
+        "",
+        "1. Bookmark **this product's** `/health` — do not use another plane's page.",
+        "2. For managers: fix managed planes before fretting about local session noise.",
+        "3. For deep signal (panes, chats): open `/ai` — slower on purpose.",
+        "4. For machines/launchd: hit `/healthz` (JSON, unguarded).",
+        "",
+        f"— end {product} health —",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def health_page_html(version: str, public_path: str = "") -> str:
+    """Human-readable wrapper for the standing health page."""
+    import html as _html
+
+    from . import skin as _skin
+
+    sk = _skin.active_skin()
+    md = health_page_markdown(version, public_path)
+    base = public_path or ""
+    return sk.apply(
+        f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__PRODUCT__ health</title>
+<style id="skin-theme">__THEME_CSS__</style>
+<link rel="icon" href="__FAVICON__">
+<style>
+body{{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--ink)}}
+header{{padding:16px 20px;border-bottom:1px solid var(--line);background:var(--card);
+ display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between}}
+.brand-row{{display:flex;align-items:center;gap:10px}}
+.brand-row .skin-logo{{color:var(--amber)}}
+.brand-word{{font-weight:600;color:var(--ink)}}
+.meta{{font-size:12px;color:var(--dim)}}
+.meta a{{color:var(--ink)}}
+#themebtn,button.copy{{font:12px system-ui;cursor:pointer;border:1px solid var(--line);
+ background:var(--card);color:var(--ink);padding:6px 12px;border-radius:6px}}
+main{{padding:16px 20px 40px;max-width:900px}}
+pre{{white-space:pre-wrap;word-break:break-word;background:var(--bg-raise);border:1px solid var(--line);
+ border-radius:8px;padding:16px;font:12px/1.45 ui-monospace,Menlo,monospace;color:var(--ink)}}
+.hint{{font-size:12px;color:var(--dim);margin:0 0 12px}}
+</style>
+</head><body>
+<header>
+  <div>
+    <div class="brand-row">__LOGO_HTML__</div>
+    <div class="meta">standing health · product-scoped ·
+      <a href="{base}/">status</a> ·
+      <a href="{base}/health">raw markdown</a> ·
+      <a href="{base}/ai.html">deep diagnosis</a> ·
+      <a href="{base}/room">__TAGLINE__</a> ·
+      <a href="{base}/healthz">healthz</a>
+    </div>
+  </div>
+  <div style="display:flex;gap:8px">
+    <button type="button" class="copy" id="copyhealth">copy all</button>
+    <button type="button" id="themebtn">☾ dark</button>
+  </div>
+</header>
+<main>
+  <p class="hint">This is <b>__PRODUCT__</b>'s health page — not another plane's.
+  Criteria evolve. Raw for agents: <code>{base}/health</code> (text/markdown).
+  Deep scan: <code>{base}/ai</code>.</p>
+  <pre id="health">{_html.escape(md)}</pre>
+</main>
+<script>
+document.getElementById("copyhealth").onclick=function(){{
+  var t=document.getElementById("health").textContent;
+  var b=this;
+  if(navigator.clipboard&&navigator.clipboard.writeText){{
+    navigator.clipboard.writeText(t).then(function(){{b.textContent="copied";setTimeout(function(){{b.textContent="copy all"}},1200)}});
+  }}
+}};
+(function(){{
+  var KEY="__THEME_STORAGE_KEY__";
+  var def="__DEFAULT_THEME__";
+  function pref(){{
+    try{{var s=localStorage.getItem(KEY); if(s==="light"||s==="dark")return s;}}catch(e){{}}
+    if(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
+    return def==="dark"?"dark":"light";
+  }}
+  function apply(t){{
+    document.documentElement.setAttribute("data-theme", t);
+    var b=document.getElementById("themebtn");
+    if(b) b.textContent=t==="dark"?"☀ light":"☾ dark";
+  }}
+  function toggle(){{
+    var next=(document.documentElement.getAttribute("data-theme")||pref())==="dark"?"light":"dark";
+    try{{localStorage.setItem(KEY,next);}}catch(e){{}}
+    apply(next);
+  }}
+  apply(pref());
+  var b=document.getElementById("themebtn");
+  if(b) b.onclick=toggle;
+}})();
+</script>
+</body></html>
+""",
+        version,
+    )
+
+
 def ai_diagnosis_markdown(
     version: str,
     public_path: str = "",
@@ -6273,23 +6983,106 @@ def ai_diagnosis_markdown(
     unknown = [s for s in sessions if s.get("state") == "unknown"]
     unregistered_live = [s for s in live if not s.get("registered")]
 
+    # Manager products: managed-plane health is the primary diagnosis signal.
+    mgr_section = ""
+    mgr_verdict = ""
+    try:
+        from . import product_config as _pc
+
+        cfg = _pc.load_product_config(sk.id)
+        if cfg.is_manager:
+            probe = _probe_managed_planes(cfg)
+            planes = probe.get("planes") or []
+            down = [p for p in planes if not p.get("ok")]
+            deg = [p for p in planes if p.get("ok") and p.get("degraded")]
+            up = [p for p in planes if p.get("ok") and not p.get("degraded")]
+            if not planes:
+                mgr_verdict = "FAIL"
+            elif down:
+                mgr_verdict = "FAIL"
+            elif deg:
+                mgr_verdict = "DEGRADED"
+            else:
+                mgr_verdict = "HEALTHY"
+            lines_m = [
+                "",
+                "## Managed planes (manager allowlist — primary job)",
+                "",
+                f"- product role: **manager**",
+                f"- config: `{cfg.path or 'default (no product.json)'}`",
+                f"- chats_match: `{cfg.chats_match}` (never worker dumps)",
+                f"- managed_ids: {', '.join(sorted(cfg.managed_ids())) or '(empty)'}",
+                f"- workers_ok: {probe.get('workers_ok')}",
+                f"- managed_verdict: **{mgr_verdict}**",
+                "",
+                "| plane | lane | host | ok | degraded | live | version | healthz | fix |",
+                "|---|---|---|---|---|---|---|---|---|",
+            ]
+            for p in planes:
+                fix = "—"
+                pid = p.get("id") or ""
+                if not p.get("ok"):
+                    if pid == "amux":
+                        fix = "`launchctl kickstart -k gui/$(id -u)/com.eidos.amux-web`; curl Tailscale `/amux/healthz`"
+                    elif pid == "gmux":
+                        fix = "`ssh rentamac 'curl -sS http://127.0.0.1:8689/healthz'`; public URL may be OIDC-gated"
+                    elif pid == "reevux":
+                        fix = "`ssh mac-mini-01 'launchctl kickstart -k gui/$(id -u)/com.reeves.reevux-web'`"
+                    else:
+                        fix = f"check host={p.get('host')} healthz={p.get('healthz')}"
+                elif p.get("degraded"):
+                    fix = f"reachable but degraded: {p.get('error') or 'see healthz'}; prefer loopback/SSH over auth-gated public"
+                room = p.get("room") or ""
+                room_cell = room if room else "—"
+                lines_m.append(
+                    f"| {pid} | {p.get('lane') or '—'} | {p.get('host') or '—'} | "
+                    f"{p.get('ok')} | {p.get('degraded')} | "
+                    f"{p.get('live_sessions') if p.get('live_sessions') is not None else '—'} | "
+                    f"{p.get('version') or '—'} | {p.get('healthz') or '—'} | {fix} |"
+                )
+                if room:
+                    lines_m.append(f"| | | | | | | | room | {room_cell} |")
+            lines_m += [
+                "",
+                "### Manager fix playbook",
+                "",
+                "1. Prefer **managed_verdict** over local laptop session noise.",
+                "2. DOWN plane → kick that product's launchd on its host; re-probe healthz.",
+                "3. Do **not** resume personal chats under amux or AIC under reevux.",
+                "4. Open the **worker room** URL from the table to steer that plane.",
+                "5. Standing health chat session name: `directrux-health` (manager only).",
+                "6. Refresh report: `curl -sS http://127.0.0.1:8691/ai` (or public `/directrux/ai`).",
+                "",
+            ]
+            mgr_section = "\n".join(lines_m)
+    except Exception as exc:  # noqa: BLE001
+        mgr_section = f"\n## Managed planes\n\n_(probe failed: {exc})_\n"
+
     # Verdict — conservative, explicit reasons
     reasons: list[str] = []
-    if not ok:
+    if mgr_verdict == "FAIL":
+        verdict = "FAIL"
+        reasons.append("one or more managed worker planes are DOWN or allowlist empty")
+    elif not ok:
         verdict = "FAIL"
         reasons.append(f"sessions_payload not ok: {err or 'unknown'}")
+    elif mgr_verdict == "DEGRADED":
+        verdict = "DEGRADED"
+        reasons.append("managed plane(s) degraded (reachable but not clean health JSON)")
     elif any(s.get("status") == "unknown" for s in (scope.get("sockets") or [])):
         verdict = "DEGRADED"
         reasons.append("one or more tmux sockets unreadable (unknown)")
     elif not live and ghosts:
         verdict = "DEGRADED"
         reasons.append(f"no LIVE sessions; {len(ghosts)} registry ghost(s)")
-    elif not live:
+    elif not live and not mgr_verdict:
         verdict = "DEGRADED"
         reasons.append("no LIVE tmux sessions on scanned sockets")
     else:
         verdict = "HEALTHY"
-        reasons.append(f"{len(live)} live session(s) on scanned sockets")
+        if mgr_verdict == "HEALTHY":
+            reasons.append("all managed worker planes healthy")
+        reasons.append(f"{len(live)} live local session(s) on scanned sockets")
     if unregistered_live:
         reasons.append(
             f"{len(unregistered_live)} live session(s) not in registry "
@@ -6303,27 +7096,29 @@ def ai_diagnosis_markdown(
     chat_section = ""
     try:
         from . import chats as chat_find
+        from . import product_config as _pc2
 
+        _chat_match = _pc2.default_chats_match_for_skin(sk.id)
         chat_hits = chat_find.find_chats(
-            match="greenmark" if sk.id == "gmux" else "all",
+            match=_chat_match,
             recent_hours=24.0,
             statuses=["stale", "recent"],
             limit=25,
         )
         stale_chats = [h for h in chat_hits if h.status == "stale"]
-        if stale_chats:
+        if stale_chats and not (sk.id == "directrux" or _pc2.load_product_config(sk.id).is_manager):
             reasons.append(
                 f"{len(stale_chats)} stale agent chat(s) on disk (Claude/Grok) — "
                 "may be dropped missions; resume before starting new agents"
             )
             if verdict == "HEALTHY":
                 verdict = "DEGRADED"
-        if chat_hits:
+        if chat_hits and not _pc2.load_product_config(sk.id).is_manager:
             chat_section = "\n" + chat_find.format_text(
                 chat_hits,
                 title="Abandoned / nonoperative agent chats (Claude + Grok)",
             )
-            chat_section += "\nCLI: `emux chats --match greenmark --abandoned-only`\n"
+            chat_section += f"\nCLI: `emux chats --match {_chat_match} --abandoned-only`\n"
     except Exception as exc:  # noqa: BLE001
         chat_section = f"\n## Abandoned agent chats\n\n_(scan failed: {exc})_\n"
 
@@ -6341,13 +7136,16 @@ def ai_diagnosis_markdown(
     ]
     for r in reasons:
         lines.append(f"- {r}")
+    if mgr_section:
+        lines.append(mgr_section)
     lines += [
         "",
-        "## Scan scope (honest limits)",
+        "## Local host scan scope (secondary for managers)",
         "",
         f"{scope.get('claim') or 'scope not scanned yet'}",
         "",
         "This is NOT all host processes, NOT other users' tmux, NOT bare ssh/nohup.",
+        "For **manager** products, prefer **Managed planes** above over local noise.",
         "",
         "### Sockets probed",
         "",
@@ -6435,12 +7233,14 @@ def ai_diagnosis_markdown(
         "## How an AI should use this",
         "",
         "1. Read **verdict** first — FAIL/DEGRADED/HEALTHY.",
-        "2. If DEGRADED with only ghosts: work died; registry still has names — do not treat as running.",
-        "3. If unknown sockets: inventory is incomplete; do not claim full host coverage.",
-        "4. Unregistered LIVE rows are real processes — consider registering for governance.",
-        "5. Connect commands are for a human laptop (ssh → tmux attach), not for inventing new sessions.",
-        "6. Pane samples beat guessing — look for gates, errors, idle shells.",
-        "7. Stale Claude/Grok chats are often dropped missions — resume those before spawning new agents.",
+        "2. If this product is a **manager**: fix **Managed planes** first (worker healthz/launchd/room).",
+        "3. If DEGRADED with only ghosts: work died; registry still has names — do not treat as running.",
+        "4. If unknown sockets: inventory is incomplete; do not claim full host coverage.",
+        "5. Unregistered LIVE rows are real processes — consider registering for governance.",
+        "6. Connect commands are for a human laptop (ssh → tmux attach), not for inventing new sessions.",
+        "7. Pane samples beat guessing — look for gates, errors, idle shells.",
+        "8. Stale Claude/Grok chats are often dropped missions — resume those before spawning new agents.",
+        "9. Do not dump personal into AIC/Greenmark while fixing manager health.",
         "",
         f"— end {sk.product} diagnosis —",
         "",
@@ -6495,6 +7295,7 @@ pre{{white-space:pre-wrap;word-break:break-word;background:var(--bg-raise);borde
     <div class="brand-row">__LOGO_HTML__</div>
     <div class="meta">AI mode · plain diagnosis ·
       <a href="{base}/">status UI</a> ·
+      <a href="{base}/health.html">health</a> ·
       <a href="{base}/ai">raw markdown</a> ·
       <a href="{base}/room">__TAGLINE__</a>
     </div>
@@ -6902,6 +7703,7 @@ def simple_status_html(
     <div class="meta">
       __PRODUCT_LINE__ · read-only · auto-refresh 15s ·
       <a href="{base}/room">__TAGLINE__</a> ·
+      <a href="{base}/health.html">health</a> ·
       <a href="{base}/ai.html">AI mode</a> ·
       <a href="{base}/ai">AI markdown</a> ·
       <a href="{base}/healthz">healthz</a>

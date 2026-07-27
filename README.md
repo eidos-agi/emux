@@ -2,6 +2,8 @@
 
 > **Eidos mux.** Pick up where you left off in tmux, and let an agent drive it. A TUI session picker for humans + an MCP server for agents to observe, converse with, navigate, and autonomously pursue goals through existing sessions — never spawning or killing them. Same registry, same sessions, same operating model.
 
+**Vocabulary:** *Sessions run. Heads are how you attach. CHATS are what you recover when nothing is live.* See [`docs/vocabulary.md`](docs/vocabulary.md) (Linear [RVS-371](https://linear.app/eidos-agi/issue/RVS-371)).
+
 ## What it does
 
 Three front-ends over one shared registry of named tmux sessions:
@@ -22,13 +24,13 @@ emux login        → Drive a Claude Code login in a session: surface the
                     OAuth URL, then finish with --code. --switch to change
                     account (/logout first).
 
-emux web          → Web daemon. Browser UI that monitors any session
-                    like a chatbot: live pane is the bot's side of
-                    the chat, input bar types into the session.
+emux web          → Web daemon. Browser room over live sessions.
+                    Open a head to type into a pane; CHATS is past
+                    transcripts (not live heads).
 
-emux web          → Web daemon. Browser UI that monitors any session
-                    like a chatbot: live pane is the bot's side of
-                    the chat, input bar types into the session.
+emux web          → Web daemon. Browser room over live sessions.
+                    Open a head to type into a pane; CHATS is past
+                    transcripts (not live heads).
 
 emux ls           → Print registered + live sessions (non-interactive,
                     CI-friendly).
