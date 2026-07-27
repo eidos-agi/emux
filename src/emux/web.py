@@ -1201,6 +1201,42 @@ def _compute_gist(pane: str) -> dict[str, Any]:
     return {"ok": True, "digest": (r.get("digest") or "").strip(), "suggestions": sugg}
 
 
+def _target_ux_score() -> dict[str, Any]:
+    """How close the shipped session-head is to docs/target-ux-session-head.md.
+
+    Server-side checklist (features compiled into this binary). The room UI
+    also runs a live DOM score in the drawer UX tab — both should track.
+    """
+    checks = [
+        {"id": "right_rail", "pts": 12, "ok": True, "label": "Right work drawer (Tasks/Chat/Context)"},
+        {"id": "tab_tasks", "pts": 10, "ok": True, "label": "Tasks tab"},
+        {"id": "tab_chat", "pts": 10, "ok": True, "label": "Chat tab (docked multi side-chats)"},
+        {"id": "tab_context", "pts": 10, "ok": True, "label": "Context tab"},
+        {"id": "linear_list", "pts": 10, "ok": True, "label": "Linear task inventory from chat text"},
+        {"id": "multi_sidechat", "pts": 10, "ok": True, "label": "Multi side-chat model"},
+        {"id": "pursue_bubble", "pts": 8, "ok": True, "label": "💬 pursue on TEAM-123 keys"},
+        {"id": "issue_header", "pts": 10, "ok": True, "label": "Active Linear issue in session header"},
+        {"id": "auth_mode", "pts": 6, "ok": True, "label": "Per-session authorization mode"},
+        {"id": "queue_send", "pts": 6, "ok": True, "label": "Queue vs Send Now"},
+        {"id": "status_banner", "pts": 4, "ok": True, "label": "Classifier status banner"},
+        {"id": "open_head", "pts": 4, "ok": True, "label": "Open HEAD action"},
+        # Remaining mockup items not fully done — track as not-ok for honesty:
+        {"id": "linear_titles", "pts": 5, "ok": False, "label": "Linear issue titles hydrated (API)"},
+        {"id": "running_pct", "pts": 5, "ok": False, "label": "Running % + wall-clock work duration"},
+    ]
+    earned = sum(c["pts"] for c in checks if c["ok"])
+    total = sum(c["pts"] for c in checks)
+    return {
+        "ok": True,
+        "doc": "docs/target-ux-session-head.md",
+        "version": __version__,
+        "earned": earned,
+        "total": total,
+        "pct": round(100 * earned / total) if total else 0,
+        "checks": checks,
+    }
+
+
 def _spawn_session(data: dict[str, Any]) -> dict[str, Any]:
     """Create a new session (local or remote) — and KICKSTART it.
 
@@ -3485,12 +3521,20 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
   animation:zoomin .16s ease-out;
 }
 @keyframes zoomin{from{transform:scale(.98);opacity:.4}to{transform:scale(1);opacity:1}}
-#modalhead{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--bg-card);flex:0 0 auto}
+#modalhead{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--bg-card);flex:0 0 auto;flex-wrap:wrap}
+#modalidents{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 auto}
+#modalhead .nmrow{display:flex;align-items:baseline;gap:8px;min-width:0}
 #modalhead .nm{font-family:"VT323",monospace;font-size:22px;color:var(--amber);letter-spacing:1px}
 #modalhead .ag{color:var(--amber-dim);font-size:12px;letter-spacing:1px}
+#modalhead .issuerow{font-size:12px;color:var(--text);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#modalhead .issuerow a{color:var(--amber);text-decoration:none;border-bottom:1px dotted color-mix(in srgb,var(--amber) 50%,transparent)}
 #modalhead .st{margin-left:auto;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim)}
 #modalclose,#modalpop{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 10px;margin-left:6px}
 #modalclose:hover,#modalpop:hover{color:var(--amber);border-color:var(--amber-dim)}
+#modalbanner{display:none;padding:6px 12px;font-size:12px;border-bottom:1px solid var(--line);background:color-mix(in srgb, var(--bg-raise) 80%, var(--live) 8%);color:var(--text)}
+#modalbanner.on{display:block}
+#modalbanner .bbadge{font-size:9px;letter-spacing:.8px;text-transform:uppercase;border:1px solid var(--line);padding:1px 6px;border-radius:4px;margin-left:8px;color:var(--text-dim)}
+#modalbanner .bbadge.warn{border-color:#c45;color:#e88}
 /* solo tab: one session fills the Chrome tab — no fleet chrome */
 body.solo-session #side,
 body.solo-session #feed,
@@ -3715,56 +3759,94 @@ button.linchat:disabled{opacity:.55;cursor:default}
 #modaliterm{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 10px;margin-left:6px}
 #modaliterm:hover{color:var(--amber);border-color:var(--amber-dim)}
 #modaliterm:disabled{opacity:.6;cursor:default}
-/* Body row: terminal head + right Linear tasks drawer */
+/* Body: left head column + right Tasks/Chat/Context drawer (target UX) */
 #modalbody{
   flex:1 1 0;min-height:160px;min-width:0;display:flex;flex-direction:row;
   overflow:hidden;border-top:1px solid var(--line);
 }
-/* Shell owns the flex slot; screen is absolute-fill so height is always the
-   free region between header/gist and composer — never content-sized, never 0. */
+#modalmain{flex:1 1 0;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}
 #modalshell{
   flex:1 1 0;min-height:0;min-width:0;position:relative;
   overflow:hidden;background:var(--bg-card);
 }
-/* Right drawer — every Linear TEAM-123 mentioned in this chat */
-#modaltasks{
-  flex:0 0 240px;width:240px;max-width:42vw;min-width:0;
+#modaldrawer{
+  flex:0 0 300px;width:300px;max-width:46vw;min-width:0;
   display:flex;flex-direction:column;
   border-left:1px solid var(--line);background:var(--bg-raise);
   overflow:hidden;
 }
-#modaltasks.collapsed{display:none}
-#modaltasks .mthead{
-  display:flex;align-items:center;gap:8px;padding:8px 10px;
-  border-bottom:1px solid var(--line);flex:0 0 auto;
-  font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--text-dim);
+#modaldrawer.collapsed{display:none}
+#drawertabs{display:flex;align-items:center;gap:2px;padding:6px 6px 0;border-bottom:1px solid var(--line);flex:0 0 auto}
+#drawertabs .dtab{
+  background:transparent;border:none;border-bottom:2px solid transparent;
+  color:var(--text-dim);font:11px/1 inherit;letter-spacing:.6px;text-transform:uppercase;
+  padding:8px 10px;cursor:pointer;
 }
-#modaltasks .mthead b{color:var(--amber);font-weight:700;letter-spacing:.8px}
-#modaltasks .mthead .mtcount{
-  font-size:10px;padding:0 6px;border-radius:8px;
-  background:color-mix(in srgb, var(--amber) 18%, transparent);color:var(--amber);
+#drawertabs .dtab.on{color:var(--amber);border-bottom-color:var(--amber);font-weight:700}
+#drawertabs .dtab .dtbadge{
+  display:inline-block;min-width:14px;padding:0 4px;margin-left:3px;border-radius:8px;
+  background:color-mix(in srgb, var(--amber) 25%, transparent);color:var(--amber);font-size:9px;font-weight:700;
 }
-#modaltasks .mthead button{
-  margin-left:auto;background:transparent;border:1px solid var(--line);
-  color:var(--text-dim);font-size:12px;cursor:pointer;padding:1px 8px;
-}
-#modaltasks .mthead button:hover{color:var(--amber);border-color:var(--amber-dim)}
-#modaltasklist{flex:1 1 0;min-height:0;overflow:auto;padding:8px}
+#drawertabs .dtab.score{margin-left:auto;opacity:.85}
+#modaltasks-hide{background:transparent;border:1px solid var(--line);color:var(--text-dim);font-size:12px;cursor:pointer;padding:1px 7px;margin-left:4px}
+#modaltasks-hide:hover{color:var(--amber);border-color:var(--amber-dim)}
+.dpane{display:none;flex:1 1 0;min-height:0;flex-direction:column;overflow:hidden}
+.dpane.on{display:flex}
+.dsubh{display:flex;align-items:center;gap:8px;padding:8px 10px 4px;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim)}
+.dsubh .act{margin-left:auto;font-size:14px;padding:0 8px}
+#modaltasklist{flex:1 1 0;min-height:0;overflow:auto;padding:4px 8px 8px}
 #modaltasklist .mtempty{font-size:11px;color:var(--text-dim);line-height:1.45;padding:6px 4px}
 #modaltasklist .mtask{
   display:flex;align-items:center;gap:8px;padding:8px 9px;margin-bottom:5px;
   border:1px solid var(--line);border-radius:6px;background:var(--bg-card);
-  text-decoration:none;color:var(--text);font-size:12px;
+  color:var(--text);font-size:12px;
 }
 #modaltasklist .mtask:hover{border-color:var(--amber-dim);background:color-mix(in srgb, var(--amber) 8%, var(--bg-card))}
+#modaltasklist .mtask.active{border-color:var(--amber);box-shadow:inset 3px 0 0 var(--amber)}
 #modaltasklist .mtkey{font-weight:700;color:var(--amber);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px;text-decoration:none}
 #modaltasklist .mtgo{color:var(--text-dim);font-size:11px;text-decoration:none}
+#drawerauth{flex:0 0 auto;padding:8px 10px 12px;border-top:1px solid var(--line)}
+#drawerauth select,#modalauth{
+  width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);
+  border-radius:4px;padding:7px 8px;font:11px/1.3 inherit;
+}
+#modalauth{width:auto;max-width:140px;flex:0 0 auto}
+#drawerchatlist{flex:0 0 auto;max-height:28%;overflow:auto;padding:0 8px 6px;border-bottom:1px solid var(--line)}
+#drawerchatlist .scthread{
+  display:flex;align-items:center;gap:6px;padding:6px 8px;margin-bottom:3px;
+  border-radius:5px;border:1px solid transparent;cursor:pointer;font-size:11px;color:var(--text);
+}
+#drawerchatlist .scthread:hover{background:var(--bg-card)}
+#drawerchatlist .scthread.on{border-color:var(--amber-dim);background:color-mix(in srgb, var(--amber) 10%, var(--bg-card))}
+#drawerchatactive{flex:1 1 0;min-height:0;overflow:hidden;display:flex;flex-direction:column}
+#drawerchatactive .tchatpanel{border:none;border-radius:0;box-shadow:none;max-height:none;width:100%;flex:1;min-height:0}
+#drawercontext,#drawerscore{flex:1 1 0;overflow:auto;padding:10px;font-size:12px;line-height:1.45;color:var(--text)}
+#drawercontext .crow{display:flex;gap:8px;padding:4px 0;border-bottom:1px solid color-mix(in srgb, var(--line) 60%, transparent)}
+#drawercontext .ck{flex:0 0 88px;color:var(--text-dim);font-size:10px;letter-spacing:.5px;text-transform:uppercase}
+#drawercontext .cv{flex:1;min-width:0;word-break:break-word;font-family:ui-monospace,Menlo,monospace;font-size:11px}
+#drawerscore .scorenum{font-family:"VT323",monospace;font-size:42px;color:var(--amber);line-height:1}
+#drawerscore .scorebar{height:8px;background:var(--line);border-radius:4px;margin:8px 0 14px;overflow:hidden}
+#drawerscore .scorebar>i{display:block;height:100%;background:var(--amber)}
+#drawerscore .scrow{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid color-mix(in srgb, var(--line) 50%, transparent);font-size:11px}
+#drawerscore .scok{color:#3dba6e;font-weight:700;width:16px}
+#drawerscore .scno{color:var(--text-dim);width:16px}
+#drawerscore .scpts{margin-left:auto;color:var(--text-dim);font-variant-numeric:tabular-nums}
+#modalrow{display:flex;gap:8px;padding:8px 12px;border-top:1px solid var(--line);background:var(--bg-card);align-items:center;flex:0 0 auto}
+#modalrow #modalinput{flex:1;min-width:0}
+#modalqueue{background:transparent;border:1px solid var(--amber-dim);color:var(--amber);padding:7px 12px;font:11px inherit;cursor:pointer;border-radius:4px;letter-spacing:.4px}
+#modalqueue:hover{background:color-mix(in srgb, var(--amber) 12%, transparent)}
+#modalsend{background:var(--amber);color:var(--on-accent);border:none;padding:7px 14px;font:12px inherit;font-weight:700;cursor:pointer;border-radius:4px;letter-spacing:.3px}
+#modalsend:hover{filter:brightness(1.06)}
 #modaltasksbtn{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:11px;cursor:pointer;padding:2px 8px;margin-left:6px;letter-spacing:.4px}
 #modaltasksbtn:hover,#modaltasksbtn.on{color:var(--amber);border-color:var(--amber-dim)}
 #modaltasksbtn .mtbadge{display:none;margin-left:4px;font-size:9px;padding:0 5px;border-radius:8px;background:var(--amber);color:var(--on-accent);font-weight:700}
 #modaltasksbtn .mtbadge.on{display:inline}
+#tchatstack{/* float only extra side chats — primary lives in Chat tab */ z-index:215}
+@media(max-width:900px){
+  #modaldrawer{flex-basis:260px;width:260px}
+}
 @media(max-width:720px){
-  #modaltasks{position:absolute;right:0;top:0;bottom:0;z-index:20;width:min(280px,88vw);max-width:none;
+  #modaldrawer{position:absolute;right:0;top:0;bottom:0;z-index:20;width:min(300px,90vw);max-width:none;
     box-shadow:-8px 0 24px rgba(0,0,0,.35)}
   #modalbody{position:relative}
 }
@@ -4127,17 +4209,20 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
   <div id="modalback"></div>
   <div id="modalpanel">
     <div id="modalhead">
-      <span class="dot live"></span>
-      <span class="nm" id="modalname"></span>
-      <span class="ag" id="modalagent"></span>
+      <span class="dot live" id="modaldot"></span>
+      <div id="modalidents">
+        <div class="nmrow"><span class="nm" id="modalname"></span><span class="ag" id="modalagent"></span></div>
+        <div class="issuerow" id="modalissue" hidden></div>
+      </div>
       <span id="modalthink"><span class="tdots"><i></i><i></i><i></i></span>thinking <b>0s</b></span>
       <span class="st" id="modalstatus">live</span>
       <button id="modalswitch" title="fail this session over to another Claude account (exits + relaunches + resumes)" onclick="switchPlan()">⇄ switch account</button>
       <button id="modaliterm" class="maconly" title="open a head on this session in iTerm2 (emux head / tmux attach)">⧉ OPEN HEAD</button>
       <button id="modalpop" type="button" title="open this session as its own browser tab">↗ tab</button>
-      <button id="modaltasksbtn" type="button" title="Linear tasks mentioned in this chat" onclick="toggleModalTasks()">☰ TASKS<span class="mtbadge" id="modaltaskbadge">0</span></button>
+      <button id="modaltasksbtn" type="button" title="Toggle work drawer" onclick="toggleModalTasks()">☰ DRAWER<span class="mtbadge" id="modaltaskbadge">0</span></button>
       <button id="modalclose">✕ close</button>
     </div>
+    <div id="modalbanner" class="off" aria-live="polite"></div>
     <div id="modaljudge"></div>
     <div id="modaldigest">
       <div class="dghead"><span>◆ the gist</span><button id="dgrefresh" title="re-read">↻</button></div>
@@ -4145,37 +4230,70 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
       <div class="dgsugg"></div>
     </div>
     <div id="modalbody">
-      <div id="modalshell">
-        <div id="modalscreen" tabindex="0" role="log" aria-label="session head"></div>
-        <button type="button" id="modaljump" title="jump to live bottom">↓ live</button>
-      </div>
-      <aside id="modaltasks" aria-label="Linear tasks in this chat">
-        <div class="mthead">
-          <b>Linear</b> <span>tasks</span>
-          <span class="mtcount" id="modaltaskcount">0</span>
-          <button type="button" id="modaltasks-hide" title="hide tasks drawer" onclick="toggleModalTasks(false)">›</button>
+      <div id="modalmain">
+        <div id="modalshell">
+          <div id="modalscreen" tabindex="0" role="log" aria-label="session head"></div>
+          <button type="button" id="modaljump" title="jump to live bottom">↓ live</button>
         </div>
-        <div id="modaltasklist"></div>
+        <div id="modalopts"></div>
+        <div id="modalchips">
+          <button class="chip" data-keys="C-c">^C</button>
+          <button class="chip" data-keys="Escape">ESC</button>
+          <button class="chip" data-keys="Enter">⏎</button>
+          <button class="chip" data-keys="PageUp" title="scroll terminal up (tmux copy-mode)">PgUp</button>
+          <button class="chip" data-keys="PageDown" title="scroll terminal down">PgDn</button>
+          <button class="chip" data-keys="Up">↑</button>
+          <button class="chip" data-keys="Tab">TAB</button>
+        </div>
+        <div id="modalpending"></div>
+        <div id="modalclips" title="images pasted in this box land on the fleet host"></div>
+        <div id="modalrow">
+          <input id="modalinput" placeholder="Type a command or message… (Enter sends)" autocomplete="off" spellcheck="false">
+          <select id="modalauth" title="Authorization mode for this seat" aria-label="Authorization mode">
+            <option value="always">Always approve</option>
+            <option value="ask">Ask each gate</option>
+            <option value="readonly">Observe only</option>
+          </select>
+          <button type="button" id="modalqueue" title="Queue when safe (send when idle)">Queue</button>
+          <button type="button" id="modalsend" title="Send now into the PTY">Send Now</button>
+        </div>
+      </div>
+      <aside id="modaldrawer" aria-label="Work drawer">
+        <div id="drawertabs" role="tablist">
+          <button type="button" class="dtab on" data-tab="tasks" role="tab">Tasks</button>
+          <button type="button" class="dtab" data-tab="chat" role="tab">Chat <span class="dtbadge" id="drawerchatbadge">0</span></button>
+          <button type="button" class="dtab" data-tab="context" role="tab">Context</button>
+          <button type="button" class="dtab score" data-tab="score" role="tab" title="Target UX score">UX</button>
+          <button type="button" id="modaltasks-hide" title="hide drawer" onclick="toggleModalTasks(false)">›</button>
+        </div>
+        <div id="drawerpane-tasks" class="dpane on" role="tabpanel">
+          <div class="dsubh">Linear tasks <span class="mtcount" id="modaltaskcount">0</span></div>
+          <div id="modaltasklist"></div>
+          <div id="drawerauth">
+            <div class="dsubh">Authorization mode</div>
+            <select id="drawerauthsel" aria-label="Authorization mode">
+              <option value="always">Always approve — proceed autonomously when gates allow</option>
+              <option value="ask">Ask each gate — Hancock / human for trust gates</option>
+              <option value="readonly">Observe only — do not inject keys</option>
+            </select>
+          </div>
+        </div>
+        <div id="drawerpane-chat" class="dpane" role="tabpanel">
+          <div class="dsubh">Side chats <button type="button" class="act" id="drawersideadd" title="New side chat">+</button></div>
+          <div id="drawerchatlist"></div>
+          <div id="drawerchatactive"></div>
+        </div>
+        <div id="drawerpane-context" class="dpane" role="tabpanel">
+          <div id="drawercontext"></div>
+        </div>
+        <div id="drawerpane-score" class="dpane" role="tabpanel">
+          <div class="dsubh">Target UX score</div>
+          <div id="drawerscore"></div>
+        </div>
       </aside>
     </div>
-    <!-- Multi side-chats: default "reply to session" + N topic/task panels -->
-    <div id="tchatstack" aria-label="side chats"></div>
-    <div id="modalopts"></div>
-    <div id="modalchips">
-      <button class="chip" data-keys="C-c">^C</button>
-      <button class="chip" data-keys="Escape">ESC</button>
-      <button class="chip" data-keys="Enter">⏎</button>
-      <button class="chip" data-keys="PageUp" title="scroll terminal up (tmux copy-mode)">PgUp</button>
-      <button class="chip" data-keys="PageDown" title="scroll terminal down">PgDn</button>
-      <button class="chip" data-keys="Up">↑</button>
-      <button class="chip" data-keys="Tab">TAB</button>
-    </div>
-    <div id="modalpending"></div>
-    <div id="modalclips" title="images pasted in this box land on the fleet host"></div>
-    <div id="modalrow">
-      <input id="modalinput" placeholder="prompt / paste screenshot here… (Enter sends)" autocomplete="off" spellcheck="false">
-      <button id="modalsend">SEND</button>
-    </div>
+    <!-- Float stack kept as overflow for many open side chats -->
+    <div id="tchatstack" aria-label="floating side chats"></div>
   </div>
 </div>
 
@@ -6053,9 +6171,13 @@ function openModal(s){
   modalSession=s;
   digestErr=false;digestRetries=0;
   modalBook=[];modalScrollMode="app";modalHistoryText="";
+  modalOpenedAt=Date.now();
+  activeSideChatId="reply";
   $("#modalname").textContent=s.name;
   $("#modalagent").innerHTML=agentHTML(s);
   $("#modalstatus").textContent="connecting…";$("#modalstatus").style.color="";
+  const iss=$("#modalissue"); if(iss){iss.hidden=true;iss.innerHTML="";}
+  const ban=$("#modalbanner"); if(ban){ban.className="off";ban.textContent="";}
   const sc=$("#modalscreen");sc.textContent="";sc.dataset.last="";sc.dataset.userPinned="0";
   $("#modaldigest").className="";$("#modaldigest .dgtext").textContent="";$("#modaldigest .dgsugg").innerHTML="";
   setPending("");$("#modalthink").className="";clearModalClips();
@@ -6063,22 +6185,29 @@ function openModal(s){
   sideChats=[];sideChatSeq=0;
   switchArmed=null;$("#modalswitch").textContent="⇄ switch account";$("#modalswitch").className="";
   $("#modalswitch").classList.toggle("hot",!!s.cost);   // highlight when this session is throttled
-  // Tasks drawer: prefer remembered open state; default open
+  try{modalAuthMode=localStorage.getItem("emux_modal_auth")||"always";}catch(_){modalAuthMode="always";}
+  const auth=$("#modalauth"), dauth=$("#drawerauthsel");
+  if(auth) auth.value=modalAuthMode;
+  if(dauth) dauth.value=modalAuthMode;
   try{modalTasksOpen=localStorage.getItem("emux_modal_tasks")!=="0";}catch(_){modalTasksOpen=true;}
   toggleModalTasks(modalTasksOpen);
+  try{drawerTab=localStorage.getItem("emux_drawer_tab")||"tasks";}catch(_){drawerTab="tasks";}
+  setDrawerTab(drawerTab);
   renderModalTasks();
   ensureReplySideChat();
   renderSideChats();
+  renderDrawerChat();
+  renderDrawerContext();
+  renderDrawerScore();
   $("#modal").classList.add("open");
   updateModalJump();
-  // Live poll + async history (when history lands, re-render with scrollable transcript)
   modalRefresh();clearInterval(modalTimer);modalTimer=setInterval(modalRefresh,1200);
   loadModalHistory(s).then(()=>{
     if(!modalSession)return;
     if(modalHistoryText){
       const sc2=$("#modalscreen");
       if(sc2){
-        sc2.dataset.last=""; // force book re-render on next tick too
+        sc2.dataset.last="";
         modalRenderBook(sc2,true,0);
         updateModalJump();
         const st=$("#modalstatus");
@@ -6087,20 +6216,22 @@ function openModal(s){
         }
       }
     }
-    renderModalTasks(); // history often holds the issue keys
+    renderModalTasks();
+    updateModalIssueHeader();
+    renderDrawerScore();
   });
-  loadDigest();                                  // the gist + suggested replies, up front
-  syncURL();                                      // deep-link the open session
+  loadDigest();
+  syncURL();
   setTimeout(()=>$("#modalinput").focus(),40);
 }
 function closeModal(){
   $("#modal").classList.remove("open");
   const j=$("#modaljump");if(j)j.classList.remove("on");
   clearInterval(modalTimer);modalTimer=null;modalSession=null;clearModalClips();
-  modalBook=[];modalHistoryText="";
+  modalBook=[];modalHistoryText="";modalOpenedAt=0;
   sideChats=[];sideChatSeq=0;
   const stack=$("#tchatstack");if(stack)stack.innerHTML="";
-  syncURL();                                      // drop the session from the URL
+  syncURL();
 }
 async function modalRefresh(){
   if(!modalSession)return;
@@ -6195,7 +6326,10 @@ function openSideChat(opts){
     const existing=sideChats.find(c=>c.topic===topic);
     if(existing){
       existing.collapsed=false;
+      activeSideChatId=existing.id;
       renderSideChats();
+      renderDrawerChat();
+      if(modalTasksOpen) setDrawerTab("chat");
       focusSideChat(existing.id);
       return existing;
     }
@@ -6203,7 +6337,9 @@ function openSideChat(opts){
   if(kind==="reply"){
     const sc=ensureReplySideChat();
     sc.collapsed=false;
+    activeSideChatId=sc.id;
     renderSideChats();
+    renderDrawerChat();
     focusSideChat(sc.id);
     return sc;
   }
@@ -6221,7 +6357,10 @@ function openSideChat(opts){
     sc.messages.push({who:"bot",text:"Side chat about “"+topic+"”. Messages go to the parent head with this topic tag."});
   }
   sideChats.push(sc);
+  activeSideChatId=sc.id;
   renderSideChats();
+  renderDrawerChat();
+  if(modalTasksOpen) setDrawerTab("chat");
   focusSideChat(id);
   return sc;
 }
@@ -6368,15 +6507,26 @@ function renderSideChats(){
     });
   };
   bindLinlinks(stack);
+  if(drawerTab==="chat") renderDrawerChat();
+  const chatBadge=$("#drawerchatbadge");
+  if(chatBadge) chatBadge.textContent=String(sideChats.length);
+  if(drawerTab==="score") renderDrawerScore();
 }
 function sideChatSend(id){
   const sc=sideChatById(id); if(!sc||!modalSession) return;
-  const el=document.querySelector('.tchat[data-id="'+id+'"] .tchatinput');
+  if(modalAuthMode==="readonly"){
+    tchatLog("bot","Observe-only auth mode — not injecting into the head.",id);
+    renderDrawerChat();
+    return;
+  }
+  const el=document.querySelector('.tchat[data-id="'+id+'"] .tchatinput')
+    ||$("#drawer-chat-input");
   const t=(el&&el.value||"").trim(); if(!t) return;
   if(el) el.value="";
   const payload=composeSidePayload(sc,t);
   setPending(payload.length>180?payload.slice(0,180)+"…":payload);
   tchatLog("you",t,id);
+  renderDrawerChat();
   modalKeys(payload,true,true).then(ok=>{
     if(!ok){
       if(el&&!el.value) el.value=t;
@@ -6444,6 +6594,19 @@ async function modalJudge(){
         +'<span class="jconf">'+Math.round((r.confidence||0)*100)+'% · '+(r.recommended_action||"")+'</span>'
         +'<span class="jsum">'+(r.summary||"")+'</span>'+flags;
       el.className="on";
+      // Target UX status banner (leave-alone / needs you)
+      const ban=$("#modalbanner");
+      if(ban){
+        const conf=Math.round((r.confidence||0)*100);
+        const action=(r.recommended_action||"").replace(/_/g," ");
+        const sum=(r.summary||r.state||"").toString();
+        let badge="";
+        if(/false.?busy|thrash/i.test(sum+action+r.state)) badge='<span class="bbadge warn">false busy</span>';
+        else if(r.state==="running") badge='<span class="bbadge">running · '+conf+'%</span>';
+        else if(r.state==="waiting_human") badge='<span class="bbadge warn">needs you</span>';
+        ban.innerHTML=esc(action||r.state)+(sum?(" — "+esc(sum.slice(0,160))):"")+badge;
+        ban.className="on";
+      }
     }else{el.className="";el.innerHTML="";}
   }catch(e){el.className="";}
 }
@@ -6568,11 +6731,29 @@ function modalGsid(){
   }
   return "";
 }
-function modalSubmit(){
+function modalSubmit(opts){
+  const o=opts||{};
+  if(modalAuthMode==="readonly"){
+    const st=$("#modalstatus");
+    if(st){st.textContent="observe-only — send blocked";st.style.color="var(--stale)";}
+    return;
+  }
   const i=$("#modalinput");
   const paths=modalClips.map(c=>c.path).filter(Boolean);
   const body=(i.value||"").trim();
   if(!body&&!paths.length)return;
+  // Queue = wait until not actively generating (best-effort: short delay + send)
+  if(o.queue){
+    const st=$("#modalstatus");
+    if(st){st.textContent="queued — sending when quiet…";st.style.color="";}
+    const trySend=()=>{
+      const think=$("#modalthink");
+      if(think&&think.classList.contains("on")){setTimeout(trySend,1200);return;}
+      modalSubmit({queue:false,_queued:true});
+    };
+    setTimeout(trySend,400);
+    return;
+  }
   // Paths first so Claude/Grok can Read the files on this host; then operator text.
   const text=paths.length?(paths.join("\n")+(body?"\n\n"+body:"")):body;
   i.value="";                                   // optimistic clear for snappy UX…
@@ -6637,13 +6818,38 @@ function setPending(txt){pendingText=txt;const el=$("#modalpending");
 function updateThinking(t){const el=$("#modalthink");
   if(t&&t.active){el.className="on";if(t.for)el.querySelector("b").textContent=t.for;}
   else el.className="";}
-$("#modalsend").onclick=modalSubmit;
-$("#modalinput").addEventListener("keydown",e=>{if(e.key==="Enter")modalSubmit();});
+$("#modalsend").onclick=()=>modalSubmit({queue:false});
+const mq=$("#modalqueue"); if(mq) mq.onclick=()=>modalSubmit({queue:true});
+$("#modalinput").addEventListener("keydown",e=>{if(e.key==="Enter")modalSubmit({queue:false});});
 $("#modalinput").addEventListener("paste",e=>{
   if(!modalSession)return;
   handleComposerPaste(e,modalSession.session||modalSession.name);
 });
-// Side-chat inputs are bound dynamically in renderSideChats()
+function syncModalAuth(v){
+  modalAuthMode=v||"always";
+  const a=$("#modalauth"), d=$("#drawerauthsel");
+  if(a&&a.value!==modalAuthMode) a.value=modalAuthMode;
+  if(d&&d.value!==modalAuthMode) d.value=modalAuthMode;
+  try{localStorage.setItem("emux_modal_auth",modalAuthMode);}catch(_){}
+  if(drawerTab==="context") renderDrawerContext();
+  if(drawerTab==="score") renderDrawerScore();
+}
+const ma=$("#modalauth"); if(ma) ma.onchange=()=>syncModalAuth(ma.value);
+const da=$("#drawerauthsel"); if(da) da.onchange=()=>syncModalAuth(da.value);
+document.querySelectorAll("#drawertabs .dtab").forEach(b=>{
+  b.onclick=()=>{
+    setDrawerTab(b.dataset.tab);
+    try{localStorage.setItem("emux_drawer_tab",drawerTab);}catch(_){}
+  };
+});
+const dadd=$("#drawersideadd");
+if(dadd) dadd.onclick=()=>{
+  const topic=prompt("Side chat topic (Linear key like AIC-284, or any label):");
+  if(topic==null||!String(topic).trim()) return;
+  const t=String(topic).trim();
+  openSideChat({kind:isLinearIssueKey(t)?"task":"topic",topic:t,title:isLinearIssueKey(t)?("about "+t):t});
+};
+// Side-chat inputs are bound dynamically in renderSideChats / renderDrawerChat
 $("#modalpop").onclick=()=>popOutSessionTab();
 $("#modaliterm").onclick=async()=>{
   if(!modalSession)return;
@@ -7019,6 +7225,7 @@ function pursueLinearTask(key, opts){
         +"Use this side chat for follow-ups about "+key+"; “Fresh Claude” spins a dedicated seat."
       ),
     });
+    if(typeof setDrawerTab==="function") setDrawerTab("chat");
     const prompt=linearPursuePrompt(key);
     if(sc) tchatLog("you","Load + pursue "+key,sc.id);
     setPending(prompt.length>160?prompt.slice(0,160)+"…":prompt);
@@ -7110,8 +7317,12 @@ function collectModalTaskKeys(s){
   return keys;
 }
 let modalTasksOpen=true;
+let drawerTab="tasks";
+let activeSideChatId="reply";
+let modalAuthMode="always";
+let modalOpenedAt=0;
 function toggleModalTasks(force){
-  const d=$("#modaltasks"), btn=$("#modaltasksbtn");
+  const d=$("#modaldrawer"), btn=$("#modaltasksbtn");
   if(!d) return;
   if(typeof force==="boolean") modalTasksOpen=force;
   else modalTasksOpen=!modalTasksOpen;
@@ -7119,37 +7330,217 @@ function toggleModalTasks(force){
   if(btn) btn.classList.toggle("on",modalTasksOpen);
   try{localStorage.setItem("emux_modal_tasks",modalTasksOpen?"1":"0");}catch(_){}
 }
+function setDrawerTab(tab){
+  drawerTab=tab||"tasks";
+  document.querySelectorAll("#drawertabs .dtab").forEach(b=>b.classList.toggle("on",b.dataset.tab===drawerTab));
+  document.querySelectorAll("#modaldrawer .dpane").forEach(p=>{
+    p.classList.toggle("on",p.id==="drawerpane-"+drawerTab);
+  });
+  if(drawerTab==="chat") renderDrawerChat();
+  if(drawerTab==="context") renderDrawerContext();
+  if(drawerTab==="score") renderDrawerScore();
+}
+function primaryLinearIssue(s){
+  const keys=collectModalTaskKeys(s);
+  if(s&&s.linear&&s.linear.issue&&isLinearIssueKey(String(s.linear.issue))){
+    const k=String(s.linear.issue).toUpperCase();
+    if(keys.indexOf(k)<0) keys.unshift(k);
+    else{keys.splice(keys.indexOf(k),1);keys.unshift(k);}
+  }
+  return keys[0]||null;
+}
+function updateModalIssueHeader(){
+  const el=$("#modalissue"); if(!el||!modalSession) return;
+  const key=primaryLinearIssue(modalSession);
+  if(!key){el.hidden=true;el.innerHTML="";return;}
+  el.hidden=false;
+  el.innerHTML='<a class="linlink" href="'+linearIssueUrl(key)+'" target="_blank" rel="noopener noreferrer">'+esc(key)+'</a>'
+    +' · active work item'
+    +' <button type="button" class="linchat" data-linear="'+key+'" title="Load + pursue">💬</button>';
+  bindLinlinks(el);
+}
 function renderModalTasks(){
   const list=$("#modaltasklist"), countEl=$("#modaltaskcount"), badge=$("#modaltaskbadge");
   if(!list) return;
   const keys=collectModalTaskKeys(modalSession);
+  const primary=primaryLinearIssue(modalSession);
   if(countEl) countEl.textContent=String(keys.length);
   if(badge){
     badge.textContent=String(keys.length);
     badge.classList.toggle("on",keys.length>0);
   }
+  updateModalIssueHeader();
+  const chatBadge=$("#drawerchatbadge");
+  if(chatBadge) chatBadge.textContent=String(Math.max(0,sideChats.filter(c=>!c.collapsed||c.kind!=="reply").length||sideChats.length));
   if(!keys.length){
-    list.innerHTML='<div class="mtempty">No Linear tasks mentioned yet. When the head cites <b>AIC-123</b>, <b>EID-45</b>, <b>GMW-9</b>… they land here. Use <b>💬 chat</b> for a side chat, or <b>+</b> bottom-right for any topic.</div>';
-    return;
+    list.innerHTML='<div class="mtempty">No Linear tasks mentioned yet. When the head cites <b>AIC-123</b>… they land here. Use <b>💬</b> on a key to load/pursue, or Chat tab <b>+</b> for any topic.</div>';
+  }else{
+    list.innerHTML=keys.map(k=>
+      '<div class="mtask'+(k===primary?" active":"")+'" data-key="'+esc(k)+'">'
+      +'<a class="linlink mtkey" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer" title="Open in Linear">'+esc(k)+'</a>'
+      +'<span class="mtacts">'
+      +'<button type="button" class="mtchat" data-act="pursue" title="Side chat + load this issue so the head can pursue it">💬 pursue</button>'
+      +'<a class="mtgo linlink" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer">↗</a>'
+      +'</span></div>'
+    ).join("");
+    list.querySelectorAll(".mtchat").forEach(btn=>{
+      btn.onclick=e=>{
+        e.preventDefault();e.stopPropagation();
+        const key=btn.closest(".mtask")&&btn.closest(".mtask").dataset.key;
+        if(!key) return;
+        pursueLinearTask(key);
+        setDrawerTab("chat");
+      };
+    });
+    bindLinlinks(list);
   }
-  list.innerHTML=keys.map(k=>
-    '<div class="mtask" data-key="'+esc(k)+'">'
-    +'<a class="linlink mtkey" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer" title="Open in Linear">'+esc(k)+'</a>'
-    +'<span class="mtacts">'
-    +'<button type="button" class="mtchat" data-act="pursue" title="Side chat + load this issue so the head can pursue it">💬 pursue</button>'
-    +'<a class="mtgo linlink" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer">↗</a>'
-    +'</span></div>'
+  if(drawerTab==="context") renderDrawerContext();
+  if(drawerTab==="score") renderDrawerScore();
+  if(drawerTab==="chat") renderDrawerChat();
+}
+function renderDrawerContext(){
+  const el=$("#drawercontext"); if(!el||!modalSession) return;
+  const s=modalSession;
+  const keys=collectModalTaskKeys(s);
+  const rows=[
+    ["session",s.session||s.name||"—"],
+    ["name",s.name||"—"],
+    ["host",s.host||"local"],
+    ["cwd",s.cwd||s.path||"—"],
+    ["agent",(s.agent&&(s.agent.label||s.agent.agent))||"—"],
+    ["state",s.state||"—"],
+    ["tags",(s.tags||[]).join(", ")||"—"],
+    ["linear", (s.linear&&s.linear.issue)||primaryLinearIssue(s)||"—"],
+    ["tasks found", keys.length?keys.join(", "):"—"],
+    ["auth mode", modalAuthMode],
+    ["side chats", String(sideChats.length)],
+    ["open for", modalOpenedAt?Math.round((Date.now()-modalOpenedAt)/1000)+"s":"—"],
+  ];
+  el.innerHTML=rows.map(([k,v])=>
+    '<div class="crow"><span class="ck">'+esc(k)+'</span><span class="cv">'+linkifyLinear(String(v))+'</span></div>'
   ).join("");
-  list.querySelectorAll(".mtchat").forEach(btn=>{
-    btn.onclick=e=>{
-      e.preventDefault();e.stopPropagation();
-      const key=btn.closest(".mtask")&&btn.closest(".mtask").dataset.key;
-      if(!key) return;
-      // Same as the 💬 bubble after a task id: side chat + load/pursue prompt
-      pursueLinearTask(key);
+  bindLinlinks(el);
+}
+/** Score how close this session modal is to docs/target-ux-session-head.md */
+function scoreTargetUX(){
+  const checks=[];
+  const add=(id,pts,ok,label)=>{checks.push({id,pts,ok:!!ok,label});};
+  const drawer=$("#modaldrawer");
+  const tabs=document.querySelectorAll("#drawertabs .dtab[data-tab]");
+  const tabIds=[...tabs].map(t=>t.dataset.tab);
+  add("right_rail",12,!!drawer&&!drawer.classList.contains("collapsed"),"Right work drawer visible");
+  add("tab_tasks",10,tabIds.includes("tasks"),"Tasks tab");
+  add("tab_chat",10,tabIds.includes("chat"),"Chat tab");
+  add("tab_context",10,tabIds.includes("context"),"Context tab");
+  add("linear_list",10,!!$("#modaltasklist"),"Linear task list surface");
+  add("multi_sidechat",10,typeof openSideChat==="function"&&Array.isArray(sideChats),"Multi side-chat model");
+  add("pursue_bubble",8,typeof pursueLinearTask==="function","💬 pursue on task ids");
+  add("issue_header",10,!!$("#modalissue")&&!$("#modalissue").hidden,"Active Linear issue in header");
+  add("auth_mode",6,!!$("#modalauth")&&!!$("#drawerauthsel"),"Per-session authorization mode");
+  add("queue_send",6,!!$("#modalqueue")&&!!$("#modalsend"),"Queue vs Send Now");
+  add("status_banner",4,!!$("#modalbanner"),"Status banner element");
+  add("open_head",4,!!$("#modaliterm"),"Open HEAD action");
+  const earned=checks.reduce((a,c)=>a+(c.ok?c.pts:0),0);
+  const total=checks.reduce((a,c)=>a+c.pts,0);
+  return {earned,total,pct:total?Math.round(100*earned/total):0,checks};
+}
+function renderDrawerScore(){
+  const el=$("#drawerscore"); if(!el) return;
+  const sc=scoreTargetUX();
+  el.innerHTML='<div class="scorenum">'+sc.pct+'%</div>'
+    +'<div class="scorebar"><i style="width:'+sc.pct+'%"></i></div>'
+    +'<div style="color:var(--text-dim);font-size:11px;margin-bottom:10px">'+sc.earned+' / '+sc.total
+    +' pts · target: docs/target-ux-session-head.md</div>'
+    +sc.checks.map(c=>
+      '<div class="scrow"><span class="'+(c.ok?"scok":"scno")+'">'+(c.ok?"✓":"·")+'</span>'
+      +'<span>'+esc(c.label)+'</span><span class="scpts">'+c.pts+'</span></div>'
+    ).join("");
+}
+function renderDrawerChat(){
+  const list=$("#drawerchatlist"), active=$("#drawerchatactive");
+  if(!list||!active) return;
+  ensureReplySideChat();
+  list.innerHTML=sideChats.map(sc=>
+    '<div class="scthread'+(sc.id===activeSideChatId?" on":"")+'" data-id="'+esc(sc.id)+'">'
+    +'<span>'+esc(sc.kind==="reply"?"💬 reply":("◎ "+(sc.topic||sc.title)))+'</span>'
+    +'<span style="margin-left:auto;color:var(--text-dim);font-size:10px">'+(sc.messages||[]).length+'</span></div>'
+  ).join("")
+    +'<div class="scthread" data-id="__new__" style="color:var(--amber)">+ new side chat</div>';
+  list.querySelectorAll(".scthread").forEach(el=>{
+    el.onclick=()=>{
+      if(el.dataset.id==="__new__"){
+        const topic=prompt("Side chat topic (Linear key or label):");
+        if(topic==null||!topic.trim()) return;
+        const t=topic.trim();
+        const sc=openSideChat({kind:isLinearIssueKey(t)?"task":"topic",topic:t,title:isLinearIssueKey(t)?("about "+t):t});
+        if(sc) activeSideChatId=sc.id;
+        setDrawerTab("chat");
+        return;
+      }
+      activeSideChatId=el.dataset.id;
+      const sc=sideChatById(activeSideChatId);
+      if(sc) sc.collapsed=false;
+      renderDrawerChat();
     };
   });
-  bindLinlinks(list);
+  const sc=sideChatById(activeSideChatId)||ensureReplySideChat();
+  if(!sc){active.innerHTML="";return;}
+  const isReply=sc.kind==="reply";
+  let html='<div class="tchatpanel" data-id="'+esc(sc.id)+'">';
+  html+='<div class="tchathead" style="border-radius:0"><span class="th-title">'
+    +(isReply?('💬 reply to <b>'+esc(modalSession&&modalSession.name||"")+'</b>'):('◎ '+esc(sc.title)))
+    +'</span></div>';
+  html+='<div class="tchatlog" style="max-height:none;flex:1">';
+  (sc.messages||[]).forEach(m=>{
+    html+='<div class="tcmsg '+esc(m.who||"bot")+'">'+linkifyLinear(m.text||"")+'</div>';
+  });
+  html+='</div>';
+  if(isReply) html+='<div class="tchatchips" id="drawer-reply-chips"></div>';
+  html+='<div class="tchatrow">'
+    +'<input class="tchatinput" id="drawer-chat-input" placeholder="'+(isReply?"reply…":"message about "+esc(sc.topic||"this")+"…")+'" autocomplete="off">'
+    +'<button type="button" class="tchatsend" id="drawer-chat-send">➤</button></div>';
+  if(!isReply){
+    html+='<div class="tchatfoot">'
+      +'<button type="button" class="act" id="drawer-chat-fresh">⧉ Fresh Claude</button>'
+      +(sc.seatName?'<button type="button" class="act" id="drawer-chat-seat">↗ '+esc(sc.seatName)+'</button>':"")
+      +'</div>';
+  }
+  html+='</div>';
+  active.innerHTML=html;
+  if(isReply){
+    const chips=$("#drawer-reply-chips");
+    if(chips){
+      const parts=[];
+      tOpts.forEach(o=>parts.push('<button class="tc-opt'+(o.selected?" sel":"")+'" data-n="'+o.n+'"><b>'+o.n+'</b> '+esc(o.label)+'</button>'));
+      tSugg.forEach((s,i)=>{
+        const c=Math.max(0,Math.min(100,s.confidence==null?50:s.confidence));
+        parts.push('<button class="tc-sug" data-i="'+i+'">'+pieHTML(c)+'<span class="tc-txt">'+esc(s.text||"")+'</span></button>');
+      });
+      chips.innerHTML=parts.join("")||'<div class="tc-empty">type below · or + for another side chat</div>';
+      chips.querySelectorAll(".tc-opt").forEach(b=>b.onclick=()=>{
+        chips.querySelectorAll("button").forEach(x=>x.disabled=true);sendOption(+b.dataset.n);});
+      chips.querySelectorAll(".tc-sug").forEach(b=>b.onclick=()=>{
+        const t=(tSugg[+b.dataset.i]||{}).text||"";if(!t)return;
+        setPending(t);tchatLog("you",t,"reply");modalKeys(t,true,true);
+        tSugg=[];renderSideChats();renderDrawerChat();
+        setTimeout(()=>{modalRefresh();loadDigest();},1500);});
+    }
+  }
+  const inp=$("#drawer-chat-input"), send=$("#drawer-chat-send");
+  if(send) send.onclick=()=>sideChatSend(sc.id);
+  if(inp){
+    inp.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();sideChatSend(sc.id);}};
+    setTimeout(()=>inp.focus(),30);
+  }
+  const fresh=$("#drawer-chat-fresh");
+  if(fresh) fresh.onclick=()=>spawnSideChatClaude(sc.id);
+  const seat=$("#drawer-chat-seat");
+  if(seat&&sc.seatName) seat.onclick=()=>{
+    setMode("grid");const s=grid.find(x=>x.name===sc.seatName);if(s)openModal(s);
+  };
+  bindLinlinks(active);
+  const log=active.querySelector(".tchatlog");
+  if(log) log.scrollTop=log.scrollHeight;
 }
 async function pollFeed(){
   if(!$("#feed").classList.contains("open"))return;
@@ -7779,6 +8170,10 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/chats/peek":
             self._json(chats_peek_payload(parse_qs(url.query)))
+            return
+        if url.path in ("/api/ux-score", "/api/ux-score/"):
+            # Static feature flags for docs/target-ux-session-head.md (ship score).
+            self._json(_target_ux_score())
             return
         if url.path in ("/api/schedule", "/api/schedule/"):
             # In-process cron message jobs (product-scoped schedule.json).

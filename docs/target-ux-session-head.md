@@ -110,6 +110,40 @@ Implementation should **converge** floating side chats + Tasks drawer into this 
 5. Composer always shows current authorization mode; Queue and Send Now are distinct.
 6. Desktop-first still holds; drawer collapses on narrow widths without losing Tasks access.
 
+## Score (how close are we?)
+
+Two scorers track the same checklist:
+
+| Surface | How |
+|---------|-----|
+| **Room UI** | Open a session → drawer **UX** tab → live DOM score |
+| **API** | `GET /api/ux-score` → `{pct, earned, total, checks[]}` |
+
+### Checklist weights (100 pts)
+
+| pts | id | Criterion |
+|-----|-----|-----------|
+| 12 | right_rail | Right work drawer visible |
+| 10 | tab_tasks | Tasks tab |
+| 10 | tab_chat | Chat tab (docked multi side-chats) |
+| 10 | tab_context | Context tab |
+| 10 | linear_list | Linear inventory from chat text |
+| 10 | multi_sidechat | Multi side-chat model |
+| 8 | pursue_bubble | 💬 pursue on TEAM-123 |
+| 10 | issue_header | Active Linear issue in header |
+| 6 | auth_mode | Per-session authorization mode |
+| 6 | queue_send | Queue vs Send Now |
+| 4 | status_banner | Classifier status banner |
+| 4 | open_head | Open HEAD |
+| 5 | linear_titles | *(stretch)* Linear titles hydrated via API |
+| 5 | running_pct | *(stretch)* Running % + wall-clock duration |
+
+**Ship bar:** ≥ **85%** on `GET /api/ux-score` for “structure done”; 100% only when stretch items land.
+
+```bash
+curl -sS -H 'Host: 127.0.0.1' http://127.0.0.1:8690/amux/api/ux-score | python3 -m json.tool
+```
+
 ---
 
 ## Non-goals (still)

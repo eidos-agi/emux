@@ -1,6 +1,12 @@
 # Changelog
 
 
+## v0.68.14
+
+### Features
+- **Target session-head UX (v1):** left head + right **Tasks / Chat / Context / UX** drawer. Active Linear issue in header; docked multi side-chats; auth mode; Queue vs Send Now; classifier status banner.
+- **UX score:** `GET /api/ux-score` + drawer **UX** tab — weighted checklist against `docs/target-ux-session-head.md` (ship bar ≥85%).
+
 ## v0.68.13
 
 ### Features
