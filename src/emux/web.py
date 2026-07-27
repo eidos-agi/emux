@@ -2105,7 +2105,7 @@ def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
     Query params (parse_qs style): match, status (comma-separated), tools,
     limit, recent_hours, q (text search), sort (priority|mtime),
     refresh=1 to force a full disk re-index into ~/.config/*/chats.db.
-    Default match is greenmark when skin is gmux.
+    Default match: greenmark when skin is gmux; personal when skin is reevux.
     """
     q = q or {}
     try:
@@ -2117,7 +2117,12 @@ def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
     sk = _skin.active_skin()
     match_raw = (q.get("match") or [""])[0].strip()
     if not match_raw:
-        match_raw = "greenmark" if sk.id == "gmux" else "all"
+        if sk.id == "gmux":
+            match_raw = "greenmark"
+        elif sk.id == "reevux":
+            match_raw = "personal"
+        else:
+            match_raw = "all"
     status_raw = (q.get("status") or [""])[0].strip()
     statuses = [s.strip() for s in status_raw.split(",") if s.strip()] or None
     tools_raw = (q.get("tools") or ["claude,grok"])[0]
@@ -2405,10 +2410,16 @@ def _gsid_from_registry(session: str) -> tuple[str | None, str | None, list[str]
 
 
 def steer_payload(data: dict[str, Any]) -> dict[str, Any]:
-    """Steer a session: Grok headless when possible, else tmux send-keys (PTY).
+    """Steer a session: Grok headless/ACP when possible, else tmux send-keys (PTY).
 
-    Body: prompt|keys, session (tmux name), mode=auto|headless|pty,
+    Body: prompt|keys, session (tmux name), mode=auto|headless|acp|pty,
     session_id (Grok/Claude transcript uuid), cwd, timeout, tool.
+
+    Modes:
+    - auto — Grok (tags/gsid) → headless; else PTY
+    - headless — ``grok -p`` one-shot (Phase B)
+    - acp — ``grok agent stdio`` ACP prompt (Phase C)
+    - pty — tmux send-keys into live pane
     """
     prompt = (data.get("prompt") or data.get("keys") or data.get("text") or "").strip()
     session = (data.get("session") or data.get("name") or "").strip()
@@ -2418,7 +2429,7 @@ def steer_payload(data: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "missing_session"}
 
     mode = (data.get("mode") or "auto").strip().lower()
-    if mode not in ("auto", "headless", "pty"):
+    if mode not in ("auto", "headless", "acp", "pty"):
         mode = "auto"
 
     tool_hint, gsid_reg, tags = _gsid_from_registry(session)
@@ -2434,6 +2445,34 @@ def steer_payload(data: dict[str, Any]) -> dict[str, Any]:
     if mode == "auto":
         want_headless = tool == "grok" or bool(gsid) or "grok" in tags
         mode = "headless" if want_headless else "pty"
+
+    if mode == "acp":
+        try:
+            from . import acp_grok as acp
+            from . import grok_control as gc
+        except ImportError as exc:
+            return {"ok": False, "error": f"acp_unavailable:{exc}", "mode": "acp"}
+        if not gc.resolve_grok_bin() and not data.get("bin_path"):
+            return {
+                "ok": False,
+                "error": "grok_not_found",
+                "mode": "acp",
+                "hint": "set EMUX_GROK_BIN or install grok",
+            }
+        result = acp.run_acp_prompt(
+            prompt,
+            session_id=gsid or None,
+            cwd=cwd,
+            bin_path=(data.get("bin_path") or None),
+            model=(data.get("model") or None),
+            timeout=timeout,
+            always_approve=bool(data.get("always_approve", True)),
+        )
+        result["tmux_session"] = session
+        result["tool"] = "grok"
+        if result.get("ok") and data.get("also_pty"):
+            send_payload(session, prompt, literal=True, enter=True, host=_session_host(session))
+        return result
 
     if mode == "headless":
         try:
@@ -3641,7 +3680,7 @@ function shown(){
 // Fix: brand (eidos/greenmark/reeves) × mode (light/dark) both go through
 // applyTheme(), which sets the CSS variables for real.
 const SKIN_ID="__SKIN_ID__";
-const BRAND_DEFAULT=SKIN_ID==="gmux"?"greenmark":"eidos";
+const BRAND_DEFAULT=SKIN_ID==="gmux"?"greenmark":(SKIN_ID==="reevux"?"reeves":"eidos");
 const MODE_KEY="emux_mode_"+SKIN_ID;
 const BRAND_KEY="emux_brand_"+SKIN_ID;
 const THEMES={
@@ -5754,7 +5793,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             self._json(_resume_chat_in_fleet(data))
             return
         if url.path == "/api/steer":
-            # Grok headless (preferred) or tmux PTY send — Phase B control plane
+            # Grok headless (B) / ACP (C) / tmux PTY — control plane steer
             self._json(steer_payload(data if isinstance(data, dict) else {}))
             return
         if url.path == "/api/reply":
@@ -5846,7 +5885,13 @@ def launchd_plist(
     skin: str = "",
 ) -> str:
     """A ready-to-install launchd plist that keeps `emux web` running and
-    restarts it on crash / login. Print with `emux web --print-launchd`."""
+    restarts it on crash / login. Print with `emux web --print-launchd`.
+
+    Includes launchd-safe PATH + absolute EMUX_*_BIN when resolvable (launchd
+    otherwise ships PATH=/usr/bin:/bin only).
+    """
+    from pathlib import Path
+
     emux = sys.argv[0]
     extra = ""
     if public_origin:
@@ -5855,11 +5900,55 @@ def launchd_plist(
         extra += f"\n    <string>--public-path</string><string>{public_path}</string>"
     if skin:
         extra += f"\n    <string>--skin</string><string>{skin}</string>"
+
+    home = str(Path.home())
+    path_parts = [
+        f"{home}/.local/bin",
+        f"{home}/.grok/bin",
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ]
+    path_val = ":".join(path_parts)
+    skin_key = (skin or os.environ.get("EMUX_SKIN") or "").strip().lower()
+    if skin_key in ("reevux", "reeves", "personal", "rvs"):
+        label = "com.reeves.reevux-web"
+        log_base = "reevux-web"
+    elif skin_key in ("gmux", "greenmux", "greenmark"):
+        label = "com.eidos.gmux-web"
+        log_base = "gmux-web"
+    elif skin_key in ("amux", "aic"):
+        label = "com.eidos.amux-web"
+        log_base = "amux-web"
+    else:
+        label = "com.eidos.emux-web"
+        log_base = "emux-web"
+
+    env_items: list[tuple[str, str]] = [
+        ("HOME", home),
+        ("PATH", path_val),
+        ("EMUX_SKIN", skin_key or "emux"),
+    ]
+    grok = _resolve_cli("grok") or os.environ.get("EMUX_GROK_BIN") or ""
+    claude = _resolve_cli("claude") or os.environ.get("EMUX_CLAUDE_BIN") or ""
+    if grok:
+        env_items.append(("EMUX_GROK_BIN", grok))
+    if claude:
+        env_items.append(("EMUX_CLAUDE_BIN", claude))
+    if skin_key in ("reevux", "reeves", "personal", "rvs"):
+        env_items.append(("EMUX_CONNECT_SSH", os.environ.get("EMUX_CONNECT_SSH") or "mac-mini-01"))
+    env_xml = "\n".join(
+        f"    <key>{k}</key><string>{v}</string>" for k, v in env_items
+    )
+
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.eidos.emux-web</string>
+  <key>Label</key><string>{label}</string>
   <key>ProgramArguments</key>
   <array>
     <string>{emux}</string>
@@ -5867,10 +5956,15 @@ def launchd_plist(
     <string>--host</string><string>{host}</string>
     <string>--port</string><string>{port}</string>{extra}
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+{env_xml}
+  </dict>
+  <key>WorkingDirectory</key><string>{home}</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/emux-web.log</string>
-  <key>StandardErrorPath</key><string>/tmp/emux-web.err.log</string>
+  <key>StandardOutPath</key><string>/tmp/{log_base}.log</string>
+  <key>StandardErrorPath</key><string>/tmp/{log_base}.err.log</string>
 </dict>
 </plist>
 """
@@ -6255,18 +6349,25 @@ document.getElementById("copyai").onclick=function(){{
 
 
 def resolve_connect_ssh_host(public_path: str = "") -> str | None:
-    """SSH destination for connect-copy. Env wins; gmux skin or public path ⇒ rentamac."""
+    """SSH destination for connect-copy.
+
+    Env wins. Else skin defaults: gmux → rentamac, reevux → mac-mini-01.
+    public_path without skin still defaults to rentamac (gmux go-door legacy).
+    """
     env = (os.environ.get("EMUX_CONNECT_SSH") or os.environ.get("GREENMUX_HOST") or "").strip()
     if env:
         return env
-    if public_path:  # reverse-proxied status ⇒ attach on the mux host
-        return "rentamac"
     try:
         from .skin import active_skin
-        if active_skin().id == "gmux":
+        sid = active_skin().id
+        if sid == "gmux":
             return "rentamac"
+        if sid == "reevux":
+            return "mac-mini-01"
     except Exception:
         pass
+    if public_path:  # reverse-proxied status without skin ⇒ attach on mux host
+        return "rentamac"
     return None
 
 

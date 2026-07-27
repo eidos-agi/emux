@@ -20,7 +20,7 @@ Reference tree (when present): `/tmp/grok-build` (open-source crates under
 | Interactive resume | `grok --resume <id>` (`-r`) | `resume_argv`, `resume_shell_command` |
 | Headless single-turn | `grok -p "…"` (`--single`) | `headless_steer_argv` |
 | Headless resume | `grok -p "…" -r <id>` or `-c` | `headless_steer_argv(session_id=…)` |
-| ACP / stdio agent | `grok agent stdio` | `acp_stdio_argv` (argv only) |
+| ACP / stdio agent | `grok agent stdio` | `acp_stdio_argv`, `emux.acp_grok` (Phase C client) |
 | Hooks (file-based) | `~/.grok/hooks/*.json`, `<proj>/.grok/hooks/` | `write_hooks_bridge`, `hook_bridge_payload` |
 
 ## Open-source crate map
@@ -54,13 +54,19 @@ Reference tree (when present): `/tmp/grok-build` (open-source crates under
 10. **Room modal** — Grok sessions SEND via `/api/steer` first, PTY fallback on failure.
 11. **Resume tags** — `gsid:<uuid>` / `csid:<uuid>` so steer can resume the right transcript.
 
+### Phase C (ACP client — first vertical)
+
+12. **`emux.acp_grok.GrokAcpClient`** — NDJSON JSON-RPC over `grok agent --always-approve stdio`.
+13. **`run_acp_prompt`** — one-shot initialize → session/load|new → session/prompt → close.
+14. **`POST /api/steer` `mode=acp`** — same body as headless; returns `{mode: acp, text, session_id, …}`.
+15. **Reverse-RPC** — auto-approve permission requests; refuse unsupported fs/terminal methods so turns never hang.
+
 ## Remaining gaps for full ACP
 
-- **Protocol client** — spawn `acp_stdio_argv()`, speak agent-client-protocol (initialize / session/new|load / prompt / permissions). Today we only return the command list.
-- **Session load over ACP** — map emux chat rows → `session/load` with Grok session UUIDs; handle fork vs resume.
-- **Permission / hook adapter** — translate emux grant decisions into Grok hook JSON responses (Claude-shaped `hook_delegation` is not drop-in).
-- **Leader mode** — multi-client share via `grok agent --leader` / `~/.grok/leader.sock`; emux fleet still uses one tmux pane per resume.
-- **Streaming UI** — web control room still drives tmux panes; ACP would enable non-TUI supervision without screen scrape.
+- **Long-lived process manager** — keep ACP child registered in emux registry (`tags: acp,grok`); multi-turn without re-spawn.
+- **Streaming UI** — pipe `session/update` into fleet feed / room modal (today one-shot collects text then returns).
+- **Permission / hook adapter** — map Hancock grants into ACP permission outcomes (beyond always-approve).
+- **Leader mode** — multi-client share via `grok agent --leader` / `~/.grok/leader.sock`.
 - **Remote hosts** — chat resume remains local-only (transcript stores on the daemon host).
 
 ## Operator knobs

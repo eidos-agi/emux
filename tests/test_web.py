@@ -68,10 +68,19 @@ def test_send_payload_named_key(monkeypatch):
     from emux import server, web
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
     calls: list[list[str]] = []
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (calls.append(args), (0, "", ""))[1])
+
+    def _run(args, timeout=10, host=None, socket=None, **kw):
+        calls.append(args)
+        # shell_warn probes pane_current_command first
+        if args and args[0] == "display-message":
+            return (0, "claude", "")
+        return (0, "", "")
+
+    monkeypatch.setattr(server, "_run_tmux", _run)
     result = web.send_payload("main", "C-c", literal=False, enter=False)
     assert result["ok"]
-    assert calls == [["send-keys", "-t", "main", "C-c"]]
+    sends = [c for c in calls if c and c[0] == "send-keys"]
+    assert sends == [["send-keys", "-t", "main", "C-c"]]
 
 
 def test_capture_payload_reports_failure(monkeypatch):
@@ -283,6 +292,24 @@ def test_gmux_skin_rebrands_without_forking():
     skin.set_active_skin("emux")
 
 
+def test_reevux_skin_personal_branding():
+    from emux import skin
+    s = skin.get_skin("reevux")
+    assert s.id == "reevux" and s.brand == "REEVUX"
+    assert s.product == "reevux" and "personal" in s.tagline.lower()
+    assert s.engine_label == "emux"
+    assert s.light.accent.lower() == "#3b5ba5"  # Reeves slate blue, not gmux green
+    assert s.light.accent.lower() != "#1b7a4e"
+    assert "skin-logo" in s.logo_svg and "REEVUX" in s.logo_html()
+    stamped = s.apply("__BRAND__ · __STATUS_TITLE__ · __ENGINE__", "9.9.9")
+    assert "REEVUX" in stamped and "reevux status" in stamped and "emux 9.9.9" in stamped
+    assert skin.get_skin("reeves").id == "reevux"
+    assert skin.get_skin("personal").id == "reevux"
+    skin.set_active_skin("reevux")
+    assert skin.active_skin().product == "reevux"
+    skin.set_active_skin("emux")
+
+
 def test_http_simple_filters_and_peek(daemon):
     """Default is live-only; peek=name captures pane (server-rendered)."""
     status, body = _get(daemon + "/simple")
@@ -306,7 +333,7 @@ def test_discover_local_tmux_sockets_includes_default():
 
 
 def test_connect_command_ssh_and_local():
-    from emux import web
+    from emux import skin, web
     assert web.connect_command("greenmux-proof", ssh_host="rentamac") == (
         "ssh -t rentamac 'tmux attach -t greenmux-proof'"
     )
@@ -316,8 +343,14 @@ def test_connect_command_ssh_and_local():
     assert web.connect_command("s1", socket_path="/tmp/tmux-501/x") == (
         "tmux -S /tmp/tmux-501/x attach -t s1"
     )
+    skin.set_active_skin("emux")
     assert web.resolve_connect_ssh_host("/gmux") == "rentamac"
     assert web.resolve_connect_ssh_host("") is None
+    skin.set_active_skin("gmux")
+    assert web.resolve_connect_ssh_host("") == "rentamac"
+    skin.set_active_skin("reevux")
+    assert web.resolve_connect_ssh_host("") == "mac-mini-01"
+    skin.set_active_skin("emux")
 
 
 def test_normalize_public_path():
