@@ -81,24 +81,22 @@ _LOGO_REEVUX = (
     "</svg>"
 )
 
-# AIC feather mark (from AIC Holdings / Meridian brand plate) — leaf/quill, fill=currentColor
+# AIC feather mark (from AIC Holdings / Meridian brand plate) — leaf/quill, fill=currentColor.
+# Silhouette: rounded lower-left body, pointed tip upper-right, concave cut on lower-right.
 _LOGO_AMUX = (
     '<svg class="skin-logo" viewBox="0 0 64 64" width="36" height="36" '
     'aria-hidden="true" xmlns="http://www.w3.org/2000/svg">'
-    # Soft plate so the white feather reads on light themes too
     '<rect x="4" y="4" width="56" height="56" rx="12" fill="currentColor" opacity=".10"/>'
-    # Feather: curved body, pointed tip upper-right, soft trailing edge (matches brand mark)
     '<path fill="currentColor" d="'
-    "M18 46 "
-    "C16 40 15 32 17 24 "
-    "C19 16 24 11 31 10 "
-    "C38 9 45 12 48 18 "
-    "C51 24 49 31 44 35 "
-    "C40 38 35 39 31 38 "
-    "C36 34 38 28 36 23 "
-    "C34 18 28 16 24 19 "
-    "C20 22 18 29 18 36 "
-    "C18 40 18 44 18 46 Z"
+    # tip (upper-right) → upper arc → left body → bottom → concave cut → back to tip
+    "M46 14 "
+    "C40 12 32 12 24 16 "
+    "C16 20 12 28 12 36 "
+    "C12 44 16 50 24 52 "
+    "C30 53 34 50 36 46 "
+    "C32 48 26 46 24 40 "
+    "C22 34 24 28 30 24 "
+    "C36 20 42 18 46 14 Z"
     '"/>'
     "</svg>"
 )

@@ -324,7 +324,7 @@ def test_amux_skin_aic_branding():
     assert s.light.accent.lower() != "#3b5ba5"  # not reevux slate
     assert "skin-logo" in s.logo_svg and "AMUX" in s.logo_html()
     # feather path (not the old A-triangle)
-    assert "M18 46" in s.logo_svg
+    assert "M46 14" in s.logo_svg
     stamped = s.apply("__BRAND__ · __STATUS_TITLE__ · __ENGINE__", "9.9.9")
     assert "AMUX" in stamped and "amux status" in stamped and "emux 9.9.9" in stamped
     assert skin.get_skin("aic").id == "amux"
