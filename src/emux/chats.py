@@ -68,6 +68,9 @@ _AIC_RE = re.compile(
     r"pay-app|"
     r"kennedale|"
     r"anthracite|"
+    r"northstar|"
+    r"iran-war|"
+    r"12thman|"
     r"(?:^|/)aic(?:-|_|\b|/)|"
     r"(?:^|/)arp(?:-|_|\b|/)|"
     r"\bamux\b|"
@@ -78,6 +81,18 @@ _AIC_RE = re.compile(
     r"bot-farm|"
     r"sequoia|"
     r"aic-mgr",
+    re.I,
+)
+
+# Directrux meta product only — NOT the whole machine.
+# Meta steers other planes; it must not become a dump of every local chat.
+_DIRECTRUX_RE = re.compile(
+    r"directrux|"
+    r"\.config/directrux|"
+    r"notes/fleet/directrux|"
+    r"RVS-362|"
+    r"meta control plane|"
+    r"com\.eidos\.directrux",
     re.I,
 )
 
@@ -201,6 +216,16 @@ def _priority(
             "g702",
             "g703",
             "waiver_ledger",
+            # Northstar CEO news / Iran daily (AIC Ledger)
+            "northstar",
+            "iran war",
+            "iran-war",
+            "us-iran",
+            "12th man",
+            "12thman",
+            "ceo news",
+            "aic ledger",
+            "ledger reliability",
         )
     ):
         score += 35
@@ -311,6 +336,8 @@ def _match_pattern(match: str | None) -> re.Pattern[str] | None:
         return _PERSONAL_RE
     if key in ("aic", "amux", "holdings"):
         return _AIC_RE
+    if key in ("directrux", "director", "meta"):
+        return _DIRECTRUX_RE
     return re.compile(match, re.I)
 
 
