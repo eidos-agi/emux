@@ -3,7 +3,7 @@
   emux              → TUI picker (registered + live tmux sessions)
   emux new          → new mission: chat → confirm spec → spawn (same as 'n' in the TUI)
   emux mcp          → start the MCP server
-  emux web          → start the web daemon (chat-style session monitor)
+  emux web          → start the web daemon (room: sessions, heads, CHATS)
   emux register …   → CLI register
   emux ls           → list registered + live sessions
   emux send …        → send keys to a registered/live session
@@ -1540,7 +1540,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_web = sub.add_parser(
         "web",
-        help="start the web daemon — monitor sessions in a browser (grid/groups/activity/flow/chat)",
+        help="start the web daemon — room over sessions (grid/groups/activity/flow/head; CHATS=past)",
     )
     p_web.add_argument(
         "--host",
