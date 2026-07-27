@@ -1959,7 +1959,8 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>emux — control room</title>
+<title>__ROOM_TITLE__</title>
+<style id="skin-accent">:root{--amber:__ACCENT__;--live:__ACCENT__;}</style>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230c0a07'/><rect x='3' y='3' width='10' height='10' rx='2' fill='%23ffb000'/></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=VT323&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
@@ -2670,11 +2671,11 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
   </div>
 </div>
 <aside id="side">
-  <div id="brand"><h1>EMUX</h1><small>control room</small></div>
+  <div id="brand"><h1>__BRAND__</h1><small>__TAGLINE__</small></div>
   <input id="filter" placeholder="filter sessions…" autocomplete="off" spellcheck="false">
   <div id="tagbar"></div>
   <div id="sessions"></div>
-  <footer id="footer">daemon · v__VERSION__</footer>
+  <footer id="footer">__PRODUCT_LINE__ · v__VERSION__</footer>
 </aside>
 <main id="main">
   <div id="topbar">
@@ -3039,8 +3040,8 @@ document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setMode(t.dataset.mod
 function updateChrome(){         // title, footer, tab counts (#1 #3 #4)
   const liveN=grid.filter(s=>s.live).length;
   const actN=grid.filter(s=>s.live&&hot(s)).length;
-  if(!flashOn)document.title="emux · "+liveN+" live";
-  $("#footer").textContent="daemon · v__VERSION__ · "+grid.length+" sessions";
+  if(!flashOn)document.title="__PRODUCT__ · "+liveN+" live";
+  $("#footer").textContent="__PRODUCT_LINE__ · v__VERSION__ · "+grid.length+" sessions";
   document.querySelectorAll(".tab").forEach(t=>{
     const m=t.dataset.mode;
     t.textContent=(m==="activity"&&actN)?BASE_TAB[m]+" · "+actN:BASE_TAB[m];
@@ -3531,7 +3532,7 @@ async function refreshScreen(){
         s.dataset.last=r.content;
         s.textContent=r.content.replace(/\s+$/,"")+"\n";
         const cur=document.createElement("span");cur.className="cursorblock";s.appendChild(cur);
-        if(document.hidden){flashOn=true;document.title="● emux — "+current.name;}  // title flash (#20)
+        if(document.hidden){flashOn=true;document.title="● __PRODUCT__ — "+current.name;}  // title flash (#20)
         if(wasPinned)scrollBottom();else $("#jump").style.display="block";          // jump pill (#11)
       }
     }else{
@@ -4208,8 +4209,10 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
     remote_controller_api: Any = None
 
     def _with_public_path(self, html: str) -> str:
-        """Stamp the reverse-proxy path prefix into HTML/JS placeholders."""
-        return html.replace("__PUBLIC_PATH__", self.public_path or "")
+        """Stamp reverse-proxy path + active skin into HTML/JS shells."""
+        from . import skin as _skin
+        html = html.replace("__PUBLIC_PATH__", self.public_path or "")
+        return _skin.active_skin().apply(html, __version__)
 
     def _controller_error(self, exc: Exception) -> None:
         from .remote_control.protocol import ProtocolError
@@ -4613,6 +4616,7 @@ def launchd_plist(
     port: int = DEFAULT_PORT,
     public_origin: str | None = None,
     public_path: str = "",
+    skin: str = "",
 ) -> str:
     """A ready-to-install launchd plist that keeps `emux web` running and
     restarts it on crash / login. Print with `emux web --print-launchd`."""
@@ -4622,6 +4626,8 @@ def launchd_plist(
         extra += f"\n    <string>--public-origin</string><string>{public_origin}</string>"
     if public_path:
         extra += f"\n    <string>--public-path</string><string>{public_path}</string>"
+    if skin:
+        extra += f"\n    <string>--skin</string><string>{skin}</string>"
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -4716,12 +4722,18 @@ def connect_command(
 
 
 def resolve_connect_ssh_host(public_path: str = "") -> str | None:
-    """SSH destination for connect-copy. Env wins; /gmux public path ⇒ rentamac."""
+    """SSH destination for connect-copy. Env wins; gmux skin or public path ⇒ rentamac."""
     env = (os.environ.get("EMUX_CONNECT_SSH") or os.environ.get("GREENMUX_HOST") or "").strip()
     if env:
         return env
-    if public_path:  # reverse-proxied greenmux status ⇒ attach on the mux host
+    if public_path:  # reverse-proxied status ⇒ attach on the mux host
         return "rentamac"
+    try:
+        from .skin import active_skin
+        if active_skin().id == "gmux":
+            return "rentamac"
+    except Exception:
+        pass
     return None
 
 
@@ -4972,13 +4984,14 @@ def simple_status_html(
     # meta-refresh keeps filters + peek
     refresh_url = _html.escape(f"{base}/{_qs()}")
 
-    return f"""<!doctype html>
+    html = f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="15;url={refresh_url}">
-<title>gmux status</title>
+<title>__STATUS_TITLE__</title>
+<style id="skin-accent">:root{{--on:__ACCENT__;--live:__ACCENT__;}}</style>
 <style>
   :root {{ --bg:#f7f8f3; --ink:#1d2b23; --dim:#5c6b61; --line:#d5ddd6;
            --live:#1a7a45; --stale:#8a6a2a; --card:#fff; --pill:#e8f5ee; --on:#203c31; }}
@@ -5040,11 +5053,12 @@ def simple_status_html(
 </head>
 <body>
 <header>
-  <h1>gmux status</h1>
+  <h1>__STATUS_TITLE__</h1>
   <div class="meta">
-    greenmux / emux { _html.escape(version) } · read-only · auto-refresh 15s ·
-    <a href="{base}/room">full control room</a> ·
+    __PRODUCT_LINE__ · read-only · auto-refresh 15s ·
+    <a href="{base}/room">__TAGLINE__</a> ·
     <a href="{base}/healthz">healthz</a>
+    <span class="dim"> · __FOOTER_NOTE__</span>
   </div>
 </header>
 <main>
@@ -5091,6 +5105,8 @@ document.querySelectorAll("button.copy").forEach(function(btn){{
 </body>
 </html>
 """
+    from . import skin as _skin
+    return _skin.active_skin().apply(html, version)
 
 
 def _remote_controller_from_env() -> Any:
@@ -5148,8 +5164,15 @@ def _remote_controller_from_env() -> Any:
 
 
 def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bool = False,
-            public_origin: str | None = None, public_path: str | None = None) -> int:
-    """Start the emux web daemon. Blocks until Ctrl-C."""
+            public_origin: str | None = None, public_path: str | None = None,
+            skin: str | None = None) -> int:
+    """Start the emux web daemon. Blocks until Ctrl-C.
+
+    `skin` is product chrome only (e.g. gmux) — see emux.skin. Same engine.
+    """
+    from . import skin as _skin
+
+    active = _skin.set_active_skin(skin)  # None → $EMUX_SKIN → emux
     if _server._resolve_tmux() is None:
         print("emux web: tmux not found on PATH — the UI will load but show nothing.", file=sys.stderr)
     if public_origin:
@@ -5193,6 +5216,7 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
 
     url = f"http://{host}:{port}"
     print(f"emux web daemon → {url}  (Ctrl-C to stop)")
+    print(f"  skin: {active.id} ({active.brand} · {active.tagline})")
     if normalized_path:
         print(f"  public path prefix: {normalized_path}  (proxy should strip before us)")
     if public_origin:

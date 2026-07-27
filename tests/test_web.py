@@ -228,9 +228,11 @@ def test_http_serves_ui(daemon):
 
 def test_http_simple_status_always_available(daemon):
     """Read-only table at /simple — works with or without public_path."""
+    from emux import skin
+    skin.set_active_skin("emux")
     status, body = _get(daemon + "/simple")
     assert status == 200
-    assert "gmux status" in body
+    assert "emux status" in body
     assert "main" in body  # mocked live session
     assert "read-only" in body
     assert "auto-refresh" in body
@@ -239,6 +241,20 @@ def test_http_simple_status_always_available(daemon):
     assert "scan scope" in body  # honest multi-socket claim stamp
     # local simple status (no public_path) → bare tmux attach, no ssh
     assert "tmux attach -t main" in body or "tmux attach -t" in body
+
+
+def test_gmux_skin_rebrands_without_forking():
+    from emux import skin, web
+    s = skin.get_skin("gmux")
+    assert s.id == "gmux" and s.brand == "GMUX"
+    assert "emux" in s.footer_note or s.engine_label == "emux"
+    stamped = s.apply("<h1>__BRAND__</h1><p>__FOOTER_NOTE__</p> · __ENGINE__", "1.2.3")
+    assert "GMUX" in stamped and "emux 1.2.3" in stamped
+    # aliases
+    assert skin.get_skin("greenmux").id == "gmux"
+    skin.set_active_skin("gmux")
+    assert skin.active_skin().product == "gmux"
+    skin.set_active_skin("emux")
 
 
 def test_http_simple_filters_and_peek(daemon):
@@ -301,6 +317,8 @@ def test_http_ui_stamps_public_path_prefix(monkeypatch):
                   "registered_at": 0},
     })
     monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (0, "pane\n", ""))
+    from emux import skin
+    skin.set_active_skin("gmux")
     web.EmuxWebHandler.public_origin = "https://go.greenmarkwaste.com"
     web.EmuxWebHandler.public_path = "/gmux"
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), web.EmuxWebHandler)
@@ -308,24 +326,28 @@ def test_http_ui_stamps_public_path_prefix(monkeypatch):
     thread.start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
     try:
-        # default landing = simple status with filters/age
+        # default landing = simple status with gmux skin
         status, body = _get(base + "/")
         assert status == 200
         assert "gmux status" in body
+        assert "GMUX" in body or "gmux" in body
+        assert "powered by emux" in body
         assert "proof" in body and "LIVE" in body
         assert 'href="/gmux/room"' in body
         assert "uptime" in body and "active" in body
+        assert "ssh -t rentamac" in body  # connect under gmux skin
         # live filter drops unregistered-only noise when only registered live
         status, body = _get(base + "/?live=1&registered=1")
         assert status == 200 and "proof" in body
         # peek under public path
         status, body = _get(base + "/?peek=proof")
         assert status == 200 and "pane peek" in body
-        # full SPA still at /room with path stamp
+        # full SPA still at /room with path stamp + skin
         status, body = _get(base + "/room")
         assert status == 200
         assert 'const PUBLIC_PATH="/gmux"' in body
         assert 'href="/gmux/docs"' in body
+        assert "GMUX" in body  # skinned brand
         # Host guard accepts the public origin hostname
         req = urllib.request.Request(
             base + "/api/sessions",
@@ -339,6 +361,7 @@ def test_http_ui_stamps_public_path_prefix(monkeypatch):
         httpd.server_close()
         web.EmuxWebHandler.public_origin = None
         web.EmuxWebHandler.public_path = ""
+        skin.set_active_skin("emux")
 
 
 def test_http_serves_docs_with_shared_help_client(daemon):
