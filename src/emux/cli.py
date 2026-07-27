@@ -1385,10 +1385,13 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             return 0
         for r in rows:
             en = "on" if r.get("enabled") else "off"
+            when = r.get("when") or _sched.humanize_cron(
+                str(r.get("cron") or ""), str(r.get("timezone") or "America/Chicago")
+            )
             print(
-                f"{r['id']:24} {en:3} cron={r['cron']!r} tz={r.get('timezone')} "
+                f"{r['id']:24} {en:3} {when}  "
                 f"target={r['target']} next={r.get('next_run_at') or '—'} "
-                f"last={r.get('last_status') or '—'}"
+                f"last={r.get('last_status') or '—'}  cron={r['cron']!r}"
             )
         return 0
     if sub == "add":
@@ -1399,11 +1402,13 @@ def cmd_schedule(args: argparse.Namespace) -> int:
                 message=args.message,
                 timezone=args.timezone,
                 job_id=args.id,
+                title=getattr(args, "title", None),
             )
         except Exception as e:
             print(f"emux schedule: {e}", file=sys.stderr)
             return 1
-        print(f"added {job.id} → {_sched.schedule_path()}")
+        when = _sched.humanize_cron(job.cron, job.timezone)
+        print(f"added {job.id} — {when} → {_sched.schedule_path()}")
         return 0
     if sub == "rm":
         if not _sched.remove_job(args.id):
@@ -1869,7 +1874,7 @@ def main(argv: list[str] | None = None) -> int:
     p_sched_add.add_argument(
         "--cron",
         required=True,
-        help='5-field cron, e.g. "0 7 * * *" (minute hour dom mon dow)',
+        help='5-field cron; desk default weekdays e.g. "0 7 * * 1-5" (min hour dom mon dow)',
     )
     p_sched_add.add_argument(
         "--target",
@@ -1880,6 +1885,11 @@ def main(argv: list[str] | None = None) -> int:
         "--message",
         required=True,
         help="text to send into the session (like typing a prompt)",
+    )
+    p_sched_add.add_argument(
+        "--title",
+        default=None,
+        help="human label on the calendar sidebar (defaults to id)",
     )
     p_sched_add.add_argument(
         "--timezone",

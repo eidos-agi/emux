@@ -13,7 +13,7 @@ Job shape::
 
     {
       "id": "iran-daily",
-      "cron": "0 7 * * *",
+      "cron": "0 7 * * 1-5",
       "timezone": "America/Chicago",
       "target": "northstar-iran-daily",
       "message": "…prompt text…",
@@ -22,6 +22,9 @@ Job shape::
       "last_status": null,
       "last_error": null
     }
+
+Desk jobs default to weekdays (cron DOW 1-5 = Mon–Fri). The API exposes a
+plain-English ``when`` label (e.g. "Weekdays at 7:00 AM CT") for the sidebar.
 
 On add, last_run_at is set to now so the first fire is the *next* cron tick,
 not a catch-up of history.
@@ -34,7 +37,7 @@ import os
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -79,6 +82,7 @@ class Job:
     cron: str
     target: str
     message: str
+    title: str = ""  # human label on the calendar (defaults to id)
     timezone: str = "America/Chicago"
     enabled: bool = True
     last_run_at: str | None = None
@@ -86,8 +90,195 @@ class Job:
     last_error: str | None = None
     created_at: str = field(default_factory=lambda: _utc_now_iso())
 
-    def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+    def as_dict(self, *, with_when: bool = True) -> dict[str, Any]:
+        d = asdict(self)
+        d["title"] = (self.title or self.id).strip() or self.id
+        if with_when:
+            d["when"] = humanize_cron(self.cron, self.timezone)
+        return d
+
+
+# --- plain-English schedule labels (sidebar / API / CLI) ---
+
+_DOW_NAMES = {
+    "0": "Sunday",
+    "1": "Monday",
+    "2": "Tuesday",
+    "3": "Wednesday",
+    "4": "Thursday",
+    "5": "Friday",
+    "6": "Saturday",
+    "7": "Sunday",
+}
+_TZ_ABBREV = {
+    "America/Chicago": "CT",
+    "America/New_York": "ET",
+    "America/Denver": "MT",
+    "America/Los_Angeles": "PT",
+    "America/Phoenix": "MST",
+    "UTC": "UTC",
+    "Etc/UTC": "UTC",
+}
+
+
+def _tz_label(timezone: str) -> str:
+    name = (timezone or "").strip() or "America/Chicago"
+    if name in _TZ_ABBREV:
+        return _TZ_ABBREV[name]
+    if "/" in name:
+        return name.rsplit("/", 1)[-1].replace("_", " ")
+    return name
+
+
+def _parse_cron_field_list(field: str) -> list[str] | None:
+    """Return ordered unique tokens for simple lists (1,3,5) or None if complex."""
+    if not field or field == "*":
+        return None
+    if "/" in field or field.startswith("-") or field.endswith("-"):
+        return None
+    parts: list[str] = []
+    for piece in field.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        if "-" in piece and "/" not in piece:
+            a, _, b = piece.partition("-")
+            if not a.isdigit() or not b.isdigit():
+                return None
+            lo, hi = int(a), int(b)
+            if lo > hi or hi - lo > 31:
+                return None
+            parts.extend(str(i) for i in range(lo, hi + 1))
+        elif piece.isdigit():
+            parts.append(piece)
+        else:
+            return None
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in parts:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out or None
+
+
+def _clock_phrase(minute: str, hour: str) -> str | None:
+    if hour.startswith("*/") and minute.isdigit():
+        try:
+            n = int(hour[2:])
+        except ValueError:
+            return None
+        if n <= 0:
+            return None
+        base = f"every {n} hour" + ("" if n == 1 else "s")
+        m = int(minute)
+        if m == 0:
+            return base
+        return f"{base} at :{m:02d}"
+    if minute.startswith("*/") and hour == "*":
+        try:
+            n = int(minute[2:])
+        except ValueError:
+            return None
+        if n <= 0:
+            return None
+        if n == 1:
+            return "every minute"
+        return f"every {n} minutes"
+    if hour == "*" and minute.isdigit():
+        m = int(minute)
+        if m == 0:
+            return "every hour"
+        return f"every hour at :{m:02d}"
+    if minute.isdigit() and hour.isdigit():
+        h = int(hour)
+        m = int(minute)
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            return None
+        suffix = "AM" if h < 12 else "PM"
+        h12 = h % 12
+        if h12 == 0:
+            h12 = 12
+        if m == 0:
+            return f"{h12}:00 {suffix}"
+        return f"{h12}:{m:02d} {suffix}"
+    return None
+
+
+def _dow_phrase(dow: str) -> str | None:
+    if dow in ("*", "?"):
+        return "every day"
+    if dow in ("1-5", "1,2,3,4,5"):
+        return "weekdays"
+    if dow in ("0,6", "6,0"):
+        return "weekends"
+    tokens = _parse_cron_field_list(dow)
+    if not tokens:
+        return None
+    names = []
+    for t in tokens:
+        key = "0" if t == "7" else t
+        names.append(_DOW_NAMES.get(key) or t)
+    if len(names) == 1:
+        return f"{names[0]}s"
+    if len(names) == 2:
+        return f"{names[0]}s and {names[1]}s"
+    return ", ".join(n + "s" for n in names[:-1]) + f", and {names[-1]}s"
+
+
+def _ordinal_suffix(n: int) -> str:
+    if 10 <= (n % 100) <= 20:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+
+
+def humanize_cron(expr: str, timezone: str = "America/Chicago") -> str:
+    """Turn a 5-field cron into plain English for the calendar sidebar.
+
+    Examples:
+      0 7 * * 1-5  → Weekdays at 7:00 AM CT
+      0 9 * * 1    → Mondays at 9:00 AM CT
+      0 7 * * *    → Every day at 7:00 AM CT
+    """
+    raw = (expr or "").strip()
+    if not raw:
+        return "no schedule"
+    parts = raw.split()
+    if len(parts) != 5:
+        return raw
+    minute, hour, dom, month, dow = parts
+    tz = _tz_label(timezone)
+
+    day_part: str | None = None
+    if dom in ("*", "?") and month == "*":
+        day_part = _dow_phrase(dow)
+    elif dom not in ("*", "?") and dow in ("*", "?"):
+        if dom.isdigit():
+            day_part = f"on the {int(dom)}{_ordinal_suffix(int(dom))} of each month"
+        else:
+            day_part = f"on day {dom} each month"
+    elif dom not in ("*", "?") and dow not in ("*", "?"):
+        d1 = _dow_phrase(dow) or f"DOW {dow}"
+        day_part = f"{d1} or day {dom}"
+    else:
+        day_part = _dow_phrase(dow) if dow not in ("*", "?") else "every day"
+
+    clock = _clock_phrase(minute, hour)
+    if clock is None:
+        return f"{raw} ({tz})"
+
+    if clock.startswith("every"):
+        if day_part in (None, "every day"):
+            return f"{clock[0].upper() + clock[1:]} ({tz})"
+        return f"{clock[0].upper() + clock[1:]} on {day_part} ({tz})"
+
+    if day_part in (None, "every day"):
+        return f"Every day at {clock} {tz}"
+    if day_part == "weekdays":
+        return f"Weekdays at {clock} {tz}"
+    if day_part == "weekends":
+        return f"Weekends at {clock} {tz}"
+    return f"{day_part[0].upper() + day_part[1:]} at {clock} {tz}"
 
 
 def _utc_now_iso() -> str:
@@ -152,6 +343,7 @@ def load_jobs() -> list[Job]:
                 cron=cron,
                 target=target,
                 message=message,
+                title=str(item.get("title") or "").strip(),
                 timezone=str(item.get("timezone") or "America/Chicago"),
                 enabled=bool(item.get("enabled", True)),
                 last_run_at=item.get("last_run_at"),
@@ -169,7 +361,7 @@ def save_jobs(jobs: list[Job]) -> Path:
     payload = {
         "version": 1,
         "product": _product_id(),
-        "jobs": [j.as_dict() for j in jobs],
+        "jobs": [j.as_dict(with_when=False) for j in jobs],
     }
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -202,6 +394,7 @@ def add_job(
     message: str,
     timezone: str = "America/Chicago",
     job_id: str | None = None,
+    title: str | None = None,
     enabled: bool = True,
 ) -> Job:
     validate_cron(cron)
@@ -216,6 +409,7 @@ def add_job(
             cron=cron.strip(),
             target=target.strip(),
             message=message,
+            title=(title or "").strip(),
             timezone=timezone,
             enabled=enabled,
             # Seed so we do not catch up the previous cron slot on add.
@@ -225,6 +419,85 @@ def add_job(
         jobs.append(job)
         save_jobs(jobs)
         return job
+
+
+def update_job(job_id: str, **fields: Any) -> Job | None:
+    """Patch allowed fields on a job. Returns updated job or None."""
+    allowed = {"cron", "target", "message", "title", "timezone", "enabled"}
+    with _lock:
+        jobs = load_jobs()
+        for j in jobs:
+            if j.id != job_id:
+                continue
+            for k, v in fields.items():
+                if k not in allowed:
+                    continue
+                if k == "cron" and v is not None:
+                    validate_cron(str(v))
+                    j.cron = str(v).strip()
+                elif k == "timezone" and v is not None:
+                    _ = _tz(str(v))
+                    j.timezone = str(v)
+                elif k == "enabled":
+                    j.enabled = bool(v)
+                elif k in ("target", "message", "title") and v is not None:
+                    setattr(j, k, str(v))
+            save_jobs(jobs)
+            return j
+        return None
+
+
+def occurrences(
+    start: datetime,
+    end: datetime,
+    *,
+    include_disabled: bool = False,
+    max_per_job: int = 400,
+) -> list[dict[str, Any]]:
+    """Expand cron jobs into discrete calendar events in [start, end] (UTC)."""
+    from croniter import croniter
+
+    if end <= start:
+        return []
+    events: list[dict[str, Any]] = []
+    for job in load_jobs():
+        if not include_disabled and not job.enabled:
+            continue
+        try:
+            tz = _tz(job.timezone)
+            start_local = start.astimezone(tz)
+            end_local = end.astimezone(tz)
+            base = start_local - timedelta(seconds=1)
+            itr = croniter(job.cron, base)
+            for _ in range(max_per_job):
+                nxt = itr.get_next(datetime)
+                if nxt.tzinfo is None:
+                    nxt = nxt.replace(tzinfo=tz)
+                if nxt > end_local:
+                    break
+                if nxt < start_local:
+                    continue
+                utc = nxt.astimezone(UTC).replace(microsecond=0)
+                events.append(
+                    {
+                        "id": f"{job.id}@{utc.isoformat()}",
+                        "job_id": job.id,
+                        "title": (job.title or job.id).strip() or job.id,
+                        "when": humanize_cron(job.cron, job.timezone),
+                        "start": utc.isoformat(),
+                        "end": (utc + timedelta(minutes=30)).isoformat(),
+                        "target": job.target,
+                        "cron": job.cron,
+                        "timezone": job.timezone,
+                        "message": job.message,
+                        "enabled": job.enabled,
+                        "all_day": False,
+                    }
+                )
+        except Exception:
+            continue
+    events.sort(key=lambda e: e["start"])
+    return events
 
 
 def remove_job(job_id: str) -> bool:

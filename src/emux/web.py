@@ -3642,6 +3642,10 @@ body.solo-session #modalpop{display:none} /* already in a tab */
 .calser .calser-when{font-size:10px;line-height:1.3;color:var(--text-dim);white-space:normal}
 .calser .calser-cron{font-size:9px;color:var(--text-dim);opacity:.55;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .calser.off{opacity:.45}
+.cal-skel{border-radius:4px;background:linear-gradient(90deg,var(--bg-card) 0%,var(--line) 50%,var(--bg-card) 100%);background-size:200% 100%;animation:calshimmer 1.1s ease-in-out infinite}
+@keyframes calshimmer{0%{background-position:100% 0}100%{background-position:-100% 0}}
+.cal-skel-ser{height:42px;margin-bottom:6px}
+.cal-skel-cell{height:14px;margin:4px 2px;opacity:.55}
 #calmain{flex:1;min-width:0;overflow:auto;padding:8px}
 #calweek{display:grid;grid-template-columns:56px repeat(7,1fr);gap:1px;background:var(--line);border:1px solid var(--line);min-height:520px}
 #calweek .hd{background:var(--bg-raise);padding:8px 4px;text-align:center;font-size:11px;font-weight:600;letter-spacing:.4px}
@@ -5361,6 +5365,355 @@ async function openChats(){
   loadChats();
 }
 
+
+// ---- CALENDAR: Google-like week/month for cron message jobs ----
+const CAL={view:"week",anchor:new Date(), jobs:[], events:[], loading:false, gen:0, hidden:{}, selected:null};
+const CAL_COLORS=["#7eb8da","#f0b429","#6bcb77","#e07a5f","#9b8cff","#4ecdc4","#ff8fab","#c9a227"];
+function calColor(id){let h=0;const s=String(id||"");for(let i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))>>>0;return CAL_COLORS[h%CAL_COLORS.length];}
+// Plain-English schedule (mirrors emux.schedule.humanize_cron) — sidebar speaks this, not raw cron.
+const CAL_TZ_ABBREV={
+  "America/Chicago":"CT","America/New_York":"ET","America/Denver":"MT",
+  "America/Los_Angeles":"PT","America/Phoenix":"MST","UTC":"UTC","Etc/UTC":"UTC"
+};
+function calTzLabel(tz){
+  const name=(tz||"").trim()||"America/Chicago";
+  if(CAL_TZ_ABBREV[name]) return CAL_TZ_ABBREV[name];
+  if(name.includes("/")) return name.split("/").pop().replace(/_/g," ");
+  return name;
+}
+function calClockPhrase(minute, hour){
+  if(hour.startsWith("*/") && /^\d+$/.test(minute)){
+    const n=parseInt(hour.slice(2),10); if(!n) return null;
+    const base="every "+n+" hour"+(n===1?"":"s");
+    const m=parseInt(minute,10);
+    return m===0?base:(base+" at :"+String(m).padStart(2,"0"));
+  }
+  if(minute.startsWith("*/") && hour==="*"){
+    const n=parseInt(minute.slice(2),10); if(!n) return null;
+    return n===1?"every minute":("every "+n+" minutes");
+  }
+  if(hour==="*" && /^\d+$/.test(minute)){
+    const m=parseInt(minute,10);
+    return m===0?"every hour":("every hour at :"+String(m).padStart(2,"0"));
+  }
+  if(/^\d+$/.test(minute) && /^\d+$/.test(hour)){
+    const h=parseInt(hour,10), m=parseInt(minute,10);
+    if(h<0||h>23||m<0||m>59) return null;
+    const suffix=h<12?"AM":"PM";
+    let h12=h%12; if(h12===0) h12=12;
+    return m===0?(h12+":00 "+suffix):(h12+":"+String(m).padStart(2,"0")+" "+suffix);
+  }
+  return null;
+}
+function calDowPhrase(dow){
+  if(dow==="*"||dow==="?") return "every day";
+  if(dow==="1-5"||dow==="1,2,3,4,5") return "weekdays";
+  if(dow==="0,6"||dow==="6,0") return "weekends";
+  const names={0:"Sunday",1:"Monday",2:"Tuesday",3:"Wednesday",4:"Thursday",5:"Friday",6:"Saturday",7:"Sunday"};
+  const toks=[];
+  for(const piece of dow.split(",")){
+    const p=piece.trim(); if(!p) continue;
+    if(p.includes("-")){
+      const [a,b]=p.split("-").map(x=>parseInt(x,10));
+      if(Number.isNaN(a)||Number.isNaN(b)||a>b) return null;
+      for(let i=a;i<=b;i++) toks.push(String(i));
+    }else if(/^\d+$/.test(p)) toks.push(p);
+    else return null;
+  }
+  if(!toks.length) return null;
+  const uniq=[...new Set(toks.map(t=>t==="7"?"0":t))];
+  const label=t=>names[t]||t;
+  if(uniq.length===1) return label(uniq[0])+"s";
+  if(uniq.length===2) return label(uniq[0])+"s and "+label(uniq[1])+"s";
+  return uniq.slice(0,-1).map(t=>label(t)+"s").join(", ")+", and "+label(uniq[uniq.length-1])+"s";
+}
+function humanizeCron(expr, timezone){
+  const raw=(expr||"").trim();
+  if(!raw) return "no schedule";
+  const parts=raw.split(/\s+/);
+  if(parts.length!==5) return raw;
+  const [minute,hour,dom,month,dow]=parts;
+  const tz=calTzLabel(timezone);
+  let dayPart=null;
+  if((dom==="*"||dom==="?") && month==="*") dayPart=calDowPhrase(dow);
+  else if(dom!=="*" && dom!=="?" && (dow==="*"||dow==="?")){
+    dayPart=/^\d+$/.test(dom)?("on the "+parseInt(dom,10)+" of each month"):("on day "+dom+" each month");
+  }else if(dom!=="*" && dom!=="?" && dow!=="*" && dow!=="?"){
+    dayPart=(calDowPhrase(dow)||("DOW "+dow))+" or day "+dom;
+  }else dayPart=(dow==="*"||dow==="?")?"every day":calDowPhrase(dow);
+  const clock=calClockPhrase(minute, hour);
+  if(!clock) return raw+" ("+tz+")";
+  if(clock.startsWith("every")){
+    if(!dayPart||dayPart==="every day") return clock.charAt(0).toUpperCase()+clock.slice(1)+" ("+tz+")";
+    return clock.charAt(0).toUpperCase()+clock.slice(1)+" on "+dayPart+" ("+tz+")";
+  }
+  if(!dayPart||dayPart==="every day") return "Every day at "+clock+" "+tz;
+  if(dayPart==="weekdays") return "Weekdays at "+clock+" "+tz;
+  if(dayPart==="weekends") return "Weekends at "+clock+" "+tz;
+  return dayPart.charAt(0).toUpperCase()+dayPart.slice(1)+" at "+clock+" "+tz;
+}
+function calWhen(job){
+  if(job&&job.when) return job.when;
+  return humanizeCron(job&&job.cron, job&&job.timezone);
+}
+function calStartOfWeek(d){const x=new Date(d);const day=(x.getDay()+6)%7;x.setHours(0,0,0,0);x.setDate(x.getDate()-day);return x;}
+function calStartOfMonth(d){const x=new Date(d.getFullYear(),d.getMonth(),1);x.setHours(0,0,0,0);return x;}
+function calAddDays(d,n){const x=new Date(d);x.setDate(x.getDate()+n);return x;}
+function calIso(d){return new Date(d).toISOString();}
+function calRange(){
+  if(CAL.view==="month"){
+    const start=calStartOfWeek(calStartOfMonth(CAL.anchor));
+    return {start, end:calAddDays(start,42)};
+  }
+  const start=calStartOfWeek(CAL.anchor);
+  return {start, end:calAddDays(start,7)};
+}
+function calTitle(){
+  if(CAL.view==="month")return CAL.anchor.toLocaleString(undefined,{month:"long",year:"numeric"});
+  const {start,end}=calRange();
+  const e=calAddDays(end,-1);
+  const a=start.toLocaleDateString(undefined,{month:"short",day:"numeric"});
+  const b=e.toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"});
+  return a+" – "+b;
+}
+function openCalendar(){
+  const v=$("#views"); if(!v)return;
+  v.innerHTML='<div id="calroot">'
+    +'<div id="calbar">'
+    +'<button class="act" id="calprev" type="button">‹</button>'
+    +'<button class="act" id="caltoday" type="button">Today</button>'
+    +'<button class="act" id="calnext" type="button">›</button>'
+    +'<h2 id="caltitle"></h2>'
+    +'<button class="act" id="calweekbtn" type="button">Week</button>'
+    +'<button class="act" id="calmonthbtn" type="button">Month</button>'
+    +'<button class="act" id="calnew" type="button">+ New</button>'
+    +'<button class="act" id="calref" type="button">↻</button>'
+    +'</div>'
+    +'<div id="calbody"><aside id="calseries"><h3>Series</h3><div id="calserlist"></div></aside><div id="calmain"></div></div>'
+    +'</div>'
+    +'<div id="caldrawer"><div class="dh"><b id="caldt">Event</b><button class="act" id="caldx" type="button">✕</button></div>'
+    +'<div class="db" id="caldb"></div><div class="df" id="caldf"></div></div>';
+  $("#calprev").onclick=()=>{CAL.anchor=calAddDays(CAL.anchor,CAL.view==="month"?-28:-7);loadCalendar();};
+  $("#calnext").onclick=()=>{CAL.anchor=calAddDays(CAL.anchor,CAL.view==="month"?28:7);loadCalendar();};
+  $("#caltoday").onclick=()=>{CAL.anchor=new Date();loadCalendar();};
+  $("#calweekbtn").onclick=()=>{CAL.view="week";loadCalendar();};
+  $("#calmonthbtn").onclick=()=>{CAL.view="month";loadCalendar();};
+  $("#calnew").onclick=()=>calOpenDrawer(null,true);
+  $("#calref").onclick=()=>loadCalendar();
+  $("#caldx").onclick=()=>calCloseDrawer();
+  loadCalendar();
+}
+async function loadCalendar(){
+  // Skeleton / stale-while-revalidate: paint chrome immediately (CHATS/ORPHANS pattern).
+  // Prior jobs stay visible while the range fetch runs — never blank the rail on nav.
+  CAL.loading=true;
+  const gen=++CAL.gen;
+  renderCalendar();
+  const {start,end}=calRange();
+  const q="/api/schedule?from="+encodeURIComponent(calIso(start))+"&to="+encodeURIComponent(calIso(end));
+  try{
+    const r=await api(q);
+    if(gen!==CAL.gen) return; // superseded by a newer nav/refresh
+    if(r&&r.ok){CAL.jobs=r.jobs||[];CAL.events=r.events||[];}
+  }catch(e){
+    if(gen!==CAL.gen) return;
+    if(!CAL.jobs.length){CAL.jobs=[];CAL.events=[];}
+  }
+  if(gen!==CAL.gen) return;
+  CAL.loading=false;
+  renderCalendar();
+}
+function calVisibleEvents(){
+  return (CAL.events||[]).filter(ev=>!CAL.hidden[ev.job_id]);
+}
+function calSkeletonSeries(){
+  return [0,1,2,3,4,5].map(()=>'<div class="cal-skel cal-skel-ser"></div>').join("");
+}
+function calSkeletonMain(){
+  // Lightweight grid placeholder — matches week columns so layout does not jump.
+  let html='<div id="calweek"><div class="hd"></div>';
+  for(let i=0;i<7;i++) html+='<div class="hd"><div class="cal-skel" style="height:12px;margin:4px auto;width:70%"></div></div>';
+  html+='<div class="gutter">all</div>';
+  for(let i=0;i<7;i++){
+    html+='<div class="cell">';
+    for(let j=0;j<3;j++) html+='<div class="cal-skel cal-skel-cell"></div>';
+    html+='</div>';
+  }
+  html+='</div>';
+  return html;
+}
+function renderCalendar(){
+  const title=$("#caltitle"), main=$("#calmain"), ser=$("#calserlist");
+  if(!main)return;
+  if(title)title.textContent=calTitle()+(CAL.loading?" …":"");
+  const wbtn=$("#calweekbtn"), mbtn=$("#calmonthbtn");
+  if(wbtn)wbtn.classList.toggle("on",CAL.view==="week");
+  if(mbtn)mbtn.classList.toggle("on",CAL.view==="month");
+  // series checklist — title + plain-English when (cron de-emphasized)
+  if(ser){
+    if(CAL.loading&&!CAL.jobs.length){
+      ser.innerHTML=calSkeletonSeries();
+    }else if(!CAL.jobs.length){
+      ser.innerHTML='<div style="font-size:12px;color:var(--text-dim);padding:8px">No series yet. Click <b>+ New</b>.</div>';
+    }else{
+      ser.innerHTML=CAL.jobs.map(j=>{
+        const c=calColor(j.id), off=!!CAL.hidden[j.id]||!j.enabled;
+        const when=calWhen(j);
+        return '<div class="calser'+(off?" off":"")+'" data-id="'+esc(j.id)+'" title="'+esc((j.title||j.id)+" — "+when+(j.cron?" · "+j.cron:""))+'">'
+          +'<span class="dot" style="background:'+c+'"></span>'
+          +'<div class="calser-body">'
+          +'<div class="calser-title">'+esc(j.title||j.id)+(j.enabled?"":' <span style="font-size:9px;opacity:.7;font-weight:400">off</span>')+'</div>'
+          +'<div class="calser-when">'+esc(when)+'</div>'
+          +'<div class="calser-cron">'+esc(j.cron||"")+'</div>'
+          +'</div></div>';
+      }).join("");
+      ser.querySelectorAll(".calser").forEach(el=>el.onclick=()=>{
+        const id=el.dataset.id; CAL.hidden[id]=!CAL.hidden[id]; renderCalendar();
+      });
+    }
+  }
+  // Main grid: skeleton only on cold load; keep prior events while refreshing a new range.
+  if(CAL.loading&&!CAL.jobs.length&&!CAL.events.length){
+    main.innerHTML=calSkeletonMain();
+    return;
+  }
+  if(CAL.view==="month") renderCalMonth(main);
+  else renderCalWeek(main);
+}
+function renderCalWeek(main){
+  const {start}=calRange();
+  const hours=[7,8,9,10,11,12,13,14,15,16,17,18];
+  const days=[...Array(7)].map((_,i)=>calAddDays(start,i));
+  const today=new Date(); today.setHours(0,0,0,0);
+  let html='<div id="calweek"><div class="hd"></div>';
+  days.forEach(d=>{
+    const isT=d.getTime()===today.getTime();
+    html+='<div class="hd'+(isT?" today":"")+'">'+d.toLocaleDateString(undefined,{weekday:"short",month:"numeric",day:"numeric"})+'</div>';
+  });
+  html+='<div class="gutter">all</div>';
+  days.forEach(d=>{
+    const isT=d.getTime()===today.getTime();
+    const dayEv=calVisibleEvents().filter(ev=>{
+      const s=new Date(ev.start); return s.toDateString()===d.toDateString();
+    });
+    html+='<div class="cell'+(isT?" today":"")+'" data-day="'+d.toISOString()+'">';
+    dayEv.forEach(ev=>{
+      const s=new Date(ev.start);
+      const t=s.toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"});
+      html+='<div class="calev" data-eid="'+esc(ev.id)+'" style="background:'+calColor(ev.job_id)+'" title="'+esc(ev.title+" · "+(ev.when||calWhen(ev)))+'">'
+        +esc(t+" "+ev.title)+'</div>';
+    });
+    html+='</div>';
+  });
+  hours.forEach(h=>{
+    html+='<div class="gutter">'+((h%12)||12)+(h<12?"a":"p")+'</div>';
+    days.forEach(d=>{
+      const isT=d.getTime()===today.getTime();
+      html+='<div class="cell'+(isT?" today":"")+'" style="min-height:28px"></div>';
+    });
+  });
+  html+='</div>';
+  main.innerHTML=html;
+  main.querySelectorAll(".calev").forEach(el=>el.onclick=e=>{e.stopPropagation();
+    const ev=CAL.events.find(x=>x.id===el.dataset.eid); if(ev) calOpenDrawer(ev,false);});
+}
+function renderCalMonth(main){
+  const {start}=calRange();
+  const today=new Date(); today.setHours(0,0,0,0);
+  const mon=CAL.anchor.getMonth();
+  let html='<div id="calmonth">';
+  ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].forEach(n=>html+='<div class="mhd">'+n+'</div>');
+  for(let i=0;i<42;i++){
+    const d=calAddDays(start,i);
+    const isT=d.getTime()===today.getTime();
+    const out=d.getMonth()!==mon;
+    const dayEv=calVisibleEvents().filter(ev=>new Date(ev.start).toDateString()===d.toDateString());
+    html+='<div class="mcell'+(out?" out":"")+(isT?" today":"")+'"><div class="mdn">'+d.getDate()+'</div>';
+    dayEv.slice(0,4).forEach(ev=>{
+      html+='<div class="calev" data-eid="'+esc(ev.id)+'" style="background:'+calColor(ev.job_id)+'" title="'+esc(ev.when||calWhen(ev))+'">'
+        +esc(ev.title)+'</div>';
+    });
+    if(dayEv.length>4) html+='<div style="font-size:10px;color:var(--text-dim)">+'+ (dayEv.length-4)+' more</div>';
+    html+='</div>';
+  }
+  html+='</div>';
+  main.innerHTML=html;
+  main.querySelectorAll(".calev").forEach(el=>el.onclick=e=>{e.stopPropagation();
+    const ev=CAL.events.find(x=>x.id===el.dataset.eid); if(ev) calOpenDrawer(ev,false);});
+}
+function calCloseDrawer(){const d=$("#caldrawer"); if(d)d.classList.remove("open"); CAL.selected=null;}
+function calOpenDrawer(ev, isNew){
+  const d=$("#caldrawer"), db=$("#caldb"), df=$("#caldf"), dh=$("#caldt");
+  if(!d||!db||!df)return;
+  d.classList.add("open");
+  const job=ev?CAL.jobs.find(j=>j.id===ev.job_id):null;
+  // Desk default: weekdays only (no Sat/Sun fires). Cron DOW 1-5 = Mon–Fri.
+  const model=isNew?{id:"",title:"",cron:"0 7 * * 1-5",target:"",message:"",timezone:"America/Chicago",enabled:true}
+    :{id:job?.id||ev.job_id, title:job?.title||ev.title, cron:job?.cron||ev.cron, target:job?.target||ev.target,
+      message:job?.message||ev.message||"", timezone:job?.timezone||ev.timezone||"America/Chicago",
+      enabled:job?!!job.enabled:true};
+  CAL.selected=model;
+  if(dh) dh.textContent=isNew?"New scheduled message":(model.title||model.id);
+  db.innerHTML=
+    '<label>Title<input id="cf_title" value="'+esc(model.title||"")+'"></label>'
+    +'<label>Job id<input id="cf_id" value="'+esc(model.id||"")+'" '+(isNew?"":"readonly")+' placeholder="auto if blank"></label>'
+    +'<div id="cf_when" style="font-size:13px;font-weight:600;color:var(--amber);padding:8px 10px;background:var(--bg);border:1px solid var(--line);border-radius:4px"></div>'
+    +'<label>Cron (advanced)<input id="cf_cron" value="'+esc(model.cron||"")+'" placeholder="0 7 * * 1-5"></label>'
+    +'<div style="font-size:11px;color:var(--text-dim);margin-top:-6px">Sidebar speaks the amber line above — not the cron. Desk default is <b>weekdays</b>.</div>'
+    +'<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:2px">'
+    +[["0 7 * * 1-5","Weekdays 7am"],["0 9 * * 1-5","Weekdays 9am"],["0 7 * * *","Daily 7am (7 days)"],["0 8 * * 1","Mondays 8am"],["0 */6 * * 1-5","Every 6h weekdays"]]
+      .map(([c,l])=>'<button type="button" class="act cf_preset" data-c="'+c+'">'+l+'</button>').join("")
+    +'</div>'
+    +'<label>Timezone<input id="cf_tz" value="'+esc(model.timezone||"America/Chicago")+'"></label>'
+    +'<label>Target session (registry name)<input id="cf_target" value="'+esc(model.target||"")+'" placeholder="northstar-iran-daily"></label>'
+    +'<label>Message<textarea id="cf_msg">'+esc(model.message||"")+'</textarea></label>'
+    +'<label style="flex-direction:row;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--text)">'
+    +'<input type="checkbox" id="cf_en" '+(model.enabled?"checked":"")+'> Enabled</label>'
+    +(ev&&ev.start?'<div style="color:var(--text-dim);font-size:11px">Occurrence: '+esc(new Date(ev.start).toLocaleString())+'</div>':'');
+  const syncWhen=()=>{
+    const el=$("#cf_when"); if(!el) return;
+    el.textContent=humanizeCron(($("#cf_cron")||{}).value, ($("#cf_tz")||{}).value);
+  };
+  db.querySelectorAll(".cf_preset").forEach(b=>b.onclick=()=>{$("#cf_cron").value=b.dataset.c; syncWhen();});
+  const cronIn=$("#cf_cron"), tzIn=$("#cf_tz");
+  if(cronIn) cronIn.addEventListener("input", syncWhen);
+  if(tzIn) tzIn.addEventListener("input", syncWhen);
+  syncWhen();
+  df.innerHTML=
+    '<button class="act" id="cf_save" type="button">'+(isNew?"Create":"Save")+'</button>'
+    +(isNew?"":'<button class="act" id="cf_run" type="button">Run now</button>')
+    +(isNew?"":'<button class="act danger" id="cf_del" type="button">Delete series</button>')
+    +'<button class="act" id="cf_cancel" type="button">Close</button>';
+  $("#cf_cancel").onclick=()=>calCloseDrawer();
+  $("#cf_save").onclick=async()=>{
+    const body={
+      id:($("#cf_id").value||"").trim()||undefined,
+      title:($("#cf_title").value||"").trim(),
+      cron:($("#cf_cron").value||"").trim(),
+      timezone:($("#cf_tz").value||"America/Chicago").trim(),
+      target:($("#cf_target").value||"").trim(),
+      message:($("#cf_msg").value||""),
+      enabled:!!$("#cf_en").checked,
+    };
+    if(!body.cron||!body.target||!body.message){alert("cron, target, and message are required");return;}
+    let r;
+    if(isNew) r=await api("/api/schedule",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    else r=await api("/api/schedule/update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:model.id,...body})});
+    if(!r||!r.ok){alert((r&&r.error)||"save failed");return;}
+    calCloseDrawer(); loadCalendar();
+  };
+  const runB=$("#cf_run"); if(runB) runB.onclick=async()=>{
+    const r=await api("/api/schedule/run",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:model.id})});
+    alert(r&&r.ok?("Fired → "+(r.target||model.target)):("Fire failed: "+((r&&r.error)||"unknown")));
+    loadCalendar();
+  };
+  const delB=$("#cf_del"); if(delB) delB.onclick=async()=>{
+    if(!confirm("Delete series "+model.id+"?"))return;
+    await api("/api/schedule/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:model.id})});
+    calCloseDrawer(); loadCalendar();
+  };
+}
+
 function render(){
   if(mode==="grid")renderGrid();
   else if(mode==="groups")renderGroups();
@@ -6889,21 +7242,24 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         if url.path in ("/api/schedule", "/api/schedule/"):
             # In-process cron message jobs (product-scoped schedule.json).
             # Optional ?from=&to= ISO expand occurrences for calendar views.
+            # Calendar paints skeleton immediately; keep this path light — skip
+            # next_run_at when expanding a range (UI uses events, not next).
             try:
                 from datetime import datetime, timedelta
 
                 from . import schedule as _sched
 
                 qs = parse_qs(url.query)
+                fr = (qs.get("from") or [""])[0].strip()
+                to = (qs.get("to") or [""])[0].strip()
+                with_range = bool(fr and to)
                 payload: dict[str, Any] = {
                     "ok": True,
                     "path": str(_sched.schedule_path()),
                     "product": _sched._product_id(),
-                    "jobs": _sched.list_jobs(),
+                    "jobs": _sched.list_jobs(with_next=not with_range),
                 }
-                fr = (qs.get("from") or [""])[0].strip()
-                to = (qs.get("to") or [""])[0].strip()
-                if fr and to:
+                if with_range:
                     try:
                         start = datetime.fromisoformat(fr.replace("Z", "+00:00"))
                         end = datetime.fromisoformat(to.replace("Z", "+00:00"))

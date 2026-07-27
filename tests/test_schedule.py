@@ -78,3 +78,45 @@ def test_skipped_late_not_due(sched_dir: Path):
     # If "now" is mid-year, prev is months ago → not due (outside catchup)
     mid = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
     assert sched.is_due(j, mid) is False
+
+
+def test_humanize_cron_plain_english():
+    assert sched.humanize_cron("0 7 * * 1-5", "America/Chicago") == "Weekdays at 7:00 AM CT"
+    assert sched.humanize_cron("0 9 * * 1", "America/Chicago") == "Mondays at 9:00 AM CT"
+    assert sched.humanize_cron("0 7 * * *", "America/Chicago") == "Every day at 7:00 AM CT"
+    assert "weekdays" in sched.humanize_cron("0 */6 * * 1-5", "America/Chicago").lower()
+
+
+def test_list_jobs_includes_when(sched_dir: Path):
+    sched.add_job(
+        cron="0 7 * * 1-5",
+        target="desk",
+        message="m",
+        timezone="America/Chicago",
+        job_id="iran-daily",
+        title="Iran War daily (weekdays)",
+    )
+    rows = sched.list_jobs()
+    assert rows[0]["when"] == "Weekdays at 7:00 AM CT"
+    assert rows[0]["title"] == "Iran War daily (weekdays)"
+
+
+def test_weekdays_cron_skips_weekend(sched_dir: Path):
+    from zoneinfo import ZoneInfo
+
+    sched.add_job(
+        cron="0 7 * * 1-5",
+        target="desk",
+        message="weekday desk",
+        timezone="America/Chicago",
+        job_id="desk-weekdays",
+    )
+    start = datetime(2026, 7, 25, 0, 0, tzinfo=UTC)  # Saturday
+    end = datetime(2026, 8, 3, 0, 0, tzinfo=UTC)
+    events = sched.occurrences(start, end)
+    assert events
+    for ev in events:
+        when = datetime.fromisoformat(ev["start"].replace("Z", "+00:00"))
+        local = when.astimezone(ZoneInfo("America/Chicago"))
+        assert local.weekday() < 5, f"weekend fire: {local.isoformat()}"
+        assert "Weekdays" in (ev.get("when") or "")
