@@ -13,6 +13,10 @@ several views over the sessions emux knows about:
 - flow     — agent topology: a layered hierarchy built from registry `manages`
              edges (orchestrators on top, the agents they drive below);
              sessions with no relationships sit in an "unconnected" row.
+- orphans  — live tmux sessions emux does not know about yet (per host).
+- chats    — Claude Code + Grok Build transcripts on disk that are not live
+             (dropped missions). Complements orphans (tmux) and the grid
+             (registry): different surface, same control-room job.
 
 Design principles (same as the MCP server):
 - Operates on EXISTING tmux sessions only. Never spawns, never kills.
@@ -1818,6 +1822,73 @@ def poll_once(lines: int = 14) -> None:
         pass
 
 
+def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    """Claude Code + Grok Build chats on disk (this host). Room CHATS tab.
+
+    Query params (parse_qs style): match, status (comma-separated), tools,
+    limit, recent_hours. Default match is greenmark when skin is gmux.
+    """
+    q = q or {}
+    try:
+        from . import chats as chat_find
+        from . import skin as _skin
+    except ImportError as exc:
+        return {"ok": False, "error": f"chats_unavailable: {exc}"}
+
+    sk = _skin.active_skin()
+    match_raw = (q.get("match") or [""])[0].strip()
+    if not match_raw:
+        match_raw = "greenmark" if sk.id == "gmux" else "all"
+    status_raw = (q.get("status") or [""])[0].strip()
+    statuses = [s.strip() for s in status_raw.split(",") if s.strip()] or None
+    tools_raw = (q.get("tools") or ["claude,grok"])[0]
+    tools = [t.strip() for t in tools_raw.split(",") if t.strip()] or ["claude", "grok"]
+    try:
+        limit = max(1, min(200, int((q.get("limit") or ["50"])[0])))
+    except ValueError:
+        limit = 50
+    try:
+        recent_hours = float((q.get("recent_hours") or ["24"])[0])
+    except ValueError:
+        recent_hours = 24.0
+
+    try:
+        hits = chat_find.find_chats(
+            tools=tools,
+            match=match_raw,
+            recent_hours=recent_hours,
+            statuses=statuses,
+            limit=limit,
+        )
+        # counts across all statuses (same match/tools) for tab badge
+        all_hits = chat_find.find_chats(
+            tools=tools,
+            match=match_raw,
+            recent_hours=recent_hours,
+            statuses=None,
+            limit=200,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+    counts = {"live": 0, "recent": 0, "stale": 0}
+    for h in all_hits:
+        if h.status in counts:
+            counts[h.status] += 1
+    return {
+        "ok": True,
+        "chats": [h.as_dict() for h in hits],
+        "count": len(hits),
+        "counts": counts,
+        "match": match_raw,
+        "host": "local",
+        "note": (
+            "Transcripts on this host's disk — not tmux. "
+            "Resume is copy-paste; does not spawn agents."
+        ),
+    }
+
+
 def grid_payload(lines: int = 14) -> dict[str, Any]:
     """Session list with a mini pane capture + activity meta per live session.
     Serves from the daemon cache when fresh; captures on miss (cold start, or
@@ -2415,6 +2486,17 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .hosttag{font-size:9px;color:var(--text-dim);border:1px solid var(--line);
   border-radius:8px;padding:1px 6px;margin-left:6px;white-space:nowrap;flex-shrink:0}
 .tile.orph header{gap:6px}
+.tile.chat header{gap:6px;flex-wrap:wrap}
+.tile.chat .tool{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim)}
+.tile.chat .st-live{color:var(--ok,#3dba6e)}
+.tile.chat .st-recent{color:var(--amber)}
+.tile.chat .st-stale{color:var(--stale)}
+.tile.chat .sum{font-size:11px;color:var(--text-dim);padding:0 10px 8px;line-height:1.4;max-height:4.2em;overflow:hidden}
+.tile.chat .cwd{font-size:10px;color:var(--text-dim);padding:0 10px 6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile.chat .resume{font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;padding:6px 10px 10px;color:var(--amber);word-break:break-all}
+#chfilters{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px 0;align-items:center}
+#chfilters .hchip{cursor:pointer}
+#chfilters .hint{font-size:11px;color:var(--text-dim);margin-left:auto}
 .oattach{margin-left:auto;flex-shrink:0}
 .owhy{font-size:9px;color:var(--text-dim);padding:4px 10px 8px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -2698,6 +2780,7 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
       <button class="tab" data-mode="activity">ACTIVITY</button>
       <button class="tab" data-mode="flow">FLOW</button>
       <button class="tab" data-mode="orphans">ORPHANS</button>
+      <button class="tab" data-mode="chats">CHATS</button>
     </div>
   </div>
   <div id="happrovals" style="display:none"><div id="htabs"></div><div id="hdetail"></div></div>
@@ -2853,7 +2936,7 @@ function lastSummary(s){return s.summary||(metaCache[s.name]&&metaCache[s.name].
 function goneAge(s){const m=metaCache[s.name];if(!m)return"";const sec=Math.round((Date.now()-m.ts)/1000);return sec<60?sec+"s":Math.round(sec/60)+"m";}
 let activeCompany=localStorage.getItem("emux_company")||"";   // restore the skin you were in
 let flowSig=null, flowPre={}, flowBox={};   // flow view: rebuild only on topology change, else update panes in place
-const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW",orphans:"ORPHANS"};
+const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW",orphans:"ORPHANS",chats:"CHATS"};
 
 // ---- deep links: the view, filters, and open session live in the URL, so any
 // state is bookmarkable/shareable and survives reload/back-forward. ----
@@ -3082,7 +3165,10 @@ function updateChrome(){         // title, footer, tab counts (#1 #3 #4)
   $("#footer").textContent="__PRODUCT_LINE__ · v__VERSION__ · "+grid.length+" sessions";
   document.querySelectorAll(".tab").forEach(t=>{
     const m=t.dataset.mode;
-    t.textContent=(m==="activity"&&actN)?BASE_TAB[m]+" · "+actN:BASE_TAB[m];
+    if(m==="activity"&&actN)t.textContent=BASE_TAB[m]+" · "+actN;
+    else if(m==="chats"&&CH.counts&&(CH.counts.stale||0)>0)
+      t.textContent=BASE_TAB[m]+" · "+CH.counts.stale;
+    else t.textContent=BASE_TAB[m];
   });
 }
 
@@ -3530,14 +3616,94 @@ async function openOrphans(){
   renderOrphans();
 }
 
+// ---- CHATS view: Claude Code + Grok Build transcripts on disk that are not
+// live in a process. ORPHANS = unknown tmux; CHATS = dropped agent missions.
+// Resume is copy-paste (spawn is a different path — do not auto-launch).
+const CH={rows:[],loading:false,gen:0,status:"stale,recent",match:"",counts:{}};
+function chatAge(h){
+  if(h==null)return "—";
+  if(h<1)return Math.round(h*60)+"m";
+  if(h<48)return Math.round(h)+"h";
+  return Math.round(h/24)+"d";
+}
+function chatTile(c){
+  const t=document.createElement("div");t.className="tile chat";
+  const st=c.status||"stale";
+  const h=document.createElement("header");
+  h.innerHTML='<span class="tool">'+esc(c.tool||"?")+'</span>'
+    +'<span class="nm">'+esc(c.title||c.session_id||"")+'</span>'
+    +'<span class="st-'+esc(st)+'">'+esc(st)+'</span>'
+    +'<span class="age t-old">'+chatAge(c.age_hours)+'</span>';
+  const b=document.createElement("button");b.className="act oattach";b.textContent="⧉ COPY RESUME";
+  b.onclick=async e=>{
+    e.stopPropagation();
+    try{await navigator.clipboard.writeText(c.resume||"");b.textContent="✓ COPIED";
+      setTimeout(()=>b.textContent="⧉ COPY RESUME",1200);}
+    catch(_){b.textContent="select + copy";}
+  };
+  h.appendChild(b);
+  const cwd=document.createElement("div");cwd.className="cwd";cwd.textContent=c.cwd||"";
+  const sum=document.createElement("div");sum.className="sum";
+  sum.textContent=c.summary||c.title||"(no summary)";
+  const res=document.createElement("div");res.className="resume";res.textContent=c.resume||"";
+  t.appendChild(h);t.appendChild(cwd);t.appendChild(sum);t.appendChild(res);
+  return t;
+}
+function renderChats(){
+  const v=$("#views");
+  if(mode!=="chats")return;
+  const sts=["stale,recent","stale","recent","live","all"];
+  const labels={ "stale,recent":"needs attention","stale":"stale","recent":"recent","live":"live","all":"all" };
+  v.innerHTML='<div id="chfilters">'
+    +sts.map(s=>'<span class="hchip'+(s===CH.status?" on":"")+'" data-st="'+s+'">'
+      +esc(labels[s]||s)+'</span>').join("")
+    +'<span class="hint">disk transcripts · not tmux · greenmark filter default on gmux</span></div>'
+    +'<div id="mverr"></div>';
+  v.querySelectorAll("#chfilters .hchip").forEach(el=>el.onclick=()=>{
+    CH.status=el.dataset.st;loadChats();
+  });
+  if(CH.loading){v.insertAdjacentHTML("beforeend",
+    '<div id="empty"><div class="glyph">💬</div><div>scanning Claude + Grok stores…</div></div>');return;}
+  if(!CH.rows.length){v.insertAdjacentHTML("beforeend",
+    '<div id="empty"><div class="glyph">💬</div><div>no matching chats'
+    +(CH.counts&&CH.counts.stale!=null?(" · stale "+(CH.counts.stale||0)): "")
+    +'</div></div>');return;}
+  const g=document.createElement("div");g.className="tilegrid";
+  CH.rows.forEach(c=>g.appendChild(chatTile(c)));
+  v.appendChild(g);
+}
+async function loadChats(){
+  CH.loading=true;const gen=++CH.gen;renderChats();
+  let q="/api/chats?limit=60&recent_hours=24";
+  if(CH.status&&CH.status!=="all")q+="&status="+encodeURIComponent(CH.status);
+  // empty match → server picks greenmark for gmux skin, all otherwise
+  if(CH.match)q+="&match="+encodeURIComponent(CH.match);
+  try{
+    const r=await api(q);
+    if(gen!==CH.gen)return;
+    CH.rows=r.ok?(r.chats||[]):[];
+    CH.counts=r.counts||{};
+    if(!r.ok)$("#mverr")&&($("#mverr").textContent=r.error||"scan failed");
+  }catch(e){
+    if(gen!==CH.gen)return;
+    CH.rows=[];
+    const err=$("#mverr");if(err)err.textContent="daemon unreachable";
+  }
+  CH.loading=false;renderChats();
+}
+async function openChats(){
+  renderChats();
+  if(!CH.rows.length||CH.gen===0)loadChats();
+}
+
 function render(){
   if(mode==="grid")renderGrid();
   else if(mode==="groups")renderGroups();
   else if(mode==="activity")renderActivity();
   else if(mode==="flow")renderFlow();
-  // orphans is manual: the 2s poll must not rebuild it mid-click — enter once,
-  // then only host picks / adopts redraw it
+  // orphans/chats are manual: the 2s poll must not rebuild them mid-click
   else if(mode==="orphans"){if(!document.getElementById("mvhosts"))openOrphans();}
+  else if(mode==="chats"){if(!document.getElementById("chfilters"))openChats();}
 }
 
 function pinned(){const c=$("#chat");return c.scrollHeight-c.scrollTop-c.clientHeight<60;}
@@ -4053,7 +4219,7 @@ document.addEventListener("keydown",e=>{
   if($("#modal").classList.contains("open")){if(e.key==="Escape")closeModal();return;}
   if(e.target.id==="filter"||e.target.id==="input"||e.target.id==="modalinput")return;
   if(e.target.closest&&e.target.closest("#newmodal"))return;
-  const map={"1":"grid","2":"groups","3":"activity","4":"flow","5":"orphans"};
+  const map={"1":"grid","2":"groups","3":"activity","4":"flow","5":"orphans","6":"chats"};
   if(map[e.key])setMode(map[e.key]);
 });
 // resume + clear title flash when tab refocuses (#13 #20)
@@ -4606,6 +4772,10 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             self._json({"ok": True, "host": h,
                         "dirs": _candidate_dirs(rh),
                         "running": _running_sessions(rh)})
+            return
+        if url.path == "/api/chats":
+            # Claude Code + Grok Build transcripts on disk (this host). Not tmux.
+            self._json(chats_payload(parse_qs(url.query)))
             return
         self._json({"ok": False, "error": "not_found"}, 404)
 
