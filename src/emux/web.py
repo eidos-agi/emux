@@ -2047,6 +2047,8 @@ def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
         "store_path": bundle.get("store_path"),
         "store_rows": bundle.get("store_rows"),
         "last_full_scan": bundle.get("last_full_scan"),
+        "query_ms": bundle.get("query_ms"),
+        "index_ms": bundle.get("index_ms"),
         "sync": bundle.get("sync"),
         "note": (
             "Durable chats.db index — disk is scanned only when the store is "
