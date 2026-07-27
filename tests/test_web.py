@@ -194,6 +194,8 @@ def daemon(monkeypatch):
     monkeypatch.setattr(server, "_load_registry", lambda: {})
     monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "pane content here\n", ""))
 
+    web.EmuxWebHandler.public_origin = None
+    web.EmuxWebHandler.public_path = ""
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), web.EmuxWebHandler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -201,6 +203,7 @@ def daemon(monkeypatch):
     httpd.shutdown()
     httpd.server_close()
     web.EmuxWebHandler.public_origin = None
+    web.EmuxWebHandler.public_path = ""
 
 
 def _get(url: str) -> tuple[int, dict | str]:
@@ -218,6 +221,56 @@ def test_http_serves_ui(daemon):
     assert "EMUX" in body and "control room" in body
     assert 'id="help-panel"' in body and "/api/help?q=" in body
     assert 'id="docsbtn"' in body and 'href="/docs"' in body
+    # root mount: empty public path, no leftover placeholder
+    assert 'const PUBLIC_PATH=""' in body
+    assert "__PUBLIC_PATH__" not in body
+
+
+def test_normalize_public_path():
+    from emux import web
+    assert web.normalize_public_path(None) == ""
+    assert web.normalize_public_path("") == ""
+    assert web.normalize_public_path("/gmux") == "/gmux"
+    assert web.normalize_public_path("/gmux/") is None
+    assert web.normalize_public_path("gmux") is None
+    assert web.normalize_public_path("/../etc") is None
+    assert web.normalize_public_path("/") is None
+
+
+def test_http_ui_stamps_public_path_prefix(monkeypatch):
+    """When mounted under /gmux, SPA absolute fetches must carry the prefix."""
+    from emux import server, web
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_live_sessions", lambda: [
+        {"name": "main", "windows": 1, "created_unix": 0, "attached": False},
+    ])
+    monkeypatch.setattr(server, "_load_registry", lambda: {})
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "pane\n", ""))
+    web.EmuxWebHandler.public_origin = "https://go.greenmarkwaste.com"
+    web.EmuxWebHandler.public_path = "/gmux"
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), web.EmuxWebHandler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        status, body = _get(base + "/")
+        assert status == 200
+        assert 'const PUBLIC_PATH="/gmux"' in body
+        assert 'href="/gmux/docs"' in body
+        assert 'fetch(PUBLIC_PATH+"/api/help' in body or 'fetch(PUBLIC_PATH+"/api/help?q="' in body
+        # Host guard accepts the public origin hostname
+        req = urllib.request.Request(
+            base + "/api/sessions",
+            headers={"Host": "go.greenmarkwaste.com"},
+        )
+        with urllib.request.urlopen(req) as r:
+            assert r.status == 200
+            assert json.loads(r.read().decode())["ok"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        web.EmuxWebHandler.public_origin = None
+        web.EmuxWebHandler.public_path = ""
 
 
 def test_http_serves_docs_with_shared_help_client(daemon):

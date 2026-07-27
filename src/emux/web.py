@@ -2615,7 +2615,7 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
     <span id="title">grid</span>
     <span id="status">connecting…</span>
     <button id="attachbtn" class="act" style="display:none">⧉ copy attach</button>
-    <a id="docsbtn" class="act" href="/docs" title="Emux documentation and help">◇ DOCS</a>
+    <a id="docsbtn" class="act" href="__PUBLIC_PATH__/docs" title="Emux documentation and help">◇ DOCS</a>
     <button id="newbtn" class="act">+ NEW SESSION</button>
     <button id="feedbtn" class="act" title="live fleet activity">◫ FEED</button>
     <button id="hbtn" class="act" title="Hancock approvals" onclick="openHancock()">⧉ HANCOCK<span id="hbadge" style="display:none">0</span></button>
@@ -2818,7 +2818,10 @@ function applyURL(){
 }
 window.addEventListener("hashchange",()=>{if(!urlBooting)applyURL();});
 
-async function api(path,opts){const r=await fetch(path,opts);return r.json();}
+// PUBLIC_PATH is injected by the daemon when published under a reverse-proxy
+// path prefix (e.g. /gmux). Empty string keeps loopback root behavior.
+const PUBLIC_PATH="__PUBLIC_PATH__";
+async function api(path,opts){const r=await fetch(PUBLIC_PATH+path,opts);return r.json();}
 
 function ageLabel(a){
   if(a===null||a===undefined)return "—";
@@ -4128,9 +4131,18 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
     # Optional canonical browser origin when published through a trusted proxy.
     # Default remains loopback-only.
     public_origin: str | None = None
+    # Optional path prefix when the reverse proxy mounts the UI under a path
+    # (e.g. "/gmux" behind go.greenmarkwaste.com). Empty string = root mount.
+    # Caddy handle_path strips this before the request hits us; the SPA still
+    # needs the prefix on absolute fetch/href so the browser hits the proxy path.
+    public_path: str = ""
     # Disabled unless supplied by an embedding service with a trusted identity
     # boundary. Never infer controller trust from localhost or browser headers.
     remote_controller_api: Any = None
+
+    def _with_public_path(self, html: str) -> str:
+        """Stamp the reverse-proxy path prefix into HTML/JS placeholders."""
+        return html.replace("__PUBLIC_PATH__", self.public_path or "")
 
     def _controller_error(self, exc: Exception) -> None:
         from .remote_control.protocol import ProtocolError
@@ -4181,7 +4193,8 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
         url = urlparse(self.path)
         if url.path == "/" or url.path == "/index.html":
-            body = _help.control_room_page(PAGE, __version__).replace("__OS__", _host_os()).encode()
+            html = _help.control_room_page(PAGE, __version__).replace("__OS__", _host_os())
+            body = self._with_public_path(html).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -4189,7 +4202,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if url.path in ("/docs", "/docs/"):
-            body = _help.docs_page(__version__).encode()
+            body = self._with_public_path(_help.docs_page(__version__)).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -4482,10 +4495,20 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         pass
 
 
-def launchd_plist(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
+def launchd_plist(
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    public_origin: str | None = None,
+    public_path: str = "",
+) -> str:
     """A ready-to-install launchd plist that keeps `emux web` running and
     restarts it on crash / login. Print with `emux web --print-launchd`."""
     emux = sys.argv[0]
+    extra = ""
+    if public_origin:
+        extra += f"\n    <string>--public-origin</string><string>{public_origin}</string>"
+    if public_path:
+        extra += f"\n    <string>--public-path</string><string>{public_path}</string>"
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -4496,7 +4519,7 @@ def launchd_plist(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
     <string>{emux}</string>
     <string>web</string>
     <string>--host</string><string>{host}</string>
-    <string>--port</string><string>{port}</string>
+    <string>--port</string><string>{port}</string>{extra}
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -4505,6 +4528,26 @@ def launchd_plist(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
 </dict>
 </plist>
 """
+
+
+def normalize_public_path(path: str | None) -> str | None:
+    """Return a normalized path prefix ('' or '/gmux') or None if invalid.
+
+    Rules: empty/None → ''; must start with /; no trailing slash; no //, ., ..,
+    query, fragment, or whitespace. Used by Caddy handle_path mounts where the
+    proxy strips the prefix before the daemon sees the request.
+    """
+    if path is None or path == "":
+        return ""
+    p = path.strip()
+    if not p.startswith("/") or p == "/":
+        return None
+    if p.endswith("/") or "//" in p or "?" in p or "#" in p or " " in p:
+        return None
+    segments = [s for s in p.split("/") if s]
+    if not segments or any(s in (".", "..") for s in segments):
+        return None
+    return "/" + "/".join(segments)
 
 
 def _remote_controller_from_env() -> Any:
@@ -4562,7 +4605,7 @@ def _remote_controller_from_env() -> Any:
 
 
 def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bool = False,
-            public_origin: str | None = None) -> int:
+            public_origin: str | None = None, public_path: str | None = None) -> int:
     """Start the emux web daemon. Blocks until Ctrl-C."""
     if _server._resolve_tmux() is None:
         print("emux web: tmux not found on PATH — the UI will load but show nothing.", file=sys.stderr)
@@ -4574,8 +4617,13 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
             print("emux web: --public-origin must be a bare http(s) origin.", file=sys.stderr)
             return 2
         public_origin = public_origin.rstrip("/")
+    normalized_path = normalize_public_path(public_path)
+    if normalized_path is None:
+        print("emux web: --public-path must look like /gmux (leading slash, no trail).", file=sys.stderr)
+        return 2
     EmuxWebHandler.extra_host = host if host not in _LOCALHOSTS else None
     EmuxWebHandler.public_origin = public_origin
+    EmuxWebHandler.public_path = normalized_path
     EmuxWebHandler.remote_controller_api = _remote_controller_from_env()
     try:
         server = ThreadingHTTPServer((host, port), EmuxWebHandler)
@@ -4602,6 +4650,10 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
 
     url = f"http://{host}:{port}"
     print(f"emux web daemon → {url}  (Ctrl-C to stop)")
+    if normalized_path:
+        print(f"  public path prefix: {normalized_path}  (proxy should strip before us)")
+    if public_origin:
+        print(f"  public origin: {public_origin}")
     if host not in _LOCALHOSTS:
         print("  WARNING: bound beyond localhost. The API blocks foreign Host/Origin", file=sys.stderr)
         print("  requests, but there is still NO authentication — anyone who can reach", file=sys.stderr)

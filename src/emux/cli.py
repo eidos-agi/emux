@@ -1428,7 +1428,13 @@ def main(argv: list[str] | None = None) -> int:
     p_web.add_argument(
         "--public-origin",
         default=None,
-        help="single trusted reverse-proxy origin, e.g. https://emux.example.com",
+        help="single trusted reverse-proxy origin, e.g. https://go.greenmarkwaste.com",
+    )
+    p_web.add_argument(
+        "--public-path",
+        default=None,
+        help="path prefix when reverse-proxied under a subpath, e.g. /gmux "
+             "(Caddy handle_path should strip it; the SPA keeps the prefix on fetches)",
     )
     p_web.add_argument("--open", action="store_true", help="open the browser after starting")
     p_web.add_argument(
@@ -1682,12 +1688,25 @@ def main(argv: list[str] | None = None) -> int:
         if args.print_launchd:
             from .web import launchd_plist
 
-            print(launchd_plist(host=args.host, port=args.port), end="")
+            print(
+                launchd_plist(
+                    host=args.host,
+                    port=args.port,
+                    public_origin=args.public_origin,
+                    public_path=args.public_path or "",
+                ),
+                end="",
+            )
             return 0
         from .web import run_web
 
-        return run_web(host=args.host, port=args.port, open_browser=args.open,
-                       public_origin=args.public_origin)
+        return run_web(
+            host=args.host,
+            port=args.port,
+            open_browser=args.open,
+            public_origin=args.public_origin,
+            public_path=args.public_path,
+        )
     if args.cmd == "new":
         return cmd_new_mission()
     if args.cmd == "ls":
