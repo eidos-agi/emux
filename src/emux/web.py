@@ -2568,6 +2568,43 @@ def send_payload(session: str, keys: str, literal: bool = True, enter: bool = Tr
     }
 
 
+def scroll_payload(
+    session: str,
+    direction: str = "up",
+    *,
+    amount: str = "page",
+    host: str | None = None,
+) -> dict[str, Any]:
+    """Scroll a live tmux pane via copy-mode (real terminal scrollback).
+
+    HTML capture can only show a snapshot; when that snapshot fits the modal,
+    wheel/PgUp need to drive tmux itself or the user sees no movement.
+    """
+    if host is None and _server._resolve_tmux() is None:
+        return {"ok": False, "error": "tmux_not_installed"}
+    direction = (direction or "up").strip().lower()
+    amount = (amount or "page").strip().lower()
+    if direction not in ("up", "down"):
+        return {"ok": False, "error": "bad_direction"}
+    # Ensure copy-mode, then page/halfpage/line
+    code, _, err = _server._run_tmux(["copy-mode", "-t", session], host=host)
+    if code != 0:
+        return {"ok": False, "error": "tmux_copy_mode_failed", "stderr": err}
+    if amount in ("line", "lines", "1"):
+        action = "scroll-up" if direction == "up" else "scroll-down"
+    elif amount in ("half", "halfpage"):
+        action = "halfpage-up" if direction == "up" else "halfpage-down"
+    else:
+        action = "page-up" if direction == "up" else "page-down"
+    code, _, err = _server._run_tmux(
+        ["send-keys", "-t", session, "-X", action],
+        host=host,
+    )
+    if code != 0:
+        return {"ok": False, "error": "tmux_scroll_failed", "stderr": err, "action": action}
+    return {"ok": True, "session": session, "direction": direction, "amount": amount, "action": action}
+
+
 def _switch_plan(session: str, host: str | None = None, to: str | None = None,
                  dry_run: bool = False) -> dict[str, Any]:
     """Fail a session over to another Claude account, in code: exit the agent,
@@ -3129,22 +3166,26 @@ body.solo-session #modalpop{display:none} /* already in a tab */
 #modaliterm{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 10px;margin-left:6px}
 #modaliterm:hover{color:var(--amber);border-color:var(--amber-dim)}
 #modaliterm:disabled{opacity:.6;cursor:default}
+/* Shell owns the flex slot; screen is absolute-fill so height is always the
+   free region between header/gist and composer — never content-sized, never 0. */
+#modalshell{
+  flex:1 1 0;min-height:160px;min-width:0;position:relative;
+  overflow:hidden;background:var(--bg-card);border-top:1px solid var(--line);
+}
 #modalscreen{
-  /* flex-basis:0 — not auto — so height is the free slot, not content size.
-     Without this the pane grows with the capture and body{overflow:hidden}
-     clips it: wheel does nothing, which feels like "can't scroll the terminal". */
-  flex:1 1 0;min-height:0;min-width:0;
-  overflow-x:auto;overflow-y:scroll; /* always show vertical rail so scroll is obvious */
+  position:absolute;inset:0;
+  overflow-x:auto;overflow-y:scroll; /* always show vertical rail */
   overscroll-behavior:contain;
   -webkit-overflow-scrolling:touch;
   touch-action:pan-x pan-y;
   font:12.5px/1.45 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
-  white-space:pre-wrap;word-break:break-word;padding:6px 10px 28px;background:var(--bg-card);
-  position:relative;
+  white-space:pre-wrap;word-break:break-word;padding:8px 12px 36px;background:var(--bg-card);
+  outline:none;
 }
+#modalscreen:focus{box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--amber) 35%, transparent)}
 #modaljump{
   display:none;position:absolute;left:50%;transform:translateX(-50%);
-  bottom:78px;z-index:12;padding:5px 14px;border-radius:14px;
+  bottom:12px;z-index:12;padding:5px 14px;border-radius:14px;
   background:var(--amber);color:var(--on-accent);border:none;
   font:11px/1 "IBM Plex Mono",ui-monospace,monospace;letter-spacing:.6px;
   cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.35);
@@ -3152,7 +3193,7 @@ body.solo-session #modalpop{display:none} /* already in a tab */
 #modaljump.on{display:block}
 #modaljump:hover{filter:brightness(1.08)}
 /* live classifier strip (emux judge) */
-#modaljudge{display:none;align-items:center;gap:10px;padding:4px 10px;flex:none;
+#modaljudge{display:none;align-items:center;gap:10px;padding:4px 10px;flex:0 0 auto;
   border-bottom:1px solid var(--line);background:var(--bg-raise);font:11px "IBM Plex Mono",monospace}
 #modaljudge.on{display:flex}
 #modaljudge .jstate{font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:12px;white-space:nowrap}
@@ -3194,9 +3235,10 @@ body.solo-session #modalpop{display:none} /* already in a tab */
 #modalclips .clip .rm:hover{color:var(--stale)}
 #modalclips .cliphint{font-size:10px;color:var(--text-dim);letter-spacing:.3px}
 /* the gist — reader's-digest + suggested replies, so you know what to do */
-#modaldigest{display:none}
+#modaldigest{display:none;flex:0 0 auto;max-height:22vh;overflow:hidden}
 #modaldigest.on{display:block;padding:6px 10px;background:var(--bg-raise);
-  border-bottom:1px solid var(--amber-faint);flex:0 0 auto}
+  max-height:22vh;overflow-y:auto; /* never starve #modalshell of height */
+  border-bottom:1px solid var(--amber-faint)}
 #modaldigest .dghead{display:flex;align-items:center;font-size:10px;letter-spacing:2px;
   text-transform:uppercase;color:var(--amber-dim);margin-bottom:3px}
 #dgrefresh{margin-left:auto;background:transparent;border:none;color:var(--text-dim);
@@ -3470,8 +3512,10 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
       <div class="dgtext"></div>
       <div class="dgsugg"></div>
     </div>
-    <div id="modalscreen" tabindex="0" role="log" aria-label="session terminal"></div>
-    <button type="button" id="modaljump" title="jump to live bottom">↓ live</button>
+    <div id="modalshell">
+      <div id="modalscreen" tabindex="0" role="log" aria-label="session terminal"></div>
+      <button type="button" id="modaljump" title="jump to live bottom">↓ live</button>
+    </div>
     <div id="tchat" class="collapsed">
       <button id="tchatlauncher" onclick="tchatToggle()">💬<span id="tchatbadge"></span></button>
       <div id="tchatpanel">
@@ -3486,6 +3530,8 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
       <button class="chip" data-keys="C-c">^C</button>
       <button class="chip" data-keys="Escape">ESC</button>
       <button class="chip" data-keys="Enter">⏎</button>
+      <button class="chip" data-keys="PageUp" title="scroll terminal up (tmux copy-mode)">PgUp</button>
+      <button class="chip" data-keys="PageDown" title="scroll terminal down">PgDn</button>
       <button class="chip" data-keys="Up">↑</button>
       <button class="chip" data-keys="Tab">TAB</button>
     </div>
@@ -4798,8 +4844,23 @@ async function modalJudge(){
     }else{el.className="";el.innerHTML="";}
   }catch(e){el.className="";}
 }
+async function modalScrollTmux(direction,amount){
+  if(!modalSession)return false;
+  try{
+    const r=await api("/api/scroll",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({session:modalSession.session,direction:direction||"up",amount:amount||"page"})});
+    // Pin HTML view so refresh doesn't yank; then re-capture the copy-mode view
+    const sc=$("#modalscreen");if(sc)sc.dataset.userPinned="1";
+    setTimeout(modalRefresh,120);
+    return !!(r&&r.ok);
+  }catch(e){return false;}
+}
 async function modalKeys(keys,literal,enter){
   if(!modalSession)return false;
+  // PageUp/PageDown chips → real tmux scrollback (not keystrokes into the agent)
+  if(!literal&&(keys==="PageUp"||keys==="PageDown"||keys==="PPage"||keys==="NPage")){
+    return modalScrollTmux(keys==="PageUp"||keys==="PPage"?"up":"down","page");
+  }
   try{
     const r=await api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({session:modalSession.session,keys,literal,enter})});
@@ -5188,22 +5249,52 @@ $("#newintent").addEventListener("keydown",e=>{if(e.key==="Enter")doSuggest();})
 $("#dgrefresh").onclick=loadDigest;
 $("#modalclose").onclick=closeModal;
 $("#modalback").onclick=closeModal;
-// Terminal scroll: track user pin + jump-to-live pill
+// Terminal scroll: HTML overflow when capture is tall; else tmux copy-mode.
+// Wheel / trackpad is the main path users try first.
 (function(){
   const sc=$("#modalscreen"), j=$("#modaljump");
+  let wheelBusy=false, wheelAcc=0, wheelTimer=null;
   if(sc){
     sc.addEventListener("scroll",()=>{
       if(modalScreenPinned(sc))sc.dataset.userPinned="0";
       else sc.dataset.userPinned="1";
       updateModalJump();
     },{passive:true});
-    // Wheel over the pane should always scroll the pane (not a parent).
     sc.addEventListener("wheel",e=>{
-      // only stopPropagation so trackpads don't scroll a non-scrolling ancestor
       e.stopPropagation();
-    },{passive:true});
+      const canUp=sc.scrollTop>2;
+      const canDown=sc.scrollTop+sc.clientHeight<sc.scrollHeight-2;
+      const tall=sc.scrollHeight>sc.clientHeight+8;
+      // Prefer native HTML scroll when the capture actually overflows.
+      if(tall&&((e.deltaY<0&&canUp)||(e.deltaY>0&&canDown)||(e.deltaY<0&&canUp===false&&canDown===false&&sc.scrollTop<=2&&e.deltaY>0))){
+        // Let the browser scroll #modalscreen; mark pin when leaving bottom.
+        if(!modalScreenPinned(sc))sc.dataset.userPinned="1";
+        return;
+      }
+      if(tall&&e.deltaY>0&&canDown){return;}
+      if(tall&&e.deltaY<0&&canUp){return;}
+      // No more HTML room (or capture fits the viewport) → drive tmux scrollback.
+      e.preventDefault();
+      wheelAcc+=e.deltaY;
+      if(wheelTimer)clearTimeout(wheelTimer);
+      wheelTimer=setTimeout(()=>{wheelAcc=0;},180);
+      if(wheelBusy)return;
+      if(Math.abs(wheelAcc)<28)return; // ignore tiny trackpad noise
+      const dir=wheelAcc<0?"up":"down";
+      const amount=Math.abs(wheelAcc)>140?"page":"half";
+      wheelAcc=0;wheelBusy=true;
+      modalScrollTmux(dir,amount).finally(()=>{wheelBusy=false;});
+    },{passive:false});
   }
-  if(j)j.onclick=()=>{const s=$("#modalscreen");if(s)s.dataset.userPinned="0";modalScrollBottom();};
+  if(j)j.onclick=()=>{
+    const s=$("#modalscreen");if(s)s.dataset.userPinned="0";
+    // Leave tmux copy-mode so the live agent is visible again
+    if(modalSession){
+      api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({session:modalSession.session,keys:"Escape",literal:false,enter:false})})
+        .finally(()=>{modalScrollBottom();setTimeout(modalRefresh,200);});
+    }else modalScrollBottom();
+  };
 })();
 document.querySelectorAll("#modalchips .chip").forEach(ch=>ch.onclick=()=>modalKeys(ch.dataset.keys,false,false));
 
@@ -5811,7 +5902,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         if url.path not in ("/api/send", "/api/head", "/api/spawn", "/api/suggest",
                             "/api/adopt", "/api/reply", "/api/chats/resume",
-                            "/api/clip-image", "/api/steer",
+                            "/api/clip-image", "/api/steer", "/api/scroll",
                             "/api/hancock/approve", "/api/hancock/deny",
                             "/api/models", "/api/models/test", "/api/plan/switch"):
             self._json({"ok": False, "error": "not_found"}, 404)
@@ -5858,6 +5949,19 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         if url.path == "/api/steer":
             # Grok headless (B) / ACP (C) / tmux PTY — control plane steer
             self._json(steer_payload(data if isinstance(data, dict) else {}))
+            return
+        if url.path == "/api/scroll":
+            # Wheel / PgUp in modal → tmux copy-mode scrollback
+            sess = (data.get("session") or data.get("name") or "").strip()
+            if not sess:
+                self._json({"ok": False, "error": "missing_session"}, 400)
+                return
+            self._json(scroll_payload(
+                sess,
+                direction=str(data.get("direction") or "up"),
+                amount=str(data.get("amount") or "page"),
+                host=_session_host(sess),
+            ))
             return
         if url.path == "/api/reply":
             sess = (data.get("session") or "").strip()
