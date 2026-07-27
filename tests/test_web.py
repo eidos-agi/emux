@@ -243,6 +243,25 @@ def test_http_simple_status_always_available(daemon):
     assert "tmux attach -t main" in body or "tmux attach -t" in body
 
 
+def test_ai_diagnosis_has_verdict_and_sessions(daemon):
+    """AI mode is plain markdown with an explicit HEALTHY/DEGRADED/FAIL verdict."""
+    status, body = _get(daemon + "/ai")
+    assert status == 200
+    text = body if isinstance(body, str) else str(body)
+    # /ai returns markdown; _get may parse as str
+    assert "verdict:" in text.lower() or "verdict" in text.lower()
+    assert "main" in text
+    assert "Scan scope" in text or "scan scope" in text.lower()
+    assert "Connect commands" in text or "connect" in text.lower()
+
+
+def test_ai_diagnosis_html_wrapper(daemon):
+    status, body = _get(daemon + "/ai.html")
+    assert status == 200
+    assert "AI mode" in body or "diagnosis" in body.lower()
+    assert "<pre" in body
+
+
 def test_gmux_skin_rebrands_without_forking():
     from emux import skin
     s = skin.get_skin("gmux")

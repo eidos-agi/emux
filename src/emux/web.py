@@ -4289,9 +4289,30 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_text(self, text: str, content_type: str = "text/markdown; charset=utf-8",
+                   status: int = 200) -> None:
+        body = text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _control_room_html(self) -> str:
         html = _help.control_room_page(PAGE, __version__).replace("__OS__", _host_os())
         return self._with_public_path(html)
+
+    def _wants_ai_format(self, url) -> bool:
+        qs = parse_qs(url.query or "")
+        fmt = (qs.get("format") or qs.get("mode") or [""])[0].lower()
+        if fmt in ("ai", "md", "markdown", "text", "txt"):
+            return True
+        accept = (self.headers.get("Accept") or "").lower()
+        if "text/markdown" in accept or "text/plain" in accept:
+            if "text/html" not in accept.split(",")[0]:
+                return True
+        return False
 
     def _simple_status_from_url(self, url) -> str:
         """Parse filter/peek query params for the simple status page."""
@@ -4327,16 +4348,39 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
         url = urlparse(self.path)
+        # AI mode: plain markdown diagnosis (also ?format=ai on status routes).
+        if url.path in ("/ai", "/ai/", "/ai.md", "/diagnosis", "/diagnosis/"):
+            md = ai_diagnosis_markdown(__version__, self.public_path or "")
+            # /ai.html or browser navigation → readable wrapper; raw path → markdown
+            qs = parse_qs(url.query or "")
+            want_html = (qs.get("view") or [""])[0].lower() in ("html", "1", "yes")
+            if want_html or url.path.rstrip("/").endswith(".html"):
+                self._send_html(ai_diagnosis_html(__version__, self.public_path or ""))
+            else:
+                self._send_text(md)
+            return
+        if url.path in ("/ai.html", "/ai.html/"):
+            self._send_html(ai_diagnosis_html(__version__, self.public_path or ""))
+            return
         # Simple status first: under a public path mount, "/" is the testable
         # read-only table; full SPA lives at /room. Local loopback (no path)
         # keeps "/" as the full control room for existing muscle memory.
         if url.path in ("/simple", "/simple/", "/status", "/status/"):
+            if self._wants_ai_format(url):
+                self._send_text(ai_diagnosis_markdown(__version__, self.public_path or ""))
+                return
             self._send_html(self._simple_status_from_url(url))
             return
         if url.path in ("/room", "/room/"):
+            if self._wants_ai_format(url):
+                self._send_text(ai_diagnosis_markdown(__version__, self.public_path or ""))
+                return
             self._send_html(self._control_room_html())
             return
         if url.path == "/" or url.path == "/index.html":
+            if self._wants_ai_format(url):
+                self._send_text(ai_diagnosis_markdown(__version__, self.public_path or ""))
+                return
             if self.public_path:
                 self._send_html(self._simple_status_from_url(url))
             else:
@@ -4741,6 +4785,275 @@ def connect_command(
     return tmux
 
 
+def ai_diagnosis_markdown(
+    version: str,
+    public_path: str = "",
+    *,
+    include_panes: bool = True,
+    pane_lines: int = 12,
+) -> str:
+    """Plain markdown diagnosis of the fleet — for AIs and humans who want signal.
+
+    No HTML chrome. Designed so a model can answer "is anything broken?" from one
+    document: scope honesty, live vs ghost, unknown sockets, connect commands,
+    optional short pane samples from LIVE sessions only.
+    """
+    from datetime import datetime, timezone
+
+    from . import skin as _skin
+
+    sk = _skin.active_skin()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    payload = sessions_payload()
+    sessions = payload.get("sessions") or []
+    scope = payload.get("scope") or {}
+    ok = bool(payload.get("ok"))
+    err = payload.get("error") or ""
+
+    live = [s for s in sessions if s.get("live")]
+    ghosts = [
+        s for s in sessions
+        if s.get("registered") and not s.get("live") and s.get("state") != "unknown"
+    ]
+    unknown = [s for s in sessions if s.get("state") == "unknown"]
+    unregistered_live = [s for s in live if not s.get("registered")]
+
+    # Verdict — conservative, explicit reasons
+    reasons: list[str] = []
+    if not ok:
+        verdict = "FAIL"
+        reasons.append(f"sessions_payload not ok: {err or 'unknown'}")
+    elif any(s.get("status") == "unknown" for s in (scope.get("sockets") or [])):
+        verdict = "DEGRADED"
+        reasons.append("one or more tmux sockets unreadable (unknown)")
+    elif not live and ghosts:
+        verdict = "DEGRADED"
+        reasons.append(f"no LIVE sessions; {len(ghosts)} registry ghost(s)")
+    elif not live:
+        verdict = "DEGRADED"
+        reasons.append("no LIVE tmux sessions on scanned sockets")
+    else:
+        verdict = "HEALTHY"
+        reasons.append(f"{len(live)} live session(s) on scanned sockets")
+    if unregistered_live:
+        reasons.append(
+            f"{len(unregistered_live)} live session(s) not in registry "
+            f"(visible but unmanaged): "
+            + ", ".join(str(s.get("name")) for s in unregistered_live[:8])
+        )
+    if ghosts:
+        reasons.append(f"{len(ghosts)} stale registry row(s) kept (not reaped)")
+
+    ssh_host = resolve_connect_ssh_host(public_path)
+    lines: list[str] = [
+        f"# {sk.product} system diagnosis",
+        "",
+        f"- generated: {now}",
+        f"- product: {sk.product} (skin={sk.id})",
+        f"- engine: {sk.engine_label} {version}",
+        f"- public_path: {public_path or '/'}",
+        f"- verdict: **{verdict}**",
+        "",
+        "## Why this verdict",
+    ]
+    for r in reasons:
+        lines.append(f"- {r}")
+    lines += [
+        "",
+        "## Scan scope (honest limits)",
+        "",
+        f"{scope.get('claim') or 'scope not scanned yet'}",
+        "",
+        "This is NOT all host processes, NOT other users' tmux, NOT bare ssh/nohup.",
+        "",
+        "### Sockets probed",
+        "",
+    ]
+    socks = scope.get("sockets") or []
+    if not socks:
+        lines.append("- (none recorded)")
+    else:
+        for skt in socks:
+            lines.append(
+                f"- `{skt.get('socket')}` status={skt.get('status')} "
+                f"n={skt.get('n')} path={skt.get('path') or '—'} "
+                f"err={skt.get('error') or '—'}"
+            )
+
+    lines += [
+        "",
+        "## Counts",
+        "",
+        f"- live: {len(live)}",
+        f"- ghosts (stale registered): {len(ghosts)}",
+        f"- unknown sockets: {len(unknown)}",
+        f"- registered total: {sum(1 for s in sessions if s.get('registered'))}",
+        f"- rows total: {len(sessions)}",
+        "",
+        "## Sessions",
+        "",
+        "| name | tmux | host | socket | state | registered | tags | description |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for s in sessions:
+        tags = ",".join(s.get("tags") or []) or "—"
+        desc = (s.get("description") or "—").replace("|", "\\|").replace("\n", " ")
+        lines.append(
+            f"| {s.get('name')} | {s.get('session')} | {s.get('host') or 'local'} | "
+            f"{s.get('socket') or 'default'} | {s.get('state') or ('live' if s.get('live') else 'stale')} | "
+            f"{'yes' if s.get('registered') else 'no'} | {tags} | {desc} |"
+        )
+
+    lines += ["", "## Connect commands (LIVE only)", ""]
+    if not live:
+        lines.append("- (none — no live sessions)")
+    else:
+        for s in live:
+            if str(s.get("session") or "").startswith("socket:"):
+                continue
+            cmd = connect_command(
+                str(s.get("session")),
+                socket_path=s.get("socket_path"),
+                socket_name=str(s.get("socket") or "default"),
+                ssh_host=ssh_host,
+            )
+            lines.append(f"- `{s.get('name')}`: `{cmd}`")
+
+    if include_panes and live:
+        lines += [
+            "",
+            f"## Pane samples (last {pane_lines} lines, LIVE only)",
+            "",
+            "Use these to see if agents are stuck on gates, idle shells, or errors.",
+            "",
+        ]
+        for s in live:
+            tmux_name = str(s.get("session") or "")
+            if tmux_name.startswith("socket:"):
+                continue
+            lines.append(f"### {s.get('name')} (`{tmux_name}`)")
+            lines.append("```")
+            cap = capture_payload(
+                tmux_name,
+                lines=max(5, min(pane_lines, 80)),
+                host=s.get("host"),
+                socket=s.get("socket_path"),
+            )
+            if not cap.get("ok"):
+                lines.append(f"(capture failed: {cap.get('error')})")
+            else:
+                content = (cap.get("content") or "").rstrip("\n")
+                sample = "\n".join(content.splitlines()[-pane_lines:])
+                lines.append(sample if sample else "(empty pane)")
+            lines.append("```")
+            lines.append("")
+
+    lines += [
+        "## How an AI should use this",
+        "",
+        "1. Read **verdict** first — FAIL/DEGRADED/HEALTHY.",
+        "2. If DEGRADED with only ghosts: work died; registry still has names — do not treat as running.",
+        "3. If unknown sockets: inventory is incomplete; do not claim full host coverage.",
+        "4. Unregistered LIVE rows are real processes — consider registering for governance.",
+        "5. Connect commands are for a human laptop (ssh → tmux attach), not for inventing new sessions.",
+        "6. Pane samples beat guessing — look for gates, errors, idle shells.",
+        "",
+        f"— end {sk.product} diagnosis —",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def ai_diagnosis_html(version: str, public_path: str = "") -> str:
+    """Human-readable wrapper around the AI markdown (copy-friendly)."""
+    import html as _html
+
+    from . import skin as _skin
+
+    sk = _skin.active_skin()
+    md = ai_diagnosis_markdown(version, public_path)
+    base = public_path or ""
+    return sk.apply(
+        f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__PRODUCT__ AI diagnosis</title>
+<style id="skin-theme">__THEME_CSS__</style>
+<link rel="icon" href="__FAVICON__">
+<style>
+body{{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--ink)}}
+header{{padding:16px 20px;border-bottom:1px solid var(--line);background:var(--card);
+ display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between}}
+.brand-row{{display:flex;align-items:center;gap:10px}}
+.brand-row .skin-logo{{color:var(--amber)}}
+.brand-word{{font-weight:600;color:var(--ink)}}
+.meta{{font-size:12px;color:var(--dim)}}
+.meta a{{color:var(--ink)}}
+#themebtn,button.copy{{font:12px system-ui;cursor:pointer;border:1px solid var(--line);
+ background:var(--card);color:var(--ink);padding:6px 12px;border-radius:6px}}
+main{{padding:16px 20px 40px;max-width:900px}}
+pre{{white-space:pre-wrap;word-break:break-word;background:var(--bg-raise);border:1px solid var(--line);
+ border-radius:8px;padding:16px;font:12px/1.45 ui-monospace,Menlo,monospace;color:var(--ink)}}
+.hint{{font-size:12px;color:var(--dim);margin:0 0 12px}}
+</style>
+</head><body>
+<header>
+  <div>
+    <div class="brand-row">__LOGO_HTML__</div>
+    <div class="meta">AI mode · plain diagnosis ·
+      <a href="{base}/">status UI</a> ·
+      <a href="{base}/ai">raw markdown</a> ·
+      <a href="{base}/room">__TAGLINE__</a>
+    </div>
+  </div>
+  <div style="display:flex;gap:8px">
+    <button type="button" class="copy" id="copyai">copy all</button>
+    <button type="button" id="themebtn">☾ dark</button>
+  </div>
+</header>
+<main>
+  <p class="hint">Paste this whole page into an AI to diagnose the fleet.
+  Raw URL for agents: <code>{base}/ai</code> (Content-Type: text/markdown).</p>
+  <pre id="diag">{_html.escape(md)}</pre>
+</main>
+<script>
+document.getElementById("copyai").onclick=function(){{
+  var t=document.getElementById("diag").textContent;
+  var b=this;
+  if(navigator.clipboard&&navigator.clipboard.writeText){{
+    navigator.clipboard.writeText(t).then(function(){{b.textContent="copied";setTimeout(function(){{b.textContent="copy all"}},1200)}});
+  }}
+}};
+(function(){{
+  var KEY="__THEME_STORAGE_KEY__";
+  var def="__DEFAULT_THEME__";
+  function pref(){{
+    try{{var s=localStorage.getItem(KEY); if(s==="light"||s==="dark")return s;}}catch(e){{}}
+    if(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
+    return def==="dark"?"dark":"light";
+  }}
+  function apply(t){{
+    document.documentElement.setAttribute("data-theme", t);
+    var b=document.getElementById("themebtn");
+    if(b) b.textContent=t==="dark"?"☀ light":"☾ dark";
+  }}
+  function toggle(){{
+    var next=(document.documentElement.getAttribute("data-theme")||pref())==="dark"?"light":"dark";
+    try{{localStorage.setItem(KEY,next);}}catch(e){{}}
+    apply(next);
+  }}
+  apply(pref());
+  var b=document.getElementById("themebtn");
+  if(b) b.onclick=toggle;
+}})();
+</script>
+</body></html>
+""",
+        version,
+    )
+
+
 def resolve_connect_ssh_host(public_path: str = "") -> str | None:
     """SSH destination for connect-copy. Env wins; gmux skin or public path ⇒ rentamac."""
     env = (os.environ.get("EMUX_CONNECT_SSH") or os.environ.get("GREENMUX_HOST") or "").strip()
@@ -5087,6 +5400,8 @@ def simple_status_html(
     <div class="meta">
       __PRODUCT_LINE__ · read-only · auto-refresh 15s ·
       <a href="{base}/room">__TAGLINE__</a> ·
+      <a href="{base}/ai.html">AI mode</a> ·
+      <a href="{base}/ai">AI markdown</a> ·
       <a href="{base}/healthz">healthz</a>
       <span class="dim"> · __FOOTER_NOTE__</span>
     </div>
