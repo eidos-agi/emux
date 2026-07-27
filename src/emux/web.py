@@ -3615,6 +3615,18 @@ a.linlink{color:var(--amber);text-decoration:none;border-bottom:1px dotted color
 a.linlink:hover{color:var(--amber);border-bottom-style:solid;filter:brightness(1.08)}
 .tile.chat .sum a.linlink,.tile.chat .nm a.linlink,.tile.chat .peek a.linlink{font-weight:600}
 .bubble a.linlink,.rail a.linlink,.fev a.linlink{font-weight:600}
+/* Chat bubble after a task id — pursue that Linear issue */
+.linwrap{display:inline;white-space:nowrap}
+button.linchat{
+  display:inline-flex;align-items:center;justify-content:center;
+  margin:0 1px 0 3px;padding:0 4px;min-width:1.35em;height:1.35em;
+  border:1px solid color-mix(in srgb, var(--amber) 45%, var(--line));
+  border-radius:999px;background:color-mix(in srgb, var(--amber) 12%, transparent);
+  color:var(--amber);font-size:11px;line-height:1;cursor:pointer;
+  vertical-align:middle;font-family:inherit;
+}
+button.linchat:hover{background:color-mix(in srgb, var(--amber) 28%, transparent);border-color:var(--amber)}
+button.linchat:disabled{opacity:.55;cursor:default}
 .tile.chat .meta{font-size:10px;color:var(--text-dim);padding:0 10px 8px;display:flex;gap:10px;flex-wrap:wrap}
 .tile.chat .resume{font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;padding:0 10px 8px;color:var(--amber);word-break:break-all;opacity:.85}
 .tile.chat .peek{margin:0 10px 10px;padding:8px;background:color-mix(in srgb, var(--bg) 70%, #000);border:1px solid var(--line);border-radius:4px;max-height:180px;overflow:auto;font-size:11px;line-height:1.4}
@@ -6943,7 +6955,14 @@ function isLinearIssueKey(key){
   if(!/^[A-Z]{2,12}$/.test(pre)) return false;
   return true;
 }
-/** Escape + turn Linear keys (and bare http URLs) into <a class="linlink">. */
+/** HTML for one Linear key + chat bubble (bubble loads/pursues the task). */
+function linearKeyHTML(key){
+  return '<span class="linwrap">'
+    +'<a class="linlink" href="'+linearIssueUrl(key)+'" target="_blank" rel="noopener noreferrer" title="Open '+key+' in Linear">'+key+'</a>'
+    +'<button type="button" class="linchat" data-linear="'+key+'" title="Side chat + load '+key+' into this head so you can pursue it">💬</button>'
+    +'</span>';
+}
+/** Escape + turn Linear keys (and bare http URLs) into links + pursue bubbles. */
 function linkifyLinear(raw){
   const s=String(raw==null?"":raw);
   if(!s) return "";
@@ -6952,20 +6971,104 @@ function linkifyLinear(raw){
   return parts.map((part,i)=>{
     if(i%2===1){
       const e=esc(part);
+      // If the URL is a Linear issue page, also offer the pursue bubble.
+      const m=part.match(/linear\.app\/[^/]+\/issue\/([A-Z]{2,12}-\d{1,7})/i);
+      if(m&&isLinearIssueKey(m[1].toUpperCase())){
+        const key=m[1].toUpperCase();
+        return '<span class="linwrap"><a class="linlink" href="'+e+'" target="_blank" rel="noopener noreferrer">'+e+'</a>'
+          +'<button type="button" class="linchat" data-linear="'+key+'" title="Side chat + load '+key+' so you can pursue it">💬</button></span>';
+      }
       return '<a class="linlink" href="'+e+'" target="_blank" rel="noopener noreferrer">'+e+'</a>';
     }
     return esc(part).replace(LINEAR_ISSUE_RE,m=>
-      isLinearIssueKey(m)
-        ?('<a class="linlink" href="'+linearIssueUrl(m)+'" target="_blank" rel="noopener noreferrer" title="Open '+m+' in Linear">'+m+'</a>')
-        :m
+      isLinearIssueKey(m)?linearKeyHTML(m):m
     );
   }).join("");
 }
-/** Bind linlinks so parent tile/card clicks do not fire. */
+/** Craft the message that primes a head to load Linear issue KEY and work it. */
+function linearPursuePrompt(key){
+  const url=linearIssueUrl(key);
+  return (
+    "Load Linear issue "+key+" and prepare to pursue it.\n"
+    +"URL: "+url+"\n\n"
+    +"Do this now:\n"
+    +"1. Open/fetch the issue (Linear UI, CLI, or MCP if you have it) and restate: title, status, assignee, description, acceptance criteria, blockers, and linked PRs/branches if any.\n"
+    +"2. Summarize what \"done\" means and the smallest next concrete step.\n"
+    +"3. Stay on "+key+" unless I redirect you — treat this as the active work item for this conversation.\n"
+    +"4. If you cannot reach Linear, say what you need; otherwise start executing the next step after the summary."
+  );
+}
+/**
+ * Chat bubble after a task id: open a side chat about KEY and inject a
+ * "load this Linear issue so we can pursue it" prompt into the open head
+ * (or spawn a fresh Claude if no modal is open).
+ */
+function pursueLinearTask(key, opts){
+  key=String(key||"").trim().toUpperCase();
+  if(!isLinearIssueKey(key)) return;
+  const o=opts||{};
+  // Prefer working inside an open session modal
+  if(modalSession){
+    const sc=openSideChat({
+      kind:"task",
+      topic:key,
+      title:"about "+key,
+      seed:o.seed||(
+        "Pursuing Linear "+key+".\n"+linearIssueUrl(key)+"\n\n"
+        +"I just asked the parent head to load this issue and treat it as active work. "
+        +"Use this side chat for follow-ups about "+key+"; “Fresh Claude” spins a dedicated seat."
+      ),
+    });
+    const prompt=linearPursuePrompt(key);
+    if(sc) tchatLog("you","Load + pursue "+key,sc.id);
+    setPending(prompt.length>160?prompt.slice(0,160)+"…":prompt);
+    const st=$("#modalstatus");
+    if(st){st.textContent="loading "+key+"…";st.style.color="";}
+    modalKeys(prompt,true,true).then(ok=>{
+      if(st){
+        st.textContent=ok?("pursuing "+key):("send failed — try again");
+        st.style.color=ok?"":"var(--stale)";
+      }
+      if(ok) setTimeout(()=>{modalRefresh();loadDigest();},800);
+    });
+    return;
+  }
+  // No modal: spawn a dedicated Claude seat for the issue
+  const slug=key.toLowerCase().replace(/[^a-z0-9]+/g,"-");
+  const name=("task-"+slug+"-"+Date.now().toString(36).slice(-4)).slice(0,48);
+  api("/api/spawn",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({
+      name,
+      command:"claude --dangerously-skip-permissions",
+      prompt:linearPursuePrompt(key),
+      description:"Pursue Linear "+key,
+      tags:["sidechat","linear",key,"pursue"],
+    })}).then(async r=>{
+      if(r&&r.ok){
+        try{await poll();}catch(_){}
+        const s=grid.find(x=>x.name===(r.name||name));
+        if(s) openModal(s);
+      }else{
+        alert("Could not open seat for "+key+": "+((r&&r.error)||"unknown"));
+      }
+    });
+}
+/** Bind linlinks + chat bubbles so parent tile/card clicks do not fire. */
 function bindLinlinks(root){
   if(!root) return;
   root.querySelectorAll("a.linlink").forEach(a=>{
     a.onclick=e=>{e.stopPropagation();};
+  });
+  root.querySelectorAll("button.linchat").forEach(btn=>{
+    btn.onclick=e=>{
+      e.preventDefault();
+      e.stopPropagation();
+      const key=btn.getAttribute("data-linear");
+      if(!key) return;
+      btn.disabled=true;
+      pursueLinearTask(key);
+      setTimeout(()=>{btn.disabled=false;},600);
+    };
   });
 }
 /** Collect unique Linear keys from any blob of chat text. */
@@ -7033,7 +7136,7 @@ function renderModalTasks(){
     '<div class="mtask" data-key="'+esc(k)+'">'
     +'<a class="linlink mtkey" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer" title="Open in Linear">'+esc(k)+'</a>'
     +'<span class="mtacts">'
-    +'<button type="button" class="mtchat" data-act="side" title="Open a side chat about this task">💬 chat</button>'
+    +'<button type="button" class="mtchat" data-act="pursue" title="Side chat + load this issue so the head can pursue it">💬 pursue</button>'
     +'<a class="mtgo linlink" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer">↗</a>'
     +'</span></div>'
   ).join("");
@@ -7042,7 +7145,8 @@ function renderModalTasks(){
       e.preventDefault();e.stopPropagation();
       const key=btn.closest(".mtask")&&btn.closest(".mtask").dataset.key;
       if(!key) return;
-      openSideChat({kind:"task",topic:key,title:"about "+key});
+      // Same as the 💬 bubble after a task id: side chat + load/pursue prompt
+      pursueLinearTask(key);
     };
   });
   bindLinlinks(list);

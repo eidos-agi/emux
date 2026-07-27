@@ -1,6 +1,11 @@
 # Changelog
 
 
+## v0.68.13
+
+### Features
+- **💬 after every Linear task id:** linkified `TEAM-123` keys (and Linear URLs) show a chat bubble. Click → open a side chat about that issue **and** inject a “load this Linear issue and prepare to pursue it” prompt into the open head (or spawn Claude if no modal). Tasks drawer **💬 pursue** does the same.
+
 ## v0.68.12
 
 ### Features
