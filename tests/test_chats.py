@@ -60,6 +60,75 @@ def test_find_chats_greenmark_filter(tmp_path, monkeypatch):
     assert all(h.priority > 0 for h in hits)
 
 
+def test_find_chats_personal_filter_excludes_work(tmp_path, monkeypatch):
+    """reevux match=personal: personal roots only — never repos-aic / greenmark."""
+    fake_home = tmp_path / "home"
+    (fake_home / ".grok" / "sessions" / "p" / "pers").mkdir(parents=True)
+    (fake_home / ".grok" / "sessions" / "a" / "aic").mkdir(parents=True)
+    (fake_home / ".claude" / "projects" / "-Users-x-repos-personal-reeves-3").mkdir(
+        parents=True
+    )
+    (fake_home / ".claude" / "projects" / "-Users-x-repos-aic-cockpit").mkdir(
+        parents=True
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    def _write_grok(sid: str, cwd: str, title: str) -> Path:
+        d = fake_home / ".grok" / "sessions" / sid[0] / sid
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "summary.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "info": {"id": sid, "cwd": cwd},
+                    "session_summary": title,
+                    "generated_title": title,
+                    "updated_at": "2020-01-01T00:00:00Z",
+                    "num_chat_messages": 2,
+                }
+            )
+        )
+        return p
+
+    g_pers = _write_grok(
+        "pers1", "/Users/x/repos-personal/reeves-3", "personal reeves mission"
+    )
+    g_aic = _write_grok(
+        "aic1", "/Users/x/repos-aic/aic-software-engineer-cockpit", "AIC work"
+    )
+    c_pers = (
+        fake_home
+        / ".claude"
+        / "projects"
+        / "-Users-x-repos-personal-reeves-3"
+        / "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
+    )
+    c_pers.write_text(json.dumps({"type": "user", "content": "reeves cockpit task"}) + "\n")
+    c_aic = (
+        fake_home
+        / ".claude"
+        / "projects"
+        / "-Users-x-repos-aic-cockpit"
+        / "cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
+    )
+    c_aic.write_text(json.dumps({"type": "user", "content": "ship AIC epic"}) + "\n")
+    old = time.time() - 48 * 3600
+    for p in (g_pers, g_aic, c_pers, c_aic):
+        os.utime(p, (old, old))
+
+    hits = chats.find_chats(match="personal", recent_hours=24, limit=50)
+    cwds = " ".join((h.cwd or "") + " " + (h.path or "") for h in hits)
+    assert hits, "expected at least one personal hit"
+    assert "repos-personal" in cwds or "reeves" in cwds.lower()
+    assert "repos-aic" not in cwds
+    assert all(
+        chats._PERSONAL_RE.search((h.cwd or "") + " " + (h.path or "")) for h in hits
+    )
+    # greenmark alias still works and must not return pure personal-only set
+    gm = chats.find_chats(match="greenmark", recent_hours=24, limit=50)
+    assert all(h.greenmark for h in gm) if gm else True
+
+
 def test_clean_text_strips_task_notification():
     raw = (
         "<task-notification>\n<task-id>abc</task-id>\n"

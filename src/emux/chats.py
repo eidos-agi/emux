@@ -14,6 +14,9 @@ Classification (per row):
 
 Greenmark filter: cwd/project path matches greenmark|gmw|cerebro|gms|greenmux
 (or --match regex).
+
+Personal / Reeves filter (reevux): repos-personal, reeves-*, tally/dally, conduit
+personal roots — never repos-aic / greenmark workspaces (or --match regex).
 """
 
 from __future__ import annotations
@@ -29,6 +32,21 @@ from typing import Any, Iterable
 
 _GREENMARK_RE = re.compile(
     r"greenmark|gmw|cerebro|gms|greenmux|rentamac|neutrino",
+    re.I,
+)
+
+# Personal / Reeves lane — positive match only (repos-aic & greenmark paths fall out).
+# Keep this tighter than a bare "personal" word match so work trees never bleed in.
+_PERSONAL_RE = re.compile(
+    r"repos-personal|"
+    r"MacMiniStorage/personal|"
+    r"reeves(?:-|_|\b)|"
+    r"reevux|"
+    r"(?:^|/)(?:tally|dally)(?:-|_|\b|/)|"
+    r"dallyd|"
+    r"(?:^|/)conduit(?:-|_|\b|/)|"
+    r"personal-mgr|"
+    r"reeves-apps|reeves-store|reeves-cockpit",
     re.I,
 )
 
@@ -223,8 +241,11 @@ def _match_path(path: str, pattern: re.Pattern[str] | None) -> bool:
 def _match_pattern(match: str | None) -> re.Pattern[str] | None:
     if match is None or match == "" or match == "all":
         return None
-    if match in ("greenmark", "gm", "gmw"):
+    key = match.strip().lower()
+    if key in ("greenmark", "gm", "gmw"):
         return _GREENMARK_RE
+    if key in ("personal", "reeves", "reevux", "rvs"):
+        return _PERSONAL_RE
     return re.compile(match, re.I)
 
 

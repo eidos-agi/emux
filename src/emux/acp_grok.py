@@ -32,7 +32,7 @@ from . import grok_control as gc
 
 PROTOCOL_VERSION = 1
 CLIENT_NAME = "emux"
-CLIENT_VERSION = "0.68.7"
+CLIENT_VERSION = "0.68.8"
 
 
 class AcpError(RuntimeError):

@@ -70,6 +70,17 @@ _LOGO_GMUX = (
     "</svg>"
 )
 
+# R-mark: slate/navy personal lane (Reeves + emux → reevux)
+_LOGO_REEVUX = (
+    '<svg class="skin-logo" viewBox="0 0 64 64" width="36" height="36" '
+    'aria-hidden="true" xmlns="http://www.w3.org/2000/svg">'
+    '<rect x="4" y="4" width="56" height="56" rx="12" fill="currentColor" opacity=".12"/>'
+    '<path fill="currentColor" d="M22 44 V20 h12.5 c6.2 0 10.5 3.2 10.5 8.4 0 3.6-2 6.4-5.2 '
+    '7.6 L46 44 h-6.2 l-5.4-7.2 H27.5 V44 z M27.5 25.2 v6.8 h6.4 c2.8 0 4.5-1.3 4.5-3.4 '
+    '0-2.1-1.7-3.4-4.5-3.4 z"/>'
+    "</svg>"
+)
+
 
 @dataclass(frozen=True)
 class Skin:
@@ -103,7 +114,12 @@ class Skin:
         """Tiny favicon using skin accent (URL-encoded SVG)."""
         # Prefer light accent for tab icon contrast on most OS chrome
         fill = self.light.accent.lstrip("#")
-        bg = "0c0a07" if self.id == "emux" else "0f1a14"
+        if self.id == "emux":
+            bg = "0c0a07"
+        elif self.id == "reevux":
+            bg = "0e1218"
+        else:
+            bg = "0f1a14"
         svg = (
             f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
             f"<rect width='16' height='16' rx='3' fill='%23{bg}'/>"
@@ -217,6 +233,38 @@ _GMUX_DARK = Palette(
     user="#5fbf8f",
 )
 
+# Reeves personal lane — cool slate/navy (deliberately unlike gmux green / emux amber)
+_REEVUX_LIGHT = Palette(
+    bg="#eef1f6",
+    bg_raise="#e6ebf2",
+    bg_card="#dee4ee",
+    accent="#3b5ba5",
+    accent_dim="#5a76bd",
+    accent_faint="#ccd6e8",
+    text="#182030",
+    text_dim="#5c6678",
+    live="#3d7a5a",
+    stale="#b3503a",
+    line="#c5cddd",
+    on_accent="#f4f7fc",
+    user="#3b5ba5",
+)
+_REEVUX_DARK = Palette(
+    bg="#0e1218",
+    bg_raise="#151b24",
+    bg_card="#1b2330",
+    accent="#7aa2ff",
+    accent_dim="#5a76bd",
+    accent_faint="#243044",
+    text="#e8eef8",
+    text_dim="#8b96ab",
+    live="#5fbf8f",
+    stale="#e07050",
+    line="#2a3444",
+    on_accent="#0e1218",
+    user="#7aa2ff",
+)
+
 _SKINS: dict[str, Skin] = {
     "emux": Skin(
         id="emux",
@@ -248,6 +296,21 @@ _SKINS: dict[str, Skin] = {
         logo_svg=_LOGO_GMUX,
         default_theme="light",
     ),
+    "reevux": Skin(
+        id="reevux",
+        brand="REEVUX",
+        product="reevux",
+        tagline="personal / Reeves fleet",
+        status_title="reevux status",
+        room_title="reevux — personal fleet",
+        docs_title="reevux documentation",
+        engine_label="emux",
+        footer_note="powered by emux · personal lane only",
+        light=_REEVUX_LIGHT,
+        dark=_REEVUX_DARK,
+        logo_svg=_LOGO_REEVUX,
+        default_theme="light",
+    ),
 }
 
 
@@ -261,6 +324,8 @@ def get_skin(name: str | None) -> Skin:
     key = name.strip().lower()
     if key in ("greenmux", "greenmark", "gmw"):
         key = "gmux"
+    if key in ("reeves", "personal", "rvs"):
+        key = "reevux"
     if key in _SKINS:
         return _SKINS[key]
     print(f"emux skin: unknown skin {name!r} — using emux", file=sys.stderr)

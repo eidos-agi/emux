@@ -10,8 +10,9 @@ Authority:
   * live/recent/stale recomputed cheaply on read from mtime + process liveness
   * fleet_name / resumed_at when POST /api/chats/resume succeeds
 
-Default path: ~/.config/emux/chats.db (or ~/.config/greenmux/chats.db when the
-active skin is gmux / EMUX_SKIN=gmux).
+Default path: ~/.config/emux/chats.db
+  * gmux / EMUX_SKIN=gmux → ~/.config/greenmux/chats.db
+  * reevux / EMUX_SKIN=reevux → ~/.config/reevux/chats.db
 """
 
 from __future__ import annotations
@@ -37,11 +38,21 @@ from .chats import (
 _DEFAULT_FRESH_SECS = 15 * 60  # re-scan disk only when store older than this
 
 
+def _config_root_for_skin(skin_id: str) -> Path:
+    """Per-product chats.db so fleets never share an index."""
+    sid = (skin_id or "").strip().lower()
+    if sid in ("gmux", "greenmux", "greenmark"):
+        return Path.home() / ".config" / "greenmux"
+    if sid in ("reevux", "reeves", "personal", "rvs"):
+        return Path.home() / ".config" / "reevux"
+    return Path.home() / ".config" / "emux"
+
+
 def default_chats_db_path() -> str:
-    """Prefer greenmux config when that product is the active skin."""
+    """Prefer product config dir when that skin is active."""
     skin = (os.environ.get("EMUX_SKIN") or "").strip().lower()
-    if skin in ("gmux", "greenmux", "greenmark"):
-        root = Path.home() / ".config" / "greenmux"
+    if skin in ("gmux", "greenmux", "greenmark", "reevux", "reeves", "personal", "rvs"):
+        root = _config_root_for_skin(skin)
     else:
         # if greenmux db already exists and emux does not, use it (rentamac)
         g = Path.home() / ".config" / "greenmux" / "chats.db"
@@ -52,14 +63,13 @@ def default_chats_db_path() -> str:
         prod = (os.environ.get("EMUX_PRODUCT") or "").strip().lower()
         if "green" in prod or prod == "gmux":
             root = Path.home() / ".config" / "greenmux"
+        elif prod in ("reevux", "reeves", "personal"):
+            root = Path.home() / ".config" / "reevux"
         else:
             try:
                 from . import skin as _skin
 
-                if _skin.active_skin().id == "gmux":
-                    root = Path.home() / ".config" / "greenmux"
-                else:
-                    root = Path.home() / ".config" / "emux"
+                root = _config_root_for_skin(_skin.active_skin().id)
             except Exception:
                 root = Path.home() / ".config" / "emux"
     root.mkdir(parents=True, exist_ok=True)
