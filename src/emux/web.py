@@ -86,19 +86,52 @@ _EXPENSIVE_LOCK = threading.Lock()
 _EXPENSIVE_TTL = {
     "ai_md": 8.0,
     "ai_html": 8.0,
-    "managed": 5.0,
+    # Managed probes remote planes — keep fresh but serve stale while revalidating
+    # so concurrent room polls never block on 4× remote healthz (EID-1115).
+    "managed": 8.0,
+    "managed_stale": 45.0,
     "chats": 4.0,
     "sessions": 1.5,
 }
 
 
-def _expensive_get(key: str, ttl: float, factory):
-    """Return cached value or run factory once; concurrent waiters share the result."""
+def _expensive_get(key: str, ttl: float, factory, *, stale_ttl: float | None = None):
+    """Return cached value or run factory once; concurrent waiters share the result.
+
+    When ``stale_ttl`` is set and the cache is past ``ttl`` but within ``stale_ttl``,
+    return the stale value immediately and refresh in a background thread (EID-1115).
+    """
     now = time.time()
     with _EXPENSIVE_LOCK:
         hit = _EXPENSIVE_CACHE.get(key)
         if hit and (now - hit[0]) < ttl:
             return hit[1]
+        # Stale-while-revalidate: serve old value, kick background refresh.
+        if (
+            stale_ttl is not None
+            and hit
+            and (now - hit[0]) < stale_ttl
+        ):
+            stale_val = hit[1]
+            ev = _EXPENSIVE_INFLIGHT.get(key)
+            if ev is None:
+                ev = threading.Event()
+                _EXPENSIVE_INFLIGHT[key] = ev
+
+                def _bg() -> None:
+                    try:
+                        value = factory()
+                        with _EXPENSIVE_LOCK:
+                            _EXPENSIVE_CACHE[key] = (time.time(), value)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    finally:
+                        with _EXPENSIVE_LOCK:
+                            _EXPENSIVE_INFLIGHT.pop(key, None)
+                        ev.set()
+
+                threading.Thread(target=_bg, name=f"emux-cache-{key[:24]}", daemon=True).start()
+            return stale_val
         ev = _EXPENSIVE_INFLIGHT.get(key)
         owner = False
         if ev is None:
@@ -106,8 +139,12 @@ def _expensive_get(key: str, ttl: float, factory):
             _EXPENSIVE_INFLIGHT[key] = ev
             owner = True
     if not owner:
-        # Wait briefly for owner; on timeout compute ourselves (avoid deadlock).
-        if not ev.wait(timeout=max(ttl, 6.0)):
+        # Wait briefly for owner; on timeout prefer stale cache then factory.
+        if not ev.wait(timeout=min(max(ttl, 2.0), 4.0)):
+            with _EXPENSIVE_LOCK:
+                hit = _EXPENSIVE_CACHE.get(key)
+                if hit:
+                    return hit[1]
             return factory()
         with _EXPENSIVE_LOCK:
             hit = _EXPENSIVE_CACHE.get(key)
@@ -2184,7 +2221,12 @@ def poll_once(lines: int = 14) -> None:
 
 
 def _probe_managed_planes(cfg: Any) -> dict[str, Any]:
-    """Manager glance: probe **only** product.json allowlist (fail closed if empty)."""
+    """Manager glance: probe **only** product.json allowlist (fail closed if empty).
+
+    Prefer ``healthz_loopback`` when set (same-host operational truth). Public
+    OIDC/Authentik redirects (3xx / non-JSON) are **auth_gated** degraded — still
+    ok=True so workers_ok is not false for a gate, but degraded for honesty.
+    """
     import urllib.request
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -2203,24 +2245,20 @@ def _probe_managed_planes(cfg: Any) -> dict[str, Any]:
             "path": getattr(cfg, "path", None),
         }
 
-    def one(plane: Any) -> dict[str, Any]:
-        row = plane.as_dict() if hasattr(plane, "as_dict") else dict(plane)
-        url = (row.get("healthz") or "").strip()
-        out = {
-            **row,
+    def _hit(url: str, *, timeout: float) -> dict[str, Any]:
+        """Probe one URL. Returns partial out fields: ok/degraded/version/…/error/probe_url."""
+        out: dict[str, Any] = {
             "ok": False,
             "degraded": True,
             "version": None,
             "live_sessions": None,
             "http_status": None,
             "error": None,
+            "probe_url": url,
+            "reason": None,
         }
-        if not url:
-            out["error"] = "no_healthz_url"
-            return out
         try:
-            # No redirect-follow: Authentik/login HTML is "degraded ok", not a hang.
-            # Hard socket timeout so a bad peer cannot pin the single-thread web handler.
+            # No redirect-follow: Authentik/login HTML is auth_gated, not a hang.
             class _NoRedirect(urllib.request.HTTPRedirectHandler):
                 def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
                     return None
@@ -2229,7 +2267,7 @@ def _probe_managed_planes(cfg: Any) -> dict[str, Any]:
             req = urllib.request.Request(
                 url, headers={"User-Agent": f"emux-manager/{__version__}"}
             )
-            with opener.open(req, timeout=3.0) as resp:
+            with opener.open(req, timeout=timeout) as resp:
                 body = resp.read(65536).decode("utf-8", errors="replace")
                 code = getattr(resp, "status", None) or resp.getcode()
                 out["http_status"] = code
@@ -2242,49 +2280,112 @@ def _probe_managed_planes(cfg: Any) -> dict[str, Any]:
                     out["degraded"] = False
                     out["version"] = parsed.get("version")
                     out["live_sessions"] = parsed.get("live_sessions")
+                    out["reason"] = "healthy"
+                elif code and 300 <= int(code) < 400:
+                    out["ok"] = True
+                    out["degraded"] = True
+                    out["error"] = f"auth_gated ({code})"
+                    out["reason"] = "auth_gated"
                 elif code and int(code) < 500:
                     out["ok"] = True
                     out["degraded"] = True
                     out["error"] = f"non_json_health ({code})"
+                    out["reason"] = "non_json"
                 else:
                     out["error"] = f"http_{code}"
+                    out["reason"] = "http_error"
         except urllib.error.HTTPError as exc:
-            # Redirects surface as HTTPError when redirect handler declines.
             code = int(getattr(exc, "code", 0) or 0)
             out["http_status"] = code or None
-            if 300 <= code < 400 or (code and code < 500):
+            if 300 <= code < 400:
+                out["ok"] = True
+                out["degraded"] = True
+                out["error"] = f"auth_gated ({code})"
+                out["reason"] = "auth_gated"
+            elif code and code < 500:
                 out["ok"] = True
                 out["degraded"] = True
                 out["error"] = f"non_json_health ({code})"
+                out["reason"] = "non_json"
             else:
                 out["error"] = f"http_{code or 'err'}"
+                out["reason"] = "http_error"
         except Exception as exc:  # noqa: BLE001
             out["error"] = str(exc)[:200]
+            out["reason"] = "unreachable"
         return out
 
+    def one(plane: Any) -> dict[str, Any]:
+        row = plane.as_dict() if hasattr(plane, "as_dict") else dict(plane)
+        loop = (row.get("healthz_loopback") or "").strip()
+        public = (row.get("healthz") or "").strip()
+        base = {
+            **row,
+            "ok": False,
+            "degraded": True,
+            "version": None,
+            "live_sessions": None,
+            "http_status": None,
+            "error": None,
+            "probe_url": None,
+            "reason": None,
+        }
+        # Prefer loopback (operational truth) then public (may be OIDC-gated).
+        candidates: list[tuple[str, float, str]] = []
+        if loop:
+            candidates.append((loop, 1.0, "loopback"))
+        if public and public != loop:
+            candidates.append((public, 1.5, "public"))
+        if not candidates:
+            base["error"] = "no_healthz_url"
+            base["reason"] = "no_url"
+            return base
+        last = base
+        for url, timeout, kind in candidates:
+            hit = _hit(url, timeout=timeout)
+            last = {**base, **hit, "probe_kind": kind}
+            # Clean JSON health wins immediately.
+            if hit.get("ok") and not hit.get("degraded"):
+                return last
+            # Loopback unreachable → try public; public auth_gated is still a result.
+            if kind == "loopback" and hit.get("reason") in ("unreachable", "http_error", "probe_timeout"):
+                continue
+            # auth_gated / non_json on public is honest degraded — stop.
+            if hit.get("ok"):
+                return last
+        return last
+
     results: list[dict[str, Any]] = []
+    # Hard wall: never block the accept path more than ~3s total (EID-1115).
+    wall = 3.0
     with ThreadPoolExecutor(max_workers=min(6, len(planes))) as pool:
         futs = {pool.submit(one, p): p for p in planes}
         try:
-            for fut in as_completed(futs, timeout=6.0):
+            for fut in as_completed(futs, timeout=wall):
                 try:
-                    results.append(fut.result(timeout=0.1))
+                    results.append(fut.result(timeout=0.05))
                 except Exception as exc:  # noqa: BLE001
                     results.append(
-                        {"id": "?", "ok": False, "degraded": True, "error": str(exc)[:200]}
+                        {"id": "?", "ok": False, "degraded": True, "error": str(exc)[:200],
+                         "reason": "probe_error"}
                     )
         except TimeoutError:
-            pass  # unfinished planes get stubs below
-        # Any plane that never completed → degraded stub (do not hang the web handler)
+            pass
         done_ids = {r.get("id") for r in results}
         for p in planes:
             pid = getattr(p, "id", None) or (p.get("id") if isinstance(p, dict) else None)
             if pid not in done_ids:
                 row = p.as_dict() if hasattr(p, "as_dict") else dict(p)
-                results.append({**row, "ok": False, "degraded": True, "error": "probe_timeout"})
+                results.append(
+                    {**row, "ok": False, "degraded": True, "error": "probe_timeout",
+                     "reason": "probe_timeout"}
+                )
     order = {p.id: i for i, p in enumerate(planes)}
     results.sort(key=lambda r: order.get(r.get("id"), 99))
+    # workers_ok: reachable (ok) including auth_gated; only hard-down fails the fleet.
     workers_ok = all(r.get("ok") for r in results)
+    auth_gated = sum(1 for r in results if r.get("reason") == "auth_gated")
+    healthy = sum(1 for r in results if r.get("ok") and not r.get("degraded"))
     return {
         "role": "manager",
         "product": getattr(cfg, "product", None),
@@ -2292,9 +2393,15 @@ def _probe_managed_planes(cfg: Any) -> dict[str, Any]:
         "planes": results,
         "workers_ok": workers_ok,
         "probed": len(results),
+        "healthy": healthy,
+        "auth_gated": auth_gated,
         "managed_ids": sorted(getattr(cfg, "managed_ids", lambda: set)()),
         "source": getattr(cfg, "source", None),
         "path": getattr(cfg, "path", None),
+        "notes": (
+            "ok=True+degraded+reason=auth_gated means public healthz is OIDC/login "
+            "(reachable, not operational JSON). Prefer healthz_loopback for same-host truth."
+        ),
     }
 
 
@@ -3504,6 +3611,47 @@ body.solo-session #modalpop{display:none} /* already in a tab */
 #chbar #chq:focus{outline:none;border-color:var(--amber-dim)}
 #chbar .stat{font-size:11px;color:var(--text-dim);letter-spacing:.3px}
 #chbar .stat b{color:var(--amber);font-weight:600}
+/* ---- CALENDAR (Google-like week/month for cron message jobs) ---- */
+#calroot{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden}
+#calbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line)}
+#calbar .act{font-size:11px}
+#calbar h2{margin:0;font-size:15px;font-weight:600;letter-spacing:.3px;flex:1;min-width:140px}
+#calbody{display:flex;flex:1;min-height:0;overflow:hidden}
+#calseries{width:200px;flex:none;border-right:1px solid var(--line);overflow:auto;padding:10px 8px;background:var(--bg-raise)}
+#calseries h3{margin:0 0 8px;font-size:10px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase}
+.calser{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:12px;margin-bottom:4px}
+.calser:hover{background:var(--bg-card)}
+.calser .dot{width:10px;height:10px;border-radius:3px;flex:none}
+.calser.off{opacity:.45}
+#calmain{flex:1;min-width:0;overflow:auto;padding:8px}
+#calweek{display:grid;grid-template-columns:56px repeat(7,1fr);gap:1px;background:var(--line);border:1px solid var(--line);min-height:520px}
+#calweek .hd{background:var(--bg-raise);padding:8px 4px;text-align:center;font-size:11px;font-weight:600;letter-spacing:.4px}
+#calweek .hd.today{color:var(--amber)}
+#calweek .gutter{background:var(--bg-raise);font-size:10px;color:var(--text-dim);text-align:right;padding:2px 6px;font-variant-numeric:tabular-nums}
+#calweek .cell{background:var(--bg);position:relative;min-height:64px;padding:2px}
+#calweek .cell.today{background:rgba(255,176,0,.06)}
+#calmonth{display:grid;grid-template-columns:repeat(7,1fr);gap:1px;background:var(--line);border:1px solid var(--line)}
+#calmonth .mhd{background:var(--bg-raise);padding:8px;text-align:center;font-size:11px;font-weight:600}
+#calmonth .mcell{background:var(--bg);min-height:96px;padding:4px 6px;vertical-align:top}
+#calmonth .mcell.out{opacity:.4}
+#calmonth .mcell.today{outline:1px solid var(--amber);outline-offset:-1px}
+#calmonth .mdn{font-size:11px;font-weight:700;margin-bottom:4px;color:var(--text-dim)}
+.calev{display:block;font-size:10px;line-height:1.25;padding:2px 5px;margin:0 0 2px;border-radius:3px;color:#0e0e0e;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-left:3px solid rgba(0,0,0,.25)}
+.calev:hover{filter:brightness(1.08)}
+#caldrawer{position:fixed;top:0;right:0;width:min(380px,100vw);height:100%;background:var(--bg-raise);border-left:1px solid var(--line);z-index:80;display:none;flex-direction:column;box-shadow:-8px 0 24px rgba(0,0,0,.25)}
+#caldrawer.open{display:flex}
+#caldrawer .dh{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+#caldrawer .dh b{flex:1;font-size:14px}
+#caldrawer .db{flex:1;overflow:auto;padding:14px;display:flex;flex-direction:column;gap:10px;font-size:12px}
+#caldrawer label{display:flex;flex-direction:column;gap:4px;color:var(--text-dim);font-size:10px;letter-spacing:.6px;text-transform:uppercase}
+#caldrawer input,#caldrawer textarea,#caldrawer select{background:var(--bg);border:1px solid var(--line);color:var(--text);padding:8px;border-radius:4px;font:inherit;font-size:12px;text-transform:none;letter-spacing:0}
+#caldrawer textarea{min-height:100px;resize:vertical}
+#caldrawer .df{display:flex;flex-wrap:wrap;gap:8px;padding:12px 14px;border-top:1px solid var(--line)}
+#caldrawer .df .act.danger{border-color:#c0392b;color:#c0392b}
+@media(max-width:760px){
+  #calseries{display:none}
+  #calweek{grid-template-columns:40px repeat(7,minmax(48px,1fr));min-height:400px}
+}
 .oattach{margin-left:auto;flex-shrink:0}
 .owhy{font-size:9px;color:var(--text-dim);padding:4px 10px 8px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -3830,6 +3978,7 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
       <button class="tab" data-mode="flow">FLOW</button>
       <button class="tab" data-mode="orphans">ORPHANS</button>
       <button class="tab" data-mode="chats">CHATS</button>
+      <button class="tab" data-mode="calendar">CALENDAR</button>
     </div>
   </div>
   <div id="happrovals" style="display:none"><div id="htabs"></div><div id="hdetail"></div></div>
@@ -3992,7 +4141,7 @@ function lastSummary(s){return s.summary||(metaCache[s.name]&&metaCache[s.name].
 function goneAge(s){const m=metaCache[s.name];if(!m)return"";const sec=Math.round((Date.now()-m.ts)/1000);return sec<60?sec+"s":Math.round(sec/60)+"m";}
 let activeCompany=localStorage.getItem("emux_company")||"";   // restore the skin you were in
 let flowSig=null, flowPre={}, flowBox={};   // flow view: rebuild only on topology change, else update panes in place
-const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW",orphans:"ORPHANS",chats:"CHATS"};
+const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW",orphans:"ORPHANS",chats:"CHATS",calendar:"CALENDAR"};
 
 // ---- deep links: the view, filters, and open session live in the URL, so any
 // state is bookmarkable/shareable and survives reload/back-forward. ----
@@ -5198,9 +5347,10 @@ function render(){
   else if(mode==="groups")renderGroups();
   else if(mode==="activity")renderActivity();
   else if(mode==="flow")renderFlow();
-  // orphans/chats are manual: the 2s poll must not rebuild them mid-click
+  // orphans/chats/calendar are manual: the 2s poll must not rebuild them mid-click
   else if(mode==="orphans"){if(!document.getElementById("mvhosts"))openOrphans();}
   else if(mode==="chats"){if(!document.getElementById("chbar"))openChats();}
+  else if(mode==="calendar"){if(!document.getElementById("calroot"))openCalendar();}
   // Manager quiet + empty grid: show a calm empty state (not 40 offline tiles).
   if(isManagerQuiet()&&mode==="grid"){
     const v=$("#views");
@@ -6719,17 +6869,37 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         if url.path in ("/api/schedule", "/api/schedule/"):
             # In-process cron message jobs (product-scoped schedule.json).
+            # Optional ?from=&to= ISO expand occurrences for calendar views.
             try:
                 from . import schedule as _sched
+                from datetime import datetime, timedelta, timezone
 
-                self._json(
-                    {
-                        "ok": True,
-                        "path": str(_sched.schedule_path()),
-                        "product": _sched._product_id(),
-                        "jobs": _sched.list_jobs(),
-                    }
-                )
+                qs = parse_qs(url.query)
+                payload: dict[str, Any] = {
+                    "ok": True,
+                    "path": str(_sched.schedule_path()),
+                    "product": _sched._product_id(),
+                    "jobs": _sched.list_jobs(),
+                }
+                fr = (qs.get("from") or [""])[0].strip()
+                to = (qs.get("to") or [""])[0].strip()
+                if fr and to:
+                    try:
+                        start = datetime.fromisoformat(fr.replace("Z", "+00:00"))
+                        end = datetime.fromisoformat(to.replace("Z", "+00:00"))
+                        if start.tzinfo is None:
+                            start = start.replace(tzinfo=timezone.utc)
+                        if end.tzinfo is None:
+                            end = end.replace(tzinfo=timezone.utc)
+                    except ValueError:
+                        start = datetime.now(timezone.utc).replace(
+                            hour=0, minute=0, second=0, microsecond=0
+                        )
+                        end = start + timedelta(days=7)
+                    payload["from"] = start.isoformat()
+                    payload["to"] = end.isoformat()
+                    payload["events"] = _sched.occurrences(start, end)
+                self._json(payload)
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)}, 500)
             return
@@ -6762,12 +6932,13 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                         400,
                     )
                     return
-                # Cache probe: concurrent room tabs + stress must not re-probe
-                # every external healthz in parallel (EID-1107).
+                # Cache + stale-while-revalidate: concurrent room tabs must not
+                # re-probe every external healthz (EID-1107, EID-1115).
                 probe = _expensive_get(
                     f"managed:{cfg.product}:{cfg.path}",
                     _EXPENSIVE_TTL["managed"],
                     lambda: _probe_managed_planes(cfg),
+                    stale_ttl=_EXPENSIVE_TTL["managed_stale"],
                 )
                 self._json({"ok": True, **probe})
             except Exception as exc:
@@ -6814,7 +6985,8 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                             "/api/hancock/approve", "/api/hancock/deny",
                             "/api/models", "/api/models/test", "/api/plan/switch",
                             "/api/schedule", "/api/schedule/",
-                            "/api/schedule/run", "/api/schedule/delete"):
+                            "/api/schedule/run", "/api/schedule/delete",
+                            "/api/schedule/update"):
             self._json({"ok": False, "error": "not_found"}, 404)
             return
         if not self._host_allowed():
@@ -6848,9 +7020,34 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                     message=str(body.get("message") or ""),
                     timezone=str(body.get("timezone") or "America/Chicago"),
                     job_id=(str(body["id"]).strip() if body.get("id") else None),
+                    title=(str(body.get("title") or "").strip() or None),
                     enabled=bool(body.get("enabled", True)),
                 )
                 self._json({"ok": True, "job": job.as_dict(), "path": str(_sched.schedule_path())})
+            except ValueError as exc:
+                self._json({"ok": False, "error": str(exc)}, 400)
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+            return
+        if url.path == "/api/schedule/update":
+            try:
+                from . import schedule as _sched
+
+                body = data if isinstance(data, dict) else {}
+                jid = str(body.get("id") or "").strip()
+                if not jid:
+                    self._json({"ok": False, "error": "missing_id"}, 400)
+                    return
+                fields = {
+                    k: body[k]
+                    for k in ("cron", "target", "message", "title", "timezone", "enabled")
+                    if k in body
+                }
+                job = _sched.update_job(jid, **fields)
+                if not job:
+                    self._json({"ok": False, "error": "unknown_job", "id": jid}, 404)
+                    return
+                self._json({"ok": True, "job": job.as_dict()})
             except ValueError as exc:
                 self._json({"ok": False, "error": str(exc)}, 400)
             except Exception as exc:
@@ -7227,22 +7424,24 @@ def health_page_markdown(version: str, public_path: str = "") -> str:
                 "",
                 "## Managed planes",
                 "",
-                "| plane | lane | host | ok | degraded | live | healthz |",
-                "|---|---|---|---|---|---|---|",
+                "| plane | lane | host | ok | degraded | reason | live | probe |",
+                "|---|---|---|---|---|---|---|---|",
             ]
             for p in planes:
                 rows.append(
                     f"| {p.get('id') or '—'} | {p.get('lane') or '—'} | {p.get('host') or '—'} | "
-                    f"{p.get('ok')} | {p.get('degraded')} | "
+                    f"{p.get('ok')} | {p.get('degraded')} | {p.get('reason') or '—'} | "
                     f"{p.get('live_sessions') if p.get('live_sessions') is not None else '—'} | "
-                    f"{p.get('healthz') or '—'} |"
+                    f"{p.get('probe_kind') or '—'} |"
                 )
             if not planes:
-                rows.append("| _(empty allowlist)_ | | | | | | |")
+                rows.append("| _(empty allowlist)_ | | | | | | | |")
             rows += [
                 "",
                 f"- managed_verdict: **{mgr_verdict}**",
-                f"- workers_ok: {probe.get('workers_ok')}",
+                f"- workers_ok: {probe.get('workers_ok')} (auth_gated counts as reachable)",
+                f"- healthy / auth_gated: {probe.get('healthy')} / {probe.get('auth_gated')}",
+                "- reason=auth_gated means public OIDC/login, not plane DOWN — use healthz_loopback",
                 "",
             ]
             managed_section = "\n".join(rows)
@@ -7259,7 +7458,10 @@ def health_page_markdown(version: str, public_path: str = "") -> str:
         reasons.append("one or more managed worker planes DOWN or allowlist empty")
     elif mgr_verdict == "DEGRADED":
         verdict = "DEGRADED"
-        reasons.append("managed plane(s) degraded (reachable but not clean health JSON)")
+        reasons.append(
+            "managed plane(s) degraded — auth_gated public healthz (OIDC) and/or "
+            "non-JSON; set healthz_loopback for operational truth (not the same as DOWN)"
+        )
     elif not sessions_ok:
         verdict = "DEGRADED"
         reasons.append(f"local session inventory flaky: {sessions_err or 'unknown'}")
@@ -7473,6 +7675,7 @@ def ai_diagnosis_markdown(
                 f"managed:{cfg.product}:{cfg.path}",
                 _EXPENSIVE_TTL["managed"],
                 lambda: _probe_managed_planes(cfg),
+                stale_ttl=_EXPENSIVE_TTL["managed_stale"],
             )
             planes = probe.get("planes") or []
             down = [p for p in planes if not p.get("ok")]
@@ -7550,7 +7753,10 @@ def ai_diagnosis_markdown(
         reasons.append(f"sessions_payload not ok: {err or 'unknown'}")
     elif mgr_verdict == "DEGRADED":
         verdict = "DEGRADED"
-        reasons.append("managed plane(s) degraded (reachable but not clean health JSON)")
+        reasons.append(
+            "managed plane(s) degraded — auth_gated public healthz (OIDC) and/or "
+            "non-JSON; set healthz_loopback for operational truth (not the same as DOWN)"
+        )
     elif any(s.get("status") == "unknown" for s in (scope.get("sockets") or [])):
         verdict = "DEGRADED"
         reasons.append("one or more tmux sockets unreadable (unknown)")

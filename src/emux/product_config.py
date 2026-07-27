@@ -49,12 +49,14 @@ class ManagedPlane:
     lane: str = ""
     role: str = "worker"
     healthz: str = ""
+    # Same-host operational truth (prefer over public/OIDC healthz when set).
+    healthz_loopback: str = ""
     room: str = ""
     host: str = ""
     notes: str = ""
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "id": self.id,
             "lane": self.lane,
             "role": self.role,
@@ -63,6 +65,9 @@ class ManagedPlane:
             "host": self.host,
             "notes": self.notes,
         }
+        if self.healthz_loopback:
+            d["healthz_loopback"] = self.healthz_loopback
+        return d
 
 
 @dataclass(frozen=True)
@@ -172,6 +177,9 @@ def _planes_from(raw: Any) -> tuple[ManagedPlane, ...]:
                 lane=str(item.get("lane") or ""),
                 role=str(item.get("role") or "worker"),
                 healthz=str(item.get("healthz") or ""),
+                healthz_loopback=str(
+                    item.get("healthz_loopback") or item.get("loopback_healthz") or ""
+                ),
                 room=str(item.get("room") or ""),
                 host=str(item.get("host") or ""),
                 notes=str(item.get("notes") or ""),

@@ -1,6 +1,12 @@
 # Changelog
 
 
+## v0.68.8
+
+### Fixes
+- **Directrux concurrency under Mafia stress (EID-1107+):** HTTP accept backlog `EMUX_HTTP_BACKLOG` (default 256); single-flight caches for expensive GETs; cold `/ai` pane-sample cap (`EMUX_AI_PANE_SAMPLES`); Esc dismisses settings modal.
+- **Manager probe truth (EID-1112/1115):** prefer `healthz_loopback` when set; classify OIDC 3xx as `auth_gated` (reachable degraded, not DOWN); `/api/managed` stale-while-revalidate + hard ~3s probe wall so concurrent room polls stay responsive.
+
 ## v0.68.7
 
 ### Features

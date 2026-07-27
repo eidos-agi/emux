@@ -102,8 +102,16 @@ def test_poll_once_tracks_activity_then_grid_reads_cache(monkeypatch):
         "boss": {"session": "main", "description": None, "tags": ["agents"],
                  "manages": ["worker-1"], "registered_at": 0},
     })
-    outputs = iter(["pane v1\n", "pane v1\n", "pane v2\n"])
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (0, next(outputs), ""))
+    # capture_payload does capture-pane then display-message (history meta) per sample.
+    pane_outputs = iter(["pane v1\n", "pane v1\n", "pane v2\n"])
+    meta = "10 24 2000"
+
+    def _run(args, timeout=10, host=None, socket=None, **kw):
+        if args and args[0] == "display-message":
+            return (0, meta, "")
+        return (0, next(pane_outputs), "")
+
+    monkeypatch.setattr(server, "_run_tmux", _run)
     monkeypatch.setattr(web, "_pane_command", lambda s: "")  # don't consume the capture iterator
     web._ACTIVITY.clear()
     web._CACHE.clear()
