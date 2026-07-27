@@ -4684,6 +4684,43 @@ def _fmt_age(seconds: float | int | None) -> str:
     return f"{s // 86400}d"
 
 
+def connect_command(
+    session: str,
+    *,
+    socket_path: str | None = None,
+    socket_name: str = "default",
+    ssh_host: str | None = None,
+) -> str:
+    """One shell line: attach to this tmux session (optionally over ssh).
+
+    From a laptop to rentamac greenmux this is typically:
+      ssh -t rentamac 'tmux attach -t <session>'
+    Non-default sockets use -S path or -L name. Local (no ssh_host) is bare tmux.
+    """
+    import shlex
+
+    sess = shlex.quote(session)
+    if socket_path:
+        tmux = f"tmux -S {shlex.quote(socket_path)} attach -t {sess}"
+    elif socket_name and socket_name not in ("default", "", "local"):
+        tmux = f"tmux -L {shlex.quote(socket_name)} attach -t {sess}"
+    else:
+        tmux = f"tmux attach -t {sess}"
+    if ssh_host:
+        return f"ssh -t {shlex.quote(ssh_host)} {shlex.quote(tmux)}"
+    return tmux
+
+
+def resolve_connect_ssh_host(public_path: str = "") -> str | None:
+    """SSH destination for connect-copy. Env wins; /gmux public path ⇒ rentamac."""
+    env = (os.environ.get("EMUX_CONNECT_SSH") or os.environ.get("GREENMUX_HOST") or "").strip()
+    if env:
+        return env
+    if public_path:  # reverse-proxied greenmux status ⇒ attach on the mux host
+        return "rentamac"
+    return None
+
+
 def simple_status_html(
     version: str,
     public_path: str = "",
@@ -4704,6 +4741,7 @@ def simple_status_html(
     from urllib.parse import urlencode
 
     base = public_path or ""
+    ssh_host = resolve_connect_ssh_host(public_path)
     now_ts = time.time()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     payload = sessions_payload()
@@ -4831,6 +4869,24 @@ def simple_status_html(
             name_cell = (
                 f'<a class="name" href="{open_href}" title="peek pane"><code>{name}</code></a>'
             )
+        # Connect: laptop → ssh → tmux attach (live only). Ghosts have nothing to attach to.
+        if is_live and not tmux_raw.startswith("socket:"):
+            cmd = connect_command(
+                tmux_raw,
+                socket_path=s.get("socket_path"),
+                socket_name=str(s.get("socket") or "default"),
+                ssh_host=ssh_host,
+            )
+            cmd_esc = _html.escape(cmd)
+            cmd_attr = _html.escape(cmd, quote=True)
+            connect_cell = (
+                f'<div class="connect">'
+                f'<code class="cmd" title="run on your laptop">{cmd_esc}</code>'
+                f'<button type="button" class="copy" data-cmd="{cmd_attr}">copy</button>'
+                f"</div>"
+            )
+        else:
+            connect_cell = '<span class="dim">—</span>'
         row_cls = f"{live_cls}{' open' if is_peek else ''}"
         rows.append(
             f"<tr class='{row_cls}'>"
@@ -4843,6 +4899,7 @@ def simple_status_html(
             f"<td class='age' title='time since last pane change'>{active}</td>"
             f"<td>{reg}</td>"
             f"<td>{tags}</td>"
+            f"<td class='connect-td'>{connect_cell}</td>"
             f"<td>{desc}</td>"
             f"</tr>"
         )
@@ -4872,7 +4929,7 @@ def simple_status_html(
                     content = "\n".join(lines)
                     pane_html = f"<pre class='pane'>{_html.escape(content) if content else '(empty pane)'}</pre>"
             rows.append(
-                f"<tr class='peek-row'><td colspan='10'>"
+                f"<tr class='peek-row'><td colspan='11'>"
                 f"<div class='peek'>"
                 f"<div class='peek-bar'>pane peek · <code>{name}</code> · last {peek_lines} lines · "
                 f"<a href='{close_href}'>close</a></div>"
@@ -4887,7 +4944,12 @@ def simple_status_html(
         )
 
     body_rows = "\n".join(rows) if rows else (
-        "<tr><td colspan='10' class='empty'>No sessions match this filter.</td></tr>"
+        "<tr><td colspan='11' class='empty'>No sessions match this filter.</td></tr>"
+    )
+    connect_hint = (
+        f"copy · run on your laptop → ssh { _html.escape(ssh_host) } → tmux attach"
+        if ssh_host
+        else "copy · run locally → tmux attach"
     )
     shown = len([s for s in sessions if s.get("state") != "unknown"])
     status_line = (
@@ -4948,9 +5010,19 @@ def simple_status_html(
   .pill.stale {{ background:#f5efdf; color:var(--stale); }}
   .pill.unknown {{ background:#eee6f0; color:#6b3a7a; }}
   .empty {{ color:var(--dim); text-align:center; padding:24px; }}
+  .dim {{ color:var(--dim); }}
   .scope {{ margin:0 0 14px; padding:8px 12px; background:#eef1ea; border:1px dashed var(--line);
             border-radius:6px; font-size:12px; color:var(--dim); }}
   .scope strong {{ color:var(--ink); font-weight:600; }}
+  .connect {{ display:flex; flex-direction:column; gap:4px; max-width:28rem; }}
+  .connect .cmd {{ display:block; font:11px/1.35 ui-monospace,Menlo,monospace;
+                   white-space:pre-wrap; word-break:break-all; color:var(--ink);
+                   background:#f0f3f0; padding:6px 8px; border-radius:4px; border:1px solid var(--line); }}
+  .connect .copy {{ align-self:flex-start; font:11px system-ui,sans-serif; cursor:pointer;
+                    border:1px solid var(--line); background:var(--card); color:var(--ink);
+                    padding:3px 10px; border-radius:4px; }}
+  .connect .copy:hover {{ border-color:var(--live); color:var(--live); }}
+  .connect .copy.ok {{ background:var(--pill); color:var(--live); border-color:var(--live); }}
   .peek {{ background:#0f1411; color:#d7e0d9; border-radius:6px; overflow:hidden; }}
   .peek-bar {{ padding:8px 12px; font-size:12px; color:#9aab9f; border-bottom:1px solid #243028; }}
   .peek-bar a {{ color:#9fd6b0; }}
@@ -4973,7 +5045,8 @@ def simple_status_html(
 </header>
 <main>
   <div class="summary{' bad' if not ok else ''}" id="summary">{status_line} · checked {now}</div>
-  <div class="scope"><strong>scan scope</strong> — {claim}<br>sockets: {scope_html}</div>
+  <div class="scope"><strong>scan scope</strong> — {claim}<br>sockets: {scope_html}<br>
+    <strong>connect</strong> — {connect_hint}</div>
   <div class="filters">{filters_html}</div>
   {peek_block}
   <table>
@@ -4981,7 +5054,7 @@ def simple_status_html(
       <tr>
         <th>name</th><th>tmux</th><th>host</th><th>socket</th><th>state</th>
         <th>uptime</th><th>active</th>
-        <th>registered</th><th>tags</th><th>description</th>
+        <th>registered</th><th>tags</th><th>connect</th><th>description</th>
       </tr>
     </thead>
     <tbody>
@@ -4990,10 +5063,27 @@ def simple_status_html(
   </table>
   <footer>
     Default is live tmux only; ghosts stay under <strong>all</strong> (not reaped).
-    Click a name to peek. Observation only — no keystrokes.
+    Click a name to peek. <strong>copy</strong> the connect line, paste in your laptop terminal.
     Path prefix: <code>{_html.escape(base or "/")}</code>
   </footer>
 </main>
+<script>
+document.querySelectorAll("button.copy").forEach(function(btn){{
+  btn.addEventListener("click", function(){{
+    var t = btn.getAttribute("data-cmd") || "";
+    function done(ok){{
+      btn.textContent = ok ? "copied" : "select+copy";
+      btn.classList.toggle("ok", !!ok);
+      setTimeout(function(){{ btn.textContent = "copy"; btn.classList.remove("ok"); }}, 1400);
+    }}
+    if (navigator.clipboard && navigator.clipboard.writeText) {{
+      navigator.clipboard.writeText(t).then(function(){{ done(true); }}).catch(function(){{ done(false); }});
+    }} else {{
+      done(false);
+    }}
+  }});
+}});
+</script>
 </body>
 </html>
 """

@@ -237,6 +237,8 @@ def test_http_simple_status_always_available(daemon):
     assert "uptime" in body and "active" in body
     assert 'class="chip' in body  # filters
     assert "scan scope" in body  # honest multi-socket claim stamp
+    # local simple status (no public_path) → bare tmux attach, no ssh
+    assert "tmux attach -t main" in body or "tmux attach -t" in body
 
 
 def test_http_simple_filters_and_peek(daemon):
@@ -259,6 +261,21 @@ def test_discover_local_tmux_sockets_includes_default():
     from emux import server
     socks = server._discover_local_tmux_sockets()
     assert any(s.get("name") == "default" for s in socks)
+
+
+def test_connect_command_ssh_and_local():
+    from emux import web
+    assert web.connect_command("greenmux-proof", ssh_host="rentamac") == (
+        "ssh -t rentamac 'tmux attach -t greenmux-proof'"
+    )
+    assert web.connect_command("s1", socket_name="other", ssh_host="rentamac") == (
+        "ssh -t rentamac 'tmux -L other attach -t s1'"
+    )
+    assert web.connect_command("s1", socket_path="/tmp/tmux-501/x") == (
+        "tmux -S /tmp/tmux-501/x attach -t s1"
+    )
+    assert web.resolve_connect_ssh_host("/gmux") == "rentamac"
+    assert web.resolve_connect_ssh_host("") is None
 
 
 def test_normalize_public_path():
