@@ -303,6 +303,43 @@ def test_last_user_from_updates(tmp_path):
     assert "outage" in idx.summary
 
 
+def test_headless_steer_argv_and_run_mock(tmp_path, monkeypatch):
+    import subprocess
+
+    argv = gc.headless_steer_argv(
+        "hello fleet",
+        session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        cwd="/tmp",
+        always_approve=True,
+        output_format="json",
+    )
+    assert argv[1] == "-p"
+    assert "hello fleet" in argv
+    assert "-r" in argv
+    assert "--always-approve" in argv
+    assert "--output-format" in argv
+
+    fake = tmp_path / "grok"
+    fake.write_text("#!/bin/sh\necho '{\"text\":\"ok from mock\"}'\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("EMUX_GROK_BIN", str(fake))
+
+    def fake_run(argv, **kwargs):
+        class R:
+            returncode = 0
+            stdout = '{"text":"ok from mock"}'
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    r = gc.run_headless_steer("ping", session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", timeout=5)
+    assert r["ok"] is True
+    assert r["mode"] == "headless"
+    assert "ok from mock" in r["text"]
+    assert r["elapsed_ms"] >= 0
+
+
 def test_scan_grok_filters_subagents(tmp_path, monkeypatch):
     from emux import chats
 

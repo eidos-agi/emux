@@ -47,6 +47,13 @@ Reference tree (when present): `/tmp/grok-build` (open-source crates under
 6. **Last-user summary** — tail `updates.jsonl` `user_message_chunk` (and chat_history) preferred over title echo for CHATS triage.
 7. **Watermarks** — `summary_mtime` / `updates_mtime` on enrich; stored as `src_*_mtime` in chats.db for dirty checks; optional fields `session_kind`, `agent_name`, `parent_session_id`.
 
+### Phase B (headless steer)
+
+8. **`run_headless_steer`** — subprocess `grok -p … -r <id> --output-format json --always-approve`.
+9. **`POST /api/steer`** — `mode=auto|headless|pty`; auto picks headless for Grok (tags `grok` / `gsid:…`).
+10. **Room modal** — Grok sessions SEND via `/api/steer` first, PTY fallback on failure.
+11. **Resume tags** — `gsid:<uuid>` / `csid:<uuid>` so steer can resume the right transcript.
+
 ## Remaining gaps for full ACP
 
 - **Protocol client** — spawn `acp_stdio_argv()`, speak agent-client-protocol (initialize / session/new|load / prompt / permissions). Today we only return the command list.

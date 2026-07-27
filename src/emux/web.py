@@ -1200,6 +1200,8 @@ def _resume_chat_in_fleet(data: dict[str, Any]) -> dict[str, Any]:
     tags = ["chat-resume", tool, "abandoned"]
     if data.get("greenmark") or (cwd and re.search(r"greenmark|gmw|cerebro|gms", cwd, re.I)):
         tags.append("greenmark")
+    # Embed Grok/Claude transcript id so headless/ACP steer can find it later
+    tags.append(f"gsid:{sid}" if tool == "grok" else f"csid:{sid}")
     desc = f"resumed {tool} transcript · {title}"
 
     _ensure_agent_path_env()
@@ -2370,6 +2372,111 @@ def _clip_image_save(data: dict[str, Any]) -> dict[str, Any]:
         "session": session,
         "note": "Paste path into agent prompt or send with your message — Claude Read works on paths.",
     }
+
+
+def _gsid_from_registry(session: str) -> tuple[str | None, str | None, list[str]]:
+    """Return (tool_hint, transcript_session_id, tags) from registry if known."""
+    try:
+        reg = _server._load_registry()
+    except Exception:  # noqa: BLE001
+        return None, None, []
+    entry = next(
+        (e for e in reg.values() if e.get("session") == session or e.get("name") == session),
+        None,
+    )
+    if not isinstance(entry, dict):
+        return None, None, []
+    tags = [str(t) for t in (entry.get("tags") or [])]
+    tool = None
+    gsid = None
+    for t in tags:
+        low = t.lower()
+        if low == "grok":
+            tool = "grok"
+        elif low == "claude":
+            tool = "claude"
+        if low.startswith("gsid:"):
+            gsid = t.split(":", 1)[1].strip()
+            tool = tool or "grok"
+        elif low.startswith("csid:"):
+            gsid = t.split(":", 1)[1].strip()
+            tool = tool or "claude"
+    return tool, gsid, tags
+
+
+def steer_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Steer a session: Grok headless when possible, else tmux send-keys (PTY).
+
+    Body: prompt|keys, session (tmux name), mode=auto|headless|pty,
+    session_id (Grok/Claude transcript uuid), cwd, timeout, tool.
+    """
+    prompt = (data.get("prompt") or data.get("keys") or data.get("text") or "").strip()
+    session = (data.get("session") or data.get("name") or "").strip()
+    if not prompt:
+        return {"ok": False, "error": "missing_prompt"}
+    if not session:
+        return {"ok": False, "error": "missing_session"}
+
+    mode = (data.get("mode") or "auto").strip().lower()
+    if mode not in ("auto", "headless", "pty"):
+        mode = "auto"
+
+    tool_hint, gsid_reg, tags = _gsid_from_registry(session)
+    tool = (data.get("tool") or tool_hint or "").strip().lower()
+    gsid = (data.get("session_id") or data.get("grok_session_id") or gsid_reg or "").strip()
+    cwd = (data.get("cwd") or "").strip() or None
+    try:
+        timeout = float(data.get("timeout") or 120)
+    except (TypeError, ValueError):
+        timeout = 120.0
+    timeout = max(10.0, min(600.0, timeout))
+
+    if mode == "auto":
+        want_headless = tool == "grok" or bool(gsid) or "grok" in tags
+        mode = "headless" if want_headless else "pty"
+
+    if mode == "headless":
+        try:
+            from . import grok_control as gc
+        except ImportError as exc:
+            return {"ok": False, "error": f"grok_control_unavailable:{exc}", "mode": "headless"}
+        if not gc.resolve_grok_bin():
+            # Fall back to PTY rather than hard-fail fleet
+            if (data.get("mode") or "auto").strip().lower() == "headless":
+                return {
+                    "ok": False,
+                    "error": "grok_not_found",
+                    "mode": "headless",
+                    "hint": "set EMUX_GROK_BIN or install grok",
+                }
+            mode = "pty"
+        else:
+            # Prefer resume id; without it still run -p in cwd (new-ish turn)
+            result = gc.run_headless_steer(
+                prompt,
+                session_id=gsid or None,
+                continue_recent=bool(data.get("continue_recent")) and not gsid,
+                cwd=cwd,
+                model=(data.get("model") or None),
+                timeout=timeout,
+                always_approve=bool(data.get("always_approve", True)),
+            )
+            result["tmux_session"] = session
+            result["tool"] = "grok"
+            # Optional: also mirror prompt into live TUI if requested
+            if result.get("ok") and data.get("also_pty"):
+                send_payload(session, prompt, literal=True, enter=True, host=_session_host(session))
+            return result
+
+    # PTY path (Claude default, or Grok TUI)
+    host = _session_host(session)
+    r = send_payload(session, prompt, literal=True, enter=True, host=host)
+    r["mode"] = "pty"
+    r["tool"] = tool or "unknown"
+    r["tmux_session"] = session
+    if gsid:
+        r["session_id"] = gsid
+    return r
 
 
 def send_payload(session: str, keys: str, literal: bool = True, enter: bool = True,
@@ -4679,6 +4786,24 @@ async function handleComposerPaste(e,session){
   }
   return true;
 }
+function modalIsGrok(){
+  if(!modalSession)return false;
+  const tags=(modalSession.tags||[]).map(t=>String(t).toLowerCase());
+  if(tags.includes("grok"))return true;
+  if(tags.some(t=>t.startsWith("gsid:")))return true;
+  const ag=((modalSession.agent&&modalSession.agent.agent)||modalSession.agent||"")+"";
+  if(/grok/i.test(ag))return true;
+  if(/^chat-grok-/i.test(modalSession.name||""))return true;
+  return false;
+}
+function modalGsid(){
+  if(!modalSession)return "";
+  for(const t of (modalSession.tags||[])){
+    const s=String(t);
+    if(s.toLowerCase().startsWith("gsid:"))return s.slice(5).trim();
+  }
+  return "";
+}
 function modalSubmit(){
   const i=$("#modalinput");
   const paths=modalClips.map(c=>c.path).filter(Boolean);
@@ -4689,13 +4814,44 @@ function modalSubmit(){
   i.value="";                                   // optimistic clear for snappy UX…
   clearModalClips();
   setPending(text.length>180?text.slice(0,180)+"…":text);
+  const st=$("#modalstatus");
+  // Phase B: Grok sessions prefer headless steer (no TUI paste race)
+  if(modalIsGrok()){
+    if(st){st.textContent="headless steer…";st.style.color="";}
+    api("/api/steer",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({session:modalSession.session,prompt:text,mode:"auto",
+        session_id:modalGsid()||undefined,cwd:modalSession.cwd||undefined,
+        tool:"grok",timeout:180})}).then(r=>{
+      if(r&&r.ok){
+        setPending("");
+        if(st)st.textContent=(r.mode==="headless"?"headless ok":"sent")+(r.elapsed_ms?(" · "+r.elapsed_ms+"ms"):"");
+        if(r.text)setPending("↳ "+(r.text.length>160?r.text.slice(0,160)+"…":r.text));
+        setTimeout(modalRefresh,400);
+      }else{
+        // fallback PTY
+        modalKeys(text,true,true).then(ok=>{
+          if(!ok){
+            if(!i.value)i.value=body;
+            if(paths.length)i.value=(paths.join("\n")+(i.value?"\n\n"+i.value:""));
+            setPending("");
+            if(st){st.textContent="steer failed — "+((r&&r.error)||"draft kept");st.style.color="var(--stale)";}
+          }
+        });
+      }
+    }).catch(()=>{
+      modalKeys(text,true,true).then(ok=>{
+        if(!ok){if(!i.value)i.value=body;setPending("");if(st){st.textContent="send failed";st.style.color="var(--stale)";}}
+      });
+    });
+    return;
+  }
   modalKeys(text,true,true).then(ok=>{
     if(!ok){                                    // …but if it didn't land, give the draft back
       if(!i.value)i.value=body;
       // cannot restore binary preview easily; path lines still useful
       if(paths.length)i.value=(paths.join("\n")+(i.value?"\n\n"+i.value:""));
       setPending("");
-      const st=$("#modalstatus");st.textContent="send failed — draft kept";st.style.color="var(--stale)";
+      if(st){st.textContent="send failed — draft kept";st.style.color="var(--stale)";}
     }
   });
 }
@@ -5553,7 +5709,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         if url.path not in ("/api/send", "/api/head", "/api/spawn", "/api/suggest",
                             "/api/adopt", "/api/reply", "/api/chats/resume",
-                            "/api/clip-image",
+                            "/api/clip-image", "/api/steer",
                             "/api/hancock/approve", "/api/hancock/deny",
                             "/api/models", "/api/models/test", "/api/plan/switch"):
             self._json({"ok": False, "error": "not_found"}, 404)
@@ -5596,6 +5752,10 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         if url.path == "/api/chats/resume":
             # Abandoned transcript → live registered fleet session (local host).
             self._json(_resume_chat_in_fleet(data))
+            return
+        if url.path == "/api/steer":
+            # Grok headless (preferred) or tmux PTY send — Phase B control plane
+            self._json(steer_payload(data if isinstance(data, dict) else {}))
             return
         if url.path == "/api/reply":
             sess = (data.get("session") or "").strip()

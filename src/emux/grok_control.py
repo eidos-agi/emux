@@ -485,17 +485,21 @@ def headless_steer_argv(
     bin_path: str | None = None,
     cwd: str | None = None,
     model: str | None = None,
-    output_format: str = "plain",
+    output_format: str = "json",
+    always_approve: bool = True,
 ) -> list[str]:
     """Argv for headless single-turn steer: ``grok -p "…"`` [``-r`` id | ``-c``].
 
     Does not run the process — caller decides subprocess / dry-run.
+    Default output_format=json for structured fleet parsing.
     """
     text = (prompt or "").strip()
     if not text:
         raise ValueError("prompt required")
     grok = bin_path or resolve_grok_bin() or "grok"
     argv: list[str] = [grok, "-p", text, "--output-format", output_format]
+    if always_approve:
+        argv.append("--always-approve")
     if cwd:
         argv.extend(["--cwd", cwd])
     if model:
@@ -506,6 +510,112 @@ def headless_steer_argv(
     elif continue_recent:
         argv.append("-c")
     return argv
+
+
+def run_headless_steer(
+    prompt: str,
+    *,
+    session_id: str | None = None,
+    continue_recent: bool = False,
+    bin_path: str | None = None,
+    cwd: str | None = None,
+    model: str | None = None,
+    timeout: float = 120.0,
+    always_approve: bool = True,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Run one headless Grok turn; return structured result (no tmux).
+
+    Uses ``grok -p`` with ``--output-format json``. Does not speak ACP — that is
+    Phase C. Suitable for room SEND when the operator prefers protocol-ish
+    control over paste-into-TUI.
+    """
+    import subprocess
+    import time as _time
+
+    t0 = _time.time()
+    try:
+        argv = headless_steer_argv(
+            prompt,
+            session_id=session_id,
+            continue_recent=continue_recent,
+            bin_path=bin_path,
+            cwd=cwd,
+            model=model,
+            output_format="json",
+            always_approve=always_approve,
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "mode": "headless"}
+
+    run_env = dict(os.environ)
+    if env:
+        run_env.update(env)
+    # launchd-safe: ensure ~/.grok/bin on PATH for child tools
+    home = Path.home()
+    extra = str(home / ".grok" / "bin")
+    run_env["PATH"] = extra + os.pathsep + (run_env.get("PATH") or "")
+
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=max(5.0, float(timeout)),
+            cwd=cwd if cwd and Path(cwd).is_dir() else None,
+            env=run_env,
+        )
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "error": "grok_not_found",
+            "mode": "headless",
+            "argv": argv,
+            "hint": "set EMUX_GROK_BIN to absolute path of grok",
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "error": "timeout",
+            "mode": "headless",
+            "timeout": timeout,
+            "argv": argv,
+            "partial_stdout": (exc.stdout or "")[:4000] if isinstance(exc.stdout, str) else "",
+        }
+    except OSError as exc:
+        return {"ok": False, "error": f"spawn_failed:{exc}", "mode": "headless", "argv": argv}
+
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    parsed: Any = None
+    text = out
+    if out:
+        try:
+            parsed = json.loads(out)
+            if isinstance(parsed, dict):
+                # common shapes: {text|result|message|output}
+                for k in ("text", "result", "message", "output", "content", "response"):
+                    if isinstance(parsed.get(k), str) and parsed[k].strip():
+                        text = parsed[k].strip()
+                        break
+        except json.JSONDecodeError:
+            parsed = None
+            text = out
+
+    ok = proc.returncode == 0
+    return {
+        "ok": ok,
+        "mode": "headless",
+        "exit_code": proc.returncode,
+        "text": text[:8000] if text else "",
+        "json": parsed if isinstance(parsed, (dict, list)) else None,
+        "stderr": err[:2000],
+        "argv": argv,
+        "session_id": (session_id or "").strip() or None,
+        "cwd": cwd,
+        "elapsed_ms": int((_time.time() - t0) * 1000),
+        "error": None if ok else (err.splitlines()[-1] if err else f"exit_{proc.returncode}"),
+    }
 
 
 def acp_stdio_argv(
