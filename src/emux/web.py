@@ -4190,24 +4190,38 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return True
         return self.public_origin is not None and origin.rstrip("/") == self.public_origin
 
+    def _send_html(self, html: str, status: int = 200) -> None:
+        body = html.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _control_room_html(self) -> str:
+        html = _help.control_room_page(PAGE, __version__).replace("__OS__", _host_os())
+        return self._with_public_path(html)
+
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
         url = urlparse(self.path)
+        # Simple status first: under a public path mount, "/" is the testable
+        # read-only table; full SPA lives at /room. Local loopback (no path)
+        # keeps "/" as the full control room for existing muscle memory.
+        if url.path in ("/simple", "/simple/", "/status", "/status/"):
+            self._send_html(simple_status_html(__version__, self.public_path or ""))
+            return
+        if url.path in ("/room", "/room/"):
+            self._send_html(self._control_room_html())
+            return
         if url.path == "/" or url.path == "/index.html":
-            html = _help.control_room_page(PAGE, __version__).replace("__OS__", _host_os())
-            body = self._with_public_path(html).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            if self.public_path:
+                self._send_html(simple_status_html(__version__, self.public_path))
+            else:
+                self._send_html(self._control_room_html())
             return
         if url.path in ("/docs", "/docs/"):
-            body = self._with_public_path(_help.docs_page(__version__)).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_html(self._with_public_path(_help.docs_page(__version__)))
             return
         if url.path == "/healthz":
             # Unguarded on purpose: leaks nothing, lets launchd/monitoring probe liveness.
@@ -4548,6 +4562,121 @@ def normalize_public_path(path: str | None) -> str | None:
     if not segments or any(s in (".", "..") for s in segments):
         return None
     return "/" + "/".join(segments)
+
+
+def simple_status_html(version: str, public_path: str = "") -> str:
+    """Server-rendered, read-only session table — the first testable view.
+
+    No SPA, no keystroke UI. One HTML page, one meta refresh, plain table.
+    When public_path is set (e.g. /gmux), links stay under that prefix.
+    """
+    import html as _html
+    from datetime import datetime, timezone
+
+    base = public_path or ""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    payload = sessions_payload()
+    sessions = payload.get("sessions") or []
+    live_n = sum(1 for s in sessions if s.get("live"))
+    reg_n = sum(1 for s in sessions if s.get("registered"))
+    ok = bool(payload.get("ok"))
+    err = payload.get("error") or ""
+
+    rows: list[str] = []
+    for s in sessions:
+        name = _html.escape(str(s.get("name") or ""))
+        tmux = _html.escape(str(s.get("session") or ""))
+        host = _html.escape(str(s.get("host") or "local"))
+        desc = _html.escape(str(s.get("description") or "—"))
+        live = "LIVE" if s.get("live") else "stale"
+        live_cls = "live" if s.get("live") else "stale"
+        reg = "yes" if s.get("registered") else "no"
+        tags = _html.escape(", ".join(s.get("tags") or []) or "—")
+        rows.append(
+            f"<tr class='{live_cls}'>"
+            f"<td><code>{name}</code></td>"
+            f"<td><code>{tmux}</code></td>"
+            f"<td>{host}</td>"
+            f"<td><span class='pill {live_cls}'>{live}</span></td>"
+            f"<td>{reg}</td>"
+            f"<td>{tags}</td>"
+            f"<td>{desc}</td>"
+            f"</tr>"
+        )
+    body_rows = "\n".join(rows) if rows else (
+        "<tr><td colspan='7' class='empty'>No sessions in registry and none live in tmux.</td></tr>"
+    )
+    status_line = (
+        f"ok · {live_n} live · {reg_n} registered · {len(sessions)} total"
+        if ok else f"error · {_html.escape(str(err))}"
+    )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="15">
+<title>gmux status</title>
+<style>
+  :root {{ --bg:#f7f8f3; --ink:#1d2b23; --dim:#5c6b61; --line:#d5ddd6;
+           --live:#1a7a45; --stale:#8a6a2a; --card:#fff; --pill:#e8f5ee; }}
+  * {{ box-sizing: border-box; }}
+  body {{ margin:0; font:14px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--ink); }}
+  header {{ padding:20px 24px 12px; border-bottom:1px solid var(--line); background:var(--card); }}
+  h1 {{ margin:0 0 4px; font-size:18px; font-weight:600; }}
+  .meta {{ color:var(--dim); font-size:12px; }}
+  .meta a {{ color:var(--ink); }}
+  main {{ padding:16px 24px 40px; max-width:1100px; }}
+  .summary {{ margin:0 0 14px; padding:10px 12px; background:var(--card);
+              border:1px solid var(--line); border-radius:6px; font-size:13px; }}
+  .summary.bad {{ border-color:#c45; color:#822; }}
+  table {{ width:100%; border-collapse:collapse; background:var(--card);
+           border:1px solid var(--line); border-radius:6px; overflow:hidden; }}
+  th, td {{ text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
+            vertical-align:top; font-size:13px; }}
+  th {{ font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--dim);
+       background:#f0f3f0; }}
+  tr:last-child td {{ border-bottom:0; }}
+  code {{ font:12px/1.4 ui-monospace,Menlo,monospace; }}
+  .pill {{ display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px;
+           font-weight:600; letter-spacing:.03em; }}
+  .pill.live {{ background:var(--pill); color:var(--live); }}
+  .pill.stale {{ background:#f5efdf; color:var(--stale); }}
+  .empty {{ color:var(--dim); text-align:center; padding:24px; }}
+  footer {{ margin-top:14px; color:var(--dim); font-size:12px; }}
+</style>
+</head>
+<body>
+<header>
+  <h1>gmux status</h1>
+  <div class="meta">
+    greenmux / emux { _html.escape(version) } · read-only · auto-refresh 15s ·
+    <a href="{base}/room">full control room</a> ·
+    <a href="{base}/healthz">healthz</a>
+  </div>
+</header>
+<main>
+  <div class="summary{' bad' if not ok else ''}" id="summary">{status_line} · checked {now}</div>
+  <table>
+    <thead>
+      <tr>
+        <th>name</th><th>tmux</th><th>host</th><th>state</th>
+        <th>registered</th><th>tags</th><th>description</th>
+      </tr>
+    </thead>
+    <tbody>
+{body_rows}
+    </tbody>
+  </table>
+  <footer>
+    Gate is go door OIDC (strict). This page does not send keys — observation only.
+    Path prefix: <code>{_html.escape(base or "/")}</code>
+  </footer>
+</main>
+</body>
+</html>
+"""
 
 
 def _remote_controller_from_env() -> Any:

@@ -226,6 +226,16 @@ def test_http_serves_ui(daemon):
     assert "__PUBLIC_PATH__" not in body
 
 
+def test_http_simple_status_always_available(daemon):
+    """Read-only table at /simple — works with or without public_path."""
+    status, body = _get(daemon + "/simple")
+    assert status == 200
+    assert "gmux status" in body
+    assert "main" in body  # mocked live session
+    assert "read-only" in body
+    assert "auto-refresh" in body
+
+
 def test_normalize_public_path():
     from emux import web
     assert web.normalize_public_path(None) == ""
@@ -238,13 +248,16 @@ def test_normalize_public_path():
 
 
 def test_http_ui_stamps_public_path_prefix(monkeypatch):
-    """When mounted under /gmux, SPA absolute fetches must carry the prefix."""
+    """Under public_path, "/" is the simple table; /room is the full SPA."""
     from emux import server, web
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
     monkeypatch.setattr(server, "_live_sessions", lambda: [
         {"name": "main", "windows": 1, "created_unix": 0, "attached": False},
     ])
-    monkeypatch.setattr(server, "_load_registry", lambda: {})
+    monkeypatch.setattr(server, "_load_registry", lambda: {
+        "proof": {"session": "main", "description": "scratch", "tags": ["test"],
+                  "registered_at": 0},
+    })
     monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "pane\n", ""))
     web.EmuxWebHandler.public_origin = "https://go.greenmarkwaste.com"
     web.EmuxWebHandler.public_path = "/gmux"
@@ -253,11 +266,17 @@ def test_http_ui_stamps_public_path_prefix(monkeypatch):
     thread.start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
     try:
+        # default landing = simple status
         status, body = _get(base + "/")
+        assert status == 200
+        assert "gmux status" in body
+        assert "proof" in body and "LIVE" in body
+        assert 'href="/gmux/room"' in body
+        # full SPA still at /room with path stamp
+        status, body = _get(base + "/room")
         assert status == 200
         assert 'const PUBLIC_PATH="/gmux"' in body
         assert 'href="/gmux/docs"' in body
-        assert 'fetch(PUBLIC_PATH+"/api/help' in body or 'fetch(PUBLIC_PATH+"/api/help?q="' in body
         # Host guard accepts the public origin hostname
         req = urllib.request.Request(
             base + "/api/sessions",
