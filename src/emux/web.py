@@ -2152,6 +2152,99 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
 # send
 # ---------------------------------------------------------------------------
 
+# Web-composer image paste: browser has the laptop pasteboard; we write the file
+# on the daemon host (where Claude/Grok run) and inject the path into the pane.
+_CLIP_DIR = Path(os.environ.get("EMUX_CLIP_DIR") or "/tmp/gmux-clip")
+_CLIP_MAX_BYTES = 8 * 1024 * 1024  # 8 MiB decoded
+_CLIP_MIME = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
+
+def _clip_image_save(data: dict[str, Any]) -> dict[str, Any]:
+    """Save a base64 image from the room composer onto this host's disk.
+
+    Returns a path the remote agent can Read. Only runs when the operator pastes
+    into the web UI — not a system-wide clipboard hijack.
+    """
+    import base64
+    import re as _re
+
+    raw_b64 = (data.get("data") or data.get("image") or "").strip()
+    if not raw_b64:
+        return {"ok": False, "error": "missing_image_data"}
+    mime = (data.get("mime") or data.get("type") or "image/png").strip().lower()
+    # data:image/png;base64,....
+    if raw_b64.startswith("data:"):
+        try:
+            header, raw_b64 = raw_b64.split(",", 1)
+            if ";" in header:
+                mime = header.split(";")[0].split(":", 1)[1].strip().lower() or mime
+        except ValueError:
+            return {"ok": False, "error": "bad_data_url"}
+    ext = _CLIP_MIME.get(mime)
+    if not ext:
+        return {"ok": False, "error": f"unsupported_mime:{mime}"}
+    try:
+        blob = base64.b64decode(raw_b64, validate=False)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"bad_base64:{exc}"}
+    if not blob:
+        return {"ok": False, "error": "empty_image"}
+    if len(blob) > _CLIP_MAX_BYTES:
+        return {
+            "ok": False,
+            "error": "image_too_large",
+            "max_bytes": _CLIP_MAX_BYTES,
+            "got_bytes": len(blob),
+        }
+    # light magic-byte check
+    if ext == ".png" and not blob.startswith(b"\x89PNG"):
+        return {"ok": False, "error": "not_a_png"}
+    if ext == ".jpg" and not blob.startswith(b"\xff\xd8"):
+        return {"ok": False, "error": "not_a_jpeg"}
+
+    session = (data.get("session") or data.get("name") or "session").strip()
+    safe = _re.sub(r"[^A-Za-z0-9._-]+", "-", session)[:48] or "session"
+    _CLIP_DIR.mkdir(parents=True, exist_ok=True)
+    # best-effort dir perms for multi-user hosts
+    try:
+        os.chmod(_CLIP_DIR, 0o700)
+    except OSError:
+        pass
+    ts = int(time.time() * 1000)
+    path = _CLIP_DIR / f"{safe}-{ts}{ext}"
+    try:
+        path.write_bytes(blob)
+        os.chmod(path, 0o600)
+    except OSError as exc:
+        return {"ok": False, "error": f"write_failed:{exc}"}
+
+    # prune old clips (keep last 40 files)
+    try:
+        files = sorted(_CLIP_DIR.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for old in files[40:]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+    return {
+        "ok": True,
+        "path": str(path),
+        "mime": mime,
+        "bytes": len(blob),
+        "session": session,
+        "note": "Paste path into agent prompt or send with your message — Claude Read works on paths.",
+    }
+
+
 def send_payload(session: str, keys: str, literal: bool = True, enter: bool = True,
                  host: str | None = None) -> dict[str, Any]:
     """Send keys to `session`, local or — when `host` is set — over ssh. literal=
@@ -2758,6 +2851,19 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
   background:var(--bg-card);border:1px dashed var(--amber-faint);border-radius:6px;color:var(--text-dim)}
 #modalpending .plabel{color:var(--amber-dim);font-size:9px;letter-spacing:1.5px;text-transform:uppercase;margin-right:7px}
 #modalpending .ptext{color:var(--text)}
+#modalclips{display:none;flex-wrap:wrap;gap:8px;padding:0 16px 8px;align-items:center}
+#modalclips.on{display:flex}
+#modalclips .clip{
+  display:flex;align-items:center;gap:8px;padding:4px 8px 4px 4px;
+  border:1px solid var(--line);border-radius:6px;background:var(--bg-card);
+  font-size:11px;color:var(--text-dim);max-width:100%;
+}
+#modalclips .clip img{width:40px;height:40px;object-fit:cover;border-radius:4px;background:#000}
+#modalclips .clip .cp{font-family:ui-monospace,Menlo,monospace;font-size:10px;color:var(--amber);
+  max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#modalclips .clip .rm{border:0;background:transparent;color:var(--text-dim);cursor:pointer;font-size:14px;padding:0 4px}
+#modalclips .clip .rm:hover{color:var(--stale)}
+#modalclips .cliphint{font-size:10px;color:var(--text-dim);letter-spacing:.3px}
 /* the gist — reader's-digest + suggested replies, so you know what to do */
 #modaldigest{display:none}
 #modaldigest.on{display:block;padding:11px 16px;background:var(--bg-raise);
@@ -3051,8 +3157,9 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
       <button class="chip" data-keys="Tab">TAB</button>
     </div>
     <div id="modalpending"></div>
+    <div id="modalclips" title="images pasted in this box land on the fleet host"></div>
     <div id="modalrow">
-      <input id="modalinput" placeholder="prompt / steer this session… (Enter sends)" autocomplete="off" spellcheck="false">
+      <input id="modalinput" placeholder="prompt / paste screenshot here… (Enter sends)" autocomplete="off" spellcheck="false">
       <button id="modalsend">SEND</button>
     </div>
   </div>
@@ -4191,7 +4298,7 @@ function openModal(s){
   $("#modalstatus").textContent="connecting…";$("#modalstatus").style.color="";
   const sc=$("#modalscreen");sc.textContent="";sc.dataset.last="";
   $("#modaldigest").className="";$("#modaldigest .dgtext").textContent="";$("#modaldigest .dgsugg").innerHTML="";
-  setPending("");$("#modalthink").className="";
+  setPending("");$("#modalthink").className="";clearModalClips();
   tOpts=[];tSugg=[];tchatCollapsed=false;tLoggedDigest="";$("#tchatlog").innerHTML="";
   switchArmed=null;$("#modalswitch").textContent="⇄ switch account";$("#modalswitch").className="";
   $("#modalswitch").classList.toggle("hot",!!s.cost);   // highlight when this session is throttled
@@ -4204,7 +4311,7 @@ function openModal(s){
 }
 function closeModal(){
   $("#modal").classList.remove("open");
-  clearInterval(modalTimer);modalTimer=null;modalSession=null;
+  clearInterval(modalTimer);modalTimer=null;modalSession=null;clearModalClips();
   syncURL();                                      // drop the session from the URL
 }
 async function modalRefresh(){
@@ -4329,13 +4436,82 @@ async function modalKeys(keys,literal,enter){
     return !!(r&&r.ok);
   }catch(e){return false;}   // daemon down / network error
 }
+// Web image paste: laptop pasteboard → POST /api/clip-image → path on fleet host → send with prompt.
+// Only intercepts paste when modalinput/tchatinput is focused — never system-wide.
+let modalClips=[];   // {path, mime, bytes, preview}
+function renderModalClips(){
+  const box=$("#modalclips");if(!box)return;
+  if(!modalClips.length){box.className="";box.innerHTML="";return;}
+  box.className="on";
+  box.innerHTML=modalClips.map((c,i)=>
+    '<span class="clip" data-i="'+i+'">'
+    +(c.preview?'<img src="'+c.preview+'" alt="">':'')
+    +'<span class="cp" title="'+esc(c.path)+'">'+esc(c.path)+'</span>'
+    +'<button type="button" class="rm" data-i="'+i+'" title="remove">×</button></span>'
+  ).join("")+'<span class="cliphint">on fleet host · sent with your message</span>';
+  box.querySelectorAll(".rm").forEach(b=>b.onclick=e=>{
+    e.preventDefault();modalClips.splice(+b.dataset.i,1);renderModalClips();
+  });
+}
+function clearModalClips(){modalClips=[];renderModalClips();}
+function fileToDataUrl(file){
+  return new Promise((resolve,reject)=>{
+    const r=new FileReader();
+    r.onload=()=>resolve(r.result);
+    r.onerror=()=>reject(r.error||new Error("read failed"));
+    r.readAsDataURL(file);
+  });
+}
+async function uploadClipImage(file,session){
+  if(!file||!String(file.type||"").startsWith("image/"))return null;
+  if(file.size>8*1024*1024)throw new Error("image over 8MB");
+  const dataUrl=await fileToDataUrl(file);
+  const r=await api("/api/clip-image",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({data:dataUrl,mime:file.type||"image/png",session:session||""})});
+  if(!r||!r.ok)throw new Error((r&&r.error)||"upload failed");
+  return {path:r.path,mime:r.mime||file.type,bytes:r.bytes||file.size,preview:dataUrl};
+}
+async function handleComposerPaste(e,session){
+  const items=e.clipboardData&&e.clipboardData.items;
+  if(!items||!items.length)return false;
+  const images=[];
+  for(let i=0;i<items.length;i++){
+    const it=items[i];
+    if(it.kind==="file"&&it.type&&it.type.startsWith("image/")){
+      const f=it.getAsFile();if(f)images.push(f);
+    }
+  }
+  if(!images.length)return false;   // text paste — leave alone
+  e.preventDefault();
+  const st=$("#modalstatus");
+  for(const f of images){
+    try{
+      if(st){st.textContent="uploading image…";st.style.color="";}
+      const clip=await uploadClipImage(f,session);
+      if(clip){modalClips.push(clip);renderModalClips();}
+      if(st){st.textContent="image on fleet · "+(clip&&clip.path?clip.path.split("/").pop():"ok");st.style.color="var(--amber)";}
+    }catch(err){
+      if(st){st.textContent="image paste failed — "+(err.message||err);st.style.color="var(--stale)";}
+    }
+  }
+  return true;
+}
 function modalSubmit(){
-  const i=$("#modalinput");const text=i.value;if(!text)return;
+  const i=$("#modalinput");
+  const paths=modalClips.map(c=>c.path).filter(Boolean);
+  const body=(i.value||"").trim();
+  if(!body&&!paths.length)return;
+  // Paths first so Claude/Grok can Read the files on this host; then operator text.
+  const text=paths.length?(paths.join("\n")+(body?"\n\n"+body:"")):body;
   i.value="";                                   // optimistic clear for snappy UX…
-  setPending(text);                             // …and hold it above the box until it lands
+  clearModalClips();
+  setPending(text.length>180?text.slice(0,180)+"…":text);
   modalKeys(text,true,true).then(ok=>{
     if(!ok){                                    // …but if it didn't land, give the draft back
-      if(!i.value)i.value=text;setPending("");
+      if(!i.value)i.value=body;
+      // cannot restore binary preview easily; path lines still useful
+      if(paths.length)i.value=(paths.join("\n")+(i.value?"\n\n"+i.value:""));
+      setPending("");
       const st=$("#modalstatus");st.textContent="send failed — draft kept";st.style.color="var(--stale)";
     }
   });
@@ -4351,7 +4527,15 @@ function updateThinking(t){const el=$("#modalthink");
   else el.className="";}
 $("#modalsend").onclick=modalSubmit;
 $("#modalinput").addEventListener("keydown",e=>{if(e.key==="Enter")modalSubmit();});
+$("#modalinput").addEventListener("paste",e=>{
+  if(!modalSession)return;
+  handleComposerPaste(e,modalSession.session||modalSession.name);
+});
 $("#tchatinput").addEventListener("keydown",e=>{if(e.key==="Enter")tchatSend();});
+$("#tchatinput").addEventListener("paste",e=>{
+  if(!modalSession)return;
+  handleComposerPaste(e,modalSession.session||modalSession.name);
+});
 $("#modaliterm").onclick=async()=>{
   if(!modalSession)return;
   const b=$("#modaliterm");const was=b.textContent;b.disabled=true;b.textContent="opening…";
@@ -5185,6 +5369,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         if url.path not in ("/api/send", "/api/head", "/api/spawn", "/api/suggest",
                             "/api/adopt", "/api/reply", "/api/chats/resume",
+                            "/api/clip-image",
                             "/api/hancock/approve", "/api/hancock/deny",
                             "/api/models", "/api/models/test", "/api/plan/switch"):
             self._json({"ok": False, "error": "not_found"}, 404)
@@ -5197,9 +5382,16 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
+            # image paste can be a few MB of base64
+            if length > 12 * 1024 * 1024:
+                self._json({"ok": False, "error": "body_too_large"}, 413)
+                return
             data = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
             self._json({"ok": False, "error": "bad_json"}, 400)
+            return
+        if url.path == "/api/clip-image":
+            self._json(_clip_image_save(data if isinstance(data, dict) else {}))
             return
         if url.path == "/api/suggest":
             intent = (data.get("intent") or "").strip()
