@@ -54,12 +54,22 @@ _PERSONAL_RE = re.compile(
 )
 
 # AIC Holdings lane — positive match only (personal + greenmark fall out).
+# Includes ARP real estate / payapp (anthracite) work under repos-aic.
 _AIC_RE = re.compile(
     r"repos-aic|"
     r"aic-software-engineer-cockpit|"
     r"aic-director|"
     r"aic-holdings|"
+    r"aic-arp-cockpit|"
+    r"arp-projects|"
+    r"ARP-dashboard|"
+    r"pay_app_tool|"
+    r"payapp|"
+    r"pay-app|"
+    r"kennedale|"
+    r"anthracite|"
     r"(?:^|/)aic(?:-|_|\b|/)|"
+    r"(?:^|/)arp(?:-|_|\b|/)|"
     r"\bamux\b|"
     r"zeus-v2|zeus_v2|"
     r"meridian|"
@@ -151,8 +161,16 @@ def _is_noise_prompt(text: str) -> bool:
     return False
 
 
-def _priority(status: str, greenmark: bool, age_hours: float, title: str) -> int:
-    """Higher = more urgent to surface (stale greenmark missions first)."""
+def _priority(
+    status: str,
+    greenmark: bool,
+    age_hours: float,
+    title: str,
+    *,
+    cwd: str = "",
+    blob: str = "",
+) -> int:
+    """Higher = more urgent to surface (stale greenmark / ARP missions first)."""
     score = 0
     if status == "stale":
         score += 40
@@ -162,6 +180,30 @@ def _priority(status: str, greenmark: bool, age_hours: float, title: str) -> int
         score += 5
     if greenmark:
         score += 30
+    # ARP real estate / payapp — boost so amux CHATS surfaces mid-flight RE work
+    hay = f"{title} {cwd} {blob}".lower()
+    if any(
+        k in hay
+        for k in (
+            "pay app",
+            "payapp",
+            "pay_app",
+            "kennedale",
+            "graybox",
+            "greybox",
+            "lien waiver",
+            "arp-cockpit",
+            "aic-arp",
+            "anthracite",
+            "frost tower",
+            "640 taylor",
+            "real estate",
+            "g702",
+            "g703",
+            "waiver_ledger",
+        )
+    ):
+        score += 35
     if status == "stale" and age_hours > 72:
         score += 10
     if status == "stale" and age_hours > 168:
@@ -367,7 +409,9 @@ def scan_grok(
                     messages=idx.chat_messages or idx.messages,
                     model=idx.model,
                     branch=idx.branch,
-                    priority=_priority(status, gm, age_h, title),
+                    priority=_priority(
+                        status, gm, age_h, title, cwd=resume_cwd, blob=title
+                    ),
                     greenmark=gm,
                     session_kind=idx.session_kind,
                     agent_name=idx.agent_name,
@@ -447,23 +491,101 @@ def scan_grok(
                 messages=data.get("num_chat_messages") or data.get("num_messages"),
                 model=data.get("current_model_id"),
                 branch=data.get("head_branch"),
-                priority=_priority(status, gm, age_h, title),
+                priority=_priority(
+                    status, gm, age_h, title, cwd=resume_cwd, blob=blob
+                ),
                 greenmark=gm,
             )
         )
     return hits
 
 
+# Longest-first hyphenated directory names Claude flattens with `-` instead of `/`.
+# Without this, repos-aic → repos/aic and aic-arp-cockpit → aic/arp/cockpit.
+_CLAUDE_HYPHEN_SEGS = tuple(
+    sorted(
+        (
+            "aic-software-engineer-cockpit",
+            "aic-director-of-ai-cockpit",
+            "aic-arp-cockpit",
+            "repos-eidos-agi",
+            "repos-greenmark",
+            "repos-personal",
+            "repos-aic",
+            "repos-local",
+            "repos-asmp",
+            "ARP-dashboard",
+            "pay_app_tool",
+            "arp-projects",
+            "emux-gmux-path",
+            "Library",
+            "CloudStorage",
+            "OneDrive-JettaOperatingCo",
+        ),
+        key=len,
+        reverse=True,
+    )
+)
+
+
 def _claude_project_cwd(project_dir_name: str) -> str:
-    """Decode Claude's project folder name to a path guess."""
+    """Decode Claude's project folder name to a path guess.
+
+    Claude stores abs paths with ``/`` replaced by ``-`` (e.g.
+    ``-Users-me-repos-aic-aic-arp-cockpit``). Naive replace of every ``-``
+    with ``/`` breaks hyphenated dirs (``repos-aic`` → ``repos/aic``).
+    """
     name = project_dir_name
     if name.startswith("-"):
         name = name[1:]
-    if name.startswith("Users-"):
-        return "/" + name.replace("-", "/")
     if name.startswith("private-tmp-"):
         return "/private/tmp/" + name[len("private-tmp-") :]
-    return name.replace("-", "/")
+
+    parts: list[str] = []
+    rest = name
+    abs_path = False
+    if rest.startswith("Users-"):
+        abs_path = True
+        # Users-<username>-...
+        rest = rest[len("Users-") :]
+        if "-" in rest:
+            user, rest = rest.split("-", 1)
+        else:
+            user, rest = rest, ""
+        parts.extend(["Users", user])
+
+    while rest:
+        matched = None
+        for seg in _CLAUDE_HYPHEN_SEGS:
+            if rest == seg or rest.startswith(seg + "-"):
+                matched = seg
+                break
+        if matched:
+            parts.append(matched)
+            rest = rest[len(matched) :]
+            if rest.startswith("-"):
+                rest = rest[1:]
+            continue
+        if "-" in rest:
+            tok, rest = rest.split("-", 1)
+        else:
+            tok, rest = rest, ""
+        if tok:
+            parts.append(tok)
+
+    path = "/" + "/".join(parts) if abs_path else "/".join(parts)
+    # Prefer a path that actually exists on disk
+    try:
+        p = Path(path)
+        if p.is_dir():
+            return str(p.resolve())
+        # sometimes home-relative without leading Users decode still works
+        home_try = Path.home() / path.lstrip("/")
+        if home_try.is_dir():
+            return str(home_try.resolve())
+    except OSError:
+        pass
+    return path
 
 
 def _claude_content_from_obj(o: dict[str, Any]) -> str:
@@ -594,7 +716,9 @@ def scan_claude(
                     messages=nlines,
                     model=None,
                     branch=None,
-                    priority=_priority(status, gm, age_h, title),
+                    priority=_priority(
+                        status, gm, age_h, title, cwd=proj_cwd, blob=blob
+                    ),
                     greenmark=gm,
                 )
             )

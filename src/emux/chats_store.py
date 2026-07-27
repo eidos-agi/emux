@@ -447,7 +447,14 @@ class ChatStore:
             gm = bool(row["greenmark"])
             prio = int(row["priority"] or 0)
             if status in ("live", "recent", "stale"):
-                prio = _priority(status, gm, age_h, row["title"] or "")
+                prio = _priority(
+                    status,
+                    gm,
+                    age_h,
+                    row["title"] or "",
+                    cwd=row["cwd"] or "",
+                    blob=f"{row['cwd'] or ''} {row['title'] or ''} {row['summary'] or ''}",
+                )
 
             counts["total"] += 1
             if status in counts:
