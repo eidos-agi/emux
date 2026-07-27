@@ -3526,8 +3526,11 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 #modalhead .nmrow{display:flex;align-items:baseline;gap:8px;min-width:0}
 #modalhead .nm{font-family:"VT323",monospace;font-size:22px;color:var(--amber);letter-spacing:1px}
 #modalhead .ag{color:var(--amber-dim);font-size:12px;letter-spacing:1px}
-#modalhead .issuerow{font-size:12px;color:var(--text);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#modalhead .nmrow .nm{font-size:14px;opacity:.85;letter-spacing:.5px}
+#modalhead .issuerow{font-size:18px;color:var(--text);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:"VT323",monospace;letter-spacing:.5px}
 #modalhead .issuerow a{color:var(--amber);text-decoration:none;border-bottom:1px dotted color-mix(in srgb,var(--amber) 50%,transparent)}
+#modalhead .issuerow:not([hidden]){order:-1}
+#modalidents{display:flex;flex-direction:column-reverse;gap:2px;min-width:0;flex:1 1 auto}
 #modalhead .st{margin-left:auto;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim)}
 #modalclose,#modalpop{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 10px;margin-left:6px}
 #modalclose:hover,#modalpop:hover{color:var(--amber);border-color:var(--amber-dim)}
@@ -6173,6 +6176,7 @@ function openModal(s){
   modalBook=[];modalScrollMode="app";modalHistoryText="";
   modalOpenedAt=Date.now();
   activeSideChatId="reply";
+  modalTaskKeyCache=[]; // EID-1141: fresh scan per open
   $("#modalname").textContent=s.name;
   $("#modalagent").innerHTML=agentHTML(s);
   $("#modalstatus").textContent="connecting…";$("#modalstatus").style.color="";
@@ -6223,12 +6227,16 @@ function openModal(s){
   loadDigest();
   syncURL();
   setTimeout(()=>$("#modalinput").focus(),40);
+  // EID-1141: re-scan Tasks after open even if capture is slow / stable
+  [400,1200,2800].forEach(ms=>setTimeout(()=>{
+    if(modalSession&&modalSession.name===s.name) renderModalTasks();
+  },ms));
 }
 function closeModal(){
   $("#modal").classList.remove("open");
   const j=$("#modaljump");if(j)j.classList.remove("on");
   clearInterval(modalTimer);modalTimer=null;modalSession=null;clearModalClips();
-  modalBook=[];modalHistoryText="";modalOpenedAt=0;
+  modalBook=[];modalHistoryText="";modalOpenedAt=0;modalTaskKeyCache=[];
   sideChats=[];sideChatSeq=0;
   const stack=$("#tchatstack");if(stack)stack.innerHTML="";
   syncURL();
@@ -6259,10 +6267,11 @@ async function modalRefresh(){
           if(modalBook.length>MODAL_BOOK_MAX)modalBook=modalBook.slice(-MODAL_BOOK_MAX);
         }
         modalRenderBook(sc,atBottom,keepTop);
-        renderModalTasks(); // re-scan pane for new TEAM-123 keys
         // The Gist failed but the web changed — ok to try to recover, capped at 10
         if(digestErr&&digestRetries<10){digestRetries++;loadDigest();}
       }
+      // EID-1141: always re-scan Tasks (not only on content delta)
+      renderModalTasks();
       renderOptions(r.options);   // a menu on screen → clickable bubbles
       updateThinking(r.thinking); // movement + timer while it generates
       // pending send has landed once the pane echoes it → clear the holding bubble
@@ -7290,6 +7299,8 @@ function extractLinearKeys(text){
   LINEAR_ISSUE_RE.lastIndex=0;
   return out;
 }
+// Accumulate keys for the open modal so a one-frame miss never blanks Tasks (EID-1141).
+let modalTaskKeyCache=[];
 /** All Linear tasks mentioned in the open session (name, summary, pane, history, gist). */
 function collectModalTaskKeys(s){
   const blobs=[];
@@ -7300,15 +7311,32 @@ function collectModalTaskKeys(s){
   }
   if(typeof modalHistoryText==="string"&&modalHistoryText) blobs.push(modalHistoryText);
   if(Array.isArray(modalBook)&&modalBook.length) blobs.push(modalBook.join("\n"));
-  const dig=$("#modaldigest .dgtext"); if(dig&&dig.textContent) blobs.push(dig.textContent);
-  const sc=$("#modalscreen"); if(sc&&sc.dataset.last) blobs.push(sc.dataset.last);
+  const dig=$("#modaldigest .dgtext");
+  if(dig){
+    blobs.push(dig.textContent||"");
+    // gist may be linkified HTML — also pull data-linear + plain text from DOM
+    dig.querySelectorAll("[data-linear]").forEach(n=>blobs.push(n.getAttribute("data-linear")||""));
+  }
+  const sc=$("#modalscreen");
+  if(sc){
+    if(sc.dataset.last) blobs.push(sc.dataset.last);
+    // textContent survives after modalRenderBook; never rely only on dataset
+    if(sc.textContent) blobs.push(sc.textContent);
+  }
+  const ban=$("#modalbanner"); if(ban&&ban.textContent) blobs.push(ban.textContent);
   const keys=[];
   for(const b of blobs){
     for(const k of extractLinearKeys(b)){
       if(keys.indexOf(k)<0) keys.push(k);
     }
   }
-  // Stable order: alphabetical by team then number
+  // Merge with cache for this modal open (do not drop keys mid-session)
+  for(const k of modalTaskKeyCache){
+    if(keys.indexOf(k)<0) keys.push(k);
+  }
+  for(const k of keys){
+    if(modalTaskKeyCache.indexOf(k)<0) modalTaskKeyCache.push(k);
+  }
   keys.sort((a,b)=>{
     const [ap,an]=a.split("-"),[bp,bn]=b.split("-");
     if(ap!==bp) return ap<bp?-1:1;
@@ -7354,10 +7382,23 @@ function updateModalIssueHeader(){
   const key=primaryLinearIssue(modalSession);
   if(!key){el.hidden=true;el.innerHTML="";return;}
   el.hidden=false;
+  // Hero line (mock: ARP-24 · title) — title optional until hydrate
   el.innerHTML='<a class="linlink" href="'+linearIssueUrl(key)+'" target="_blank" rel="noopener noreferrer">'+esc(key)+'</a>'
-    +' · active work item'
+    +' <span style="opacity:.7;font-weight:500;font-size:13px;font-family:inherit">· active work</span>'
     +' <button type="button" class="linchat" data-linear="'+key+'" title="Load + pursue">💬</button>';
   bindLinlinks(el);
+  // Wall-clock while modal open (EID-1144 partial — honest elapsed, not fake %)
+  const st=$("#modalstatus");
+  if(st&&modalOpenedAt){
+    const sec=Math.max(0,Math.floor((Date.now()-modalOpenedAt)/1000));
+    const mm=Math.floor(sec/60), ss=sec%60;
+    const elap=(mm?mm+"m ":"")+ss+"s open";
+    if(!/\d+m |\d+s open/.test(st.textContent||"")){
+      /* append once-ish via refresh */
+    }
+    const base=(st.textContent||"").replace(/\s*·\s*\d+m?\s*\d*s open/g,"").trim();
+    st.textContent=base+(base?" · ":"")+elap;
+  }
 }
 function renderModalTasks(){
   const list=$("#modaltasklist"), countEl=$("#modaltaskcount"), badge=$("#modaltaskbadge");

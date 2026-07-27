@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.68.15
+
+### Fixes
+- **EID-1141:** Tasks tab re-scan on every modal refresh + key cache so Linear keys in the pane are not stuck at 0.
+
+
 
 ## v0.68.14
 
