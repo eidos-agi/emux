@@ -526,6 +526,13 @@ def list_or_sync(
         )
         bundle["did_sync"] = did_sync
         bundle["sync"] = sync_info if did_sync else None
+        # query_ms is the store read; index_ms is disk ingest when we re-synced
+        bundle["query_ms"] = bundle.get("scan_ms") or 0
+        if did_sync and sync_info:
+            bundle["index_ms"] = sync_info.get("scan_ms") or 0
+            bundle["scan_ms"] = int(bundle["query_ms"]) + int(bundle["index_ms"])
+        else:
+            bundle["index_ms"] = 0
         return bundle
     finally:
         store.close()
