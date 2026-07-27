@@ -440,26 +440,70 @@ def cmd_ls() -> int:
 
 
 def cmd_chats(args: argparse.Namespace) -> int:
-    """Scan Claude Code + Grok Build transcript stores for nonoperative work."""
+    """List abandoned chats from the durable index (re-scan disk if stale/forced)."""
     from . import chats as chat_find
+    from . import chats_store
 
     statuses = list(args.statuses or [])
     if args.abandoned_only:
         statuses = ["stale"]
     tools = args.tools or ["claude", "grok"]
-    hits = chat_find.find_chats(
+    refresh = bool(getattr(args, "sync", False) or getattr(args, "refresh", False))
+    bundle = chats_store.list_or_sync(
+        refresh=refresh,
         tools=tools,
         match=args.match,
         recent_hours=args.recent_hours,
         statuses=statuses or None,
         limit=args.limit,
+        q=getattr(args, "q", None) or None,
+        sort=getattr(args, "sort", None) or "priority",
     )
+    hits = bundle["hits"]
+    # normalize to ChatHit-like dicts for format_text
+    as_hits = []
+    for h in hits:
+        if isinstance(h, chat_find.ChatHit):
+            as_hits.append(h)
+        else:
+            as_hits.append(
+                chat_find.ChatHit(
+                    tool=h.get("tool", ""),
+                    session_id=h.get("session_id", ""),
+                    cwd=h.get("cwd", ""),
+                    title=h.get("title", ""),
+                    summary=h.get("summary", ""),
+                    path=h.get("path", ""),
+                    mtime=float(h.get("mtime") or 0),
+                    age_hours=float(h.get("age_hours") or 0),
+                    status=h.get("status", "stale"),
+                    resume=h.get("resume", ""),
+                    messages=h.get("messages"),
+                    model=h.get("model"),
+                    branch=h.get("branch"),
+                    priority=int(h.get("priority") or 0),
+                    greenmark=bool(h.get("greenmark")),
+                )
+            )
     if args.json:
-        print(json.dumps([h.as_dict() for h in hits], indent=2))
+        payload = {
+            "chats": [h.as_dict() if hasattr(h, "as_dict") else h for h in as_hits],
+            "source": bundle.get("source"),
+            "did_sync": bundle.get("did_sync"),
+            "store_path": bundle.get("store_path"),
+            "store_rows": bundle.get("store_rows"),
+            "last_full_scan": bundle.get("last_full_scan"),
+            "counts": bundle.get("counts"),
+        }
+        print(json.dumps(payload, indent=2))
         return 0
-    print(chat_find.format_text(hits))
-    # non-zero when abandoned work exists — useful as a CI/cron gate
-    if any(h.status == "stale" for h in hits):
+    header = chat_find.format_text(as_hits)
+    meta = (
+        f"\n_store: {bundle.get('store_path')} · rows {bundle.get('store_rows')} · "
+        f"source={bundle.get('source')} · did_sync={bundle.get('did_sync')}_\n"
+    )
+    print(header + meta)
+    if any(h.status == "stale" for h in as_hits):
         return 2
     return 0
 
@@ -1345,7 +1389,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_chats = sub.add_parser(
         "chats",
-        help="find Claude Code / Grok Build chats on disk (stale/abandoned missions)",
+        help="list Claude/Grok chats from durable chats.db (re-index disk if stale)",
     )
     p_chats.add_argument(
         "--match",
@@ -1363,7 +1407,7 @@ def main(argv: list[str] | None = None) -> int:
         "--status",
         action="append",
         dest="statuses",
-        choices=["live", "recent", "stale", "abandoned"],
+        choices=["live", "recent", "stale", "abandoned", "resumed"],
         help="filter status (repeatable); abandoned ≡ stale",
     )
     p_chats.add_argument(
@@ -1378,6 +1422,23 @@ def main(argv: list[str] | None = None) -> int:
         "--abandoned-only",
         action="store_true",
         help="shortcut: only stale (not live, older than --recent-hours)",
+    )
+    p_chats.add_argument(
+        "--sync",
+        action="store_true",
+        help="force full disk re-index into chats.db before listing",
+    )
+    p_chats.add_argument(
+        "--refresh",
+        action="store_true",
+        help="alias for --sync",
+    )
+    p_chats.add_argument("-q", "--query", dest="q", default=None, help="text search")
+    p_chats.add_argument(
+        "--sort",
+        choices=["priority", "mtime", "age"],
+        default="priority",
+        help="sort order (default priority)",
     )
 
     p_ask = sub.add_parser(

@@ -1192,6 +1192,18 @@ def _resume_chat_in_fleet(data: dict[str, Any]) -> dict[str, Any]:
                 **{k: v for k, v in r.items() if k not in ("ok", "name", "session")},
             }
 
+    # Durable memory: never re-discover this mission as "new abandoned" work
+    try:
+        from . import chats_store
+
+        store = chats_store.open_store()
+        try:
+            store.mark_resumed(tool, sid, name, notes=f"fleet:{session}")
+        finally:
+            store.close()
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "ok": True,
         "name": name,
@@ -1959,15 +1971,16 @@ def poll_once(lines: int = 14) -> None:
 
 
 def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
-    """Claude Code + Grok Build chats on disk (this host). Room CHATS tab.
+    """Claude Code + Grok chats — durable index first, disk scan only when stale.
 
     Query params (parse_qs style): match, status (comma-separated), tools,
-    limit, recent_hours, q (text search), sort (priority|mtime).
+    limit, recent_hours, q (text search), sort (priority|mtime),
+    refresh=1 to force a full disk re-index into ~/.config/*/chats.db.
     Default match is greenmark when skin is gmux.
     """
     q = q or {}
     try:
-        from . import chats as chat_find
+        from . import chats_store
         from . import skin as _skin
     except ImportError as exc:
         return {"ok": False, "error": f"chats_unavailable: {exc}"}
@@ -1984,6 +1997,7 @@ def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
     sort = (q.get("sort") or ["priority"])[0].strip() or "priority"
     if sort not in ("priority", "mtime", "age"):
         sort = "priority"
+    refresh = (q.get("refresh") or ["0"])[0].strip().lower() in ("1", "true", "yes")
     try:
         limit = max(1, min(200, int((q.get("limit") or ["50"])[0])))
     except ValueError:
@@ -1994,21 +2008,31 @@ def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
         recent_hours = 24.0
 
     try:
-        bundle = chat_find.find_chats_bundle(
+        bundle = chats_store.list_or_sync(
+            refresh=refresh,
             tools=tools,
             match=match_raw,
-            recent_hours=recent_hours,
             statuses=statuses,
             limit=limit,
             q=q_text or None,
             sort=sort,
+            recent_hours=recent_hours,
         )
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
 
+    chats = bundle["hits"]
+    # hits from store are already dicts; from legacy scan would be ChatHit
+    out_chats = []
+    for h in chats:
+        if hasattr(h, "as_dict"):
+            out_chats.append(h.as_dict())
+        else:
+            out_chats.append(h)
+
     return {
         "ok": True,
-        "chats": [h.as_dict() for h in bundle["hits"]],
+        "chats": out_chats,
         "count": bundle["returned"],
         "matched": bundle["matched"],
         "counts": bundle["counts"],
@@ -2018,10 +2042,15 @@ def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
         "q": q_text,
         "sort": sort,
         "host": "local",
+        "source": bundle.get("source") or "store",
+        "did_sync": bool(bundle.get("did_sync")),
+        "store_path": bundle.get("store_path"),
+        "store_rows": bundle.get("store_rows"),
+        "last_full_scan": bundle.get("last_full_scan"),
+        "sync": bundle.get("sync"),
         "note": (
-            "Transcripts on this host's disk — not tmux. "
-            "POST /api/chats/resume spawns a registered fleet session "
-            "(claude --resume / grok + /resume). Click a tile to peek."
+            "Durable chats.db index — disk is scanned only when the store is "
+            "stale or ?refresh=1. POST /api/chats/resume spawns a fleet session."
         ),
     }
 
@@ -2651,6 +2680,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .tile.chat .st-live{color:var(--ok,#3dba6e);font-size:10px;letter-spacing:1px;text-transform:uppercase}
 .tile.chat .st-recent{color:var(--amber);font-size:10px;letter-spacing:1px;text-transform:uppercase}
 .tile.chat .st-stale{color:var(--stale);font-size:10px;letter-spacing:1px;text-transform:uppercase}
+.tile.chat .st-resumed{color:var(--ok,#3dba6e);font-size:10px;letter-spacing:1px;text-transform:uppercase}
 .tile.chat .gm{font-size:9px;letter-spacing:1px;color:var(--ok,#3dba6e);border:1px solid color-mix(in srgb, var(--ok,#3dba6e) 40%, var(--line));padding:0 4px;border-radius:2px}
 .tile.chat .sum{font-size:12px;color:var(--text);padding:4px 10px 6px;line-height:1.45;max-height:3.2em;overflow:hidden}
 .tile.chat .cwd{font-size:10px;color:var(--text-dim);padding:0 10px 4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -3801,7 +3831,8 @@ async function openOrphans(){
 // Resume is copy-paste (spawn is a different path — do not auto-launch).
 // Click a tile to peek last turns from the transcript.
 const CH={rows:[],loading:false,gen:0,status:"stale,recent",match:"",tool:"",
-  q:"",sort:"priority",counts:{},tools_counts:{},scan_ms:0,matched:0,openKey:"",peeks:{}};
+  q:"",sort:"priority",counts:{},tools_counts:{},scan_ms:0,matched:0,openKey:"",peeks:{},
+  source:"",store_rows:null,did_sync:false};
 function chatAge(h){
   if(h==null)return "—";
   if(h<1)return Math.round(h*60)+"m";
@@ -3877,15 +3908,27 @@ function chatTile(c){
   if(c.branch)bits.push("⎇ "+c.branch);
   if(c.mtime_iso)bits.push(c.mtime_iso.slice(0,10));
   if(c.priority!=null)bits.push("prio "+c.priority);
+  if(c.fleet_name)bits.push("fleet "+c.fleet_name);
+  if(c.on_disk===false)bits.push("off-disk");
+  if(c.source)bits.push(c.source);
   meta.textContent=bits.join(" · ");
   const res=document.createElement("div");res.className="resume";res.textContent=c.resume||"";
   const acts=document.createElement("div");acts.className="actions";
   const bFleet=document.createElement("button");bFleet.className="act oattach";
-  bFleet.textContent=c.status==="live"?"● LIVE — ATTACH?":"⇤ RESUME IN FLEET";
-  bFleet.disabled=c.status==="live";
-  if(c.status==="live")bFleet.title="already running — use GRID/ORPHANS attach, do not double-resume";
-  else bFleet.title="spawn tmux + register in fleet with "+(c.tool==="claude"?"claude --resume":"grok /resume");
-  bFleet.onclick=e=>{e.stopPropagation();resumeChatInFleet(c,bFleet);};
+  if(c.status==="resumed"&&c.fleet_name){
+    bFleet.textContent="↗ OPEN "+c.fleet_name;
+    bFleet.title="already resumed into fleet as "+c.fleet_name;
+    bFleet.onclick=e=>{e.stopPropagation();
+      setMode("grid");const s=grid.find(x=>x.name===c.fleet_name);if(s)openModal(s);
+      else{const err=$("#mverr");if(err)err.textContent="fleet session “"+c.fleet_name+"” not live — try RESUME again or check GRID";}};
+  }else if(c.status==="live"){
+    bFleet.textContent="● LIVE";bFleet.disabled=true;
+    bFleet.title="process still holds this chat — attach/boss, do not double-resume";
+  }else{
+    bFleet.textContent="⇤ RESUME IN FLEET";
+    bFleet.title="spawn tmux + register in fleet with "+(c.tool==="claude"?"claude --resume":"grok /resume");
+    bFleet.onclick=e=>{e.stopPropagation();resumeChatInFleet(c,bFleet);};
+  }
   const bCopy=document.createElement("button");bCopy.className="act";bCopy.textContent="⧉ COPY";
   bCopy.onclick=e=>{e.stopPropagation();copyResume(c.resume,bCopy);};
   const bPeek=document.createElement("button");bPeek.className="act";
@@ -3925,6 +3968,7 @@ function renderChats(){
     ["stale","stale"+(cnt.stale!=null?" · "+cnt.stale:"")],
     ["recent","recent"+(cnt.recent!=null?" · "+cnt.recent:"")],
     ["live","live"+(cnt.live!=null?" · "+cnt.live:"")],
+    ["resumed","resumed"+(cnt.resumed!=null?" · "+cnt.resumed:"")],
     ["all","all"+(cnt.total!=null?" · "+cnt.total:"")],
   ];
   const tools=[
@@ -3943,21 +3987,25 @@ function renderChats(){
     +'</div>'
     +'<div class="row">'
     +'<input id="chq" type="search" placeholder="search title · cwd · id…" value="'+esc(CH.q)+'">'
-    +'<button class="act" id="chrefresh" type="button">↻ scan</button>'
-    +'<span class="stat">'+(CH.loading?"scanning…":
+    +'<button class="act" id="chrefresh" type="button" title="force re-index disk into chats.db">↻ re-index</button>'
+    +'<span class="stat">'+(CH.loading?"loading…":
       ('showing <b>'+CH.rows.length+'</b>'
        +(CH.matched&&CH.matched!==CH.rows.length?(' of '+CH.matched):'')
        +(CH.scan_ms?(' · '+CH.scan_ms+'ms'):'')
-       +(cnt.stale!=null?(' · <b>'+cnt.stale+'</b> stale'):'')))+'</span>'
+       +(CH.source?(' · '+CH.source):'')
+       +(CH.store_rows!=null?(' · db '+CH.store_rows):'')
+       +(CH.did_sync?' · synced':'')
+       +(cnt.stale!=null?(' · <b>'+cnt.stale+'</b> stale'):'')
+       +(cnt.resumed?(' · '+cnt.resumed+' resumed'):'')))+'</span>'
     +'</div></div><div id="mverr"></div>';
-  v.querySelectorAll("#chstrow .hchip").forEach(el=>el.onclick=()=>{CH.status=el.dataset.st;syncChatURL();loadChats();});
-  v.querySelectorAll("#chtoolrow .hchip[data-tool]").forEach(el=>el.onclick=()=>{CH.tool=el.dataset.tool||"";syncChatURL();loadChats();});
-  v.querySelectorAll("#chtoolrow .hchip[data-match]").forEach(el=>el.onclick=()=>{CH.match=el.dataset.match||"";syncChatURL();loadChats();});
-  v.querySelectorAll("#chtoolrow .hchip[data-sort]").forEach(el=>el.onclick=()=>{CH.sort=el.dataset.sort||"priority";syncChatURL();loadChats();});
+  v.querySelectorAll("#chstrow .hchip").forEach(el=>el.onclick=()=>{CH.status=el.dataset.st;syncChatURL();loadChats(false);});
+  v.querySelectorAll("#chtoolrow .hchip[data-tool]").forEach(el=>el.onclick=()=>{CH.tool=el.dataset.tool||"";syncChatURL();loadChats(false);});
+  v.querySelectorAll("#chtoolrow .hchip[data-match]").forEach(el=>el.onclick=()=>{CH.match=el.dataset.match||"";syncChatURL();loadChats(false);});
+  v.querySelectorAll("#chtoolrow .hchip[data-sort]").forEach(el=>el.onclick=()=>{CH.sort=el.dataset.sort||"priority";syncChatURL();loadChats(false);});
   const chq=$("#chq");
-  if(chq){let tmo=null;chq.oninput=()=>{clearTimeout(tmo);tmo=setTimeout(()=>{CH.q=chq.value.trim();syncChatURL();loadChats();},280);};
-    chq.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();CH.q=chq.value.trim();syncChatURL();loadChats();}};}
-  const chrf=$("#chrefresh");if(chrf)chrf.onclick=()=>{CH.peeks={};loadChats();};
+  if(chq){let tmo=null;chq.oninput=()=>{clearTimeout(tmo);tmo=setTimeout(()=>{CH.q=chq.value.trim();syncChatURL();loadChats(false);},280);};
+    chq.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();CH.q=chq.value.trim();syncChatURL();loadChats(false);}};}
+  const chrf=$("#chrefresh");if(chrf)chrf.onclick=()=>{CH.peeks={};loadChats(true);};
   if(CH.loading&&!CH.rows.length){v.insertAdjacentHTML("beforeend",
     '<div id="empty"><div class="glyph">💬</div><div>scanning Claude + Grok stores…</div></div>');return;}
   if(!CH.loading&&!CH.rows.length){v.insertAdjacentHTML("beforeend",
@@ -3973,7 +4021,7 @@ function syncChatURL(){
   if(mode!=="chats")return;
   syncURL();
 }
-async function loadChats(){
+async function loadChats(forceRefresh){
   CH.loading=true;const gen=++CH.gen;renderChats();
   let q="/api/chats?limit=80&recent_hours=24&sort="+encodeURIComponent(CH.sort||"priority");
   if(CH.status&&CH.status!=="all")q+="&status="+encodeURIComponent(CH.status);
@@ -3981,6 +4029,7 @@ async function loadChats(){
   if(CH.match)q+="&match="+encodeURIComponent(CH.match);
   if(CH.tool)q+="&tools="+encodeURIComponent(CH.tool);
   if(CH.q)q+="&q="+encodeURIComponent(CH.q);
+  if(forceRefresh)q+="&refresh=1";
   try{
     const r=await api(q);
     if(gen!==CH.gen)return;
@@ -3989,6 +4038,9 @@ async function loadChats(){
     CH.tools_counts=r.tools_counts||{};
     CH.scan_ms=r.scan_ms||0;
     CH.matched=r.matched||CH.rows.length;
+    CH.source=r.source||"";
+    CH.store_rows=r.store_rows;
+    CH.did_sync=!!r.did_sync;
     if(r.ok&&r.match&&!CH.match)CH.match=r.match;  // surface server default (gmux→greenmark)
     if(!r.ok){const err=$("#mverr");if(err)err.textContent=r.error||"scan failed";}
   }catch(e){
