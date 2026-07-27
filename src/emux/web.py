@@ -1826,7 +1826,8 @@ def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
     """Claude Code + Grok Build chats on disk (this host). Room CHATS tab.
 
     Query params (parse_qs style): match, status (comma-separated), tools,
-    limit, recent_hours. Default match is greenmark when skin is gmux.
+    limit, recent_hours, q (text search), sort (priority|mtime).
+    Default match is greenmark when skin is gmux.
     """
     q = q or {}
     try:
@@ -1843,6 +1844,10 @@ def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
     statuses = [s.strip() for s in status_raw.split(",") if s.strip()] or None
     tools_raw = (q.get("tools") or ["claude,grok"])[0]
     tools = [t.strip() for t in tools_raw.split(",") if t.strip()] or ["claude", "grok"]
+    q_text = (q.get("q") or [""])[0].strip()
+    sort = (q.get("sort") or ["priority"])[0].strip() or "priority"
+    if sort not in ("priority", "mtime", "age"):
+        sort = "priority"
     try:
         limit = max(1, min(200, int((q.get("limit") or ["50"])[0])))
     except ValueError:
@@ -1853,40 +1858,55 @@ def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
         recent_hours = 24.0
 
     try:
-        hits = chat_find.find_chats(
+        bundle = chat_find.find_chats_bundle(
             tools=tools,
             match=match_raw,
             recent_hours=recent_hours,
             statuses=statuses,
             limit=limit,
-        )
-        # counts across all statuses (same match/tools) for tab badge
-        all_hits = chat_find.find_chats(
-            tools=tools,
-            match=match_raw,
-            recent_hours=recent_hours,
-            statuses=None,
-            limit=200,
+            q=q_text or None,
+            sort=sort,
         )
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
 
-    counts = {"live": 0, "recent": 0, "stale": 0}
-    for h in all_hits:
-        if h.status in counts:
-            counts[h.status] += 1
     return {
         "ok": True,
-        "chats": [h.as_dict() for h in hits],
-        "count": len(hits),
-        "counts": counts,
+        "chats": [h.as_dict() for h in bundle["hits"]],
+        "count": bundle["returned"],
+        "matched": bundle["matched"],
+        "counts": bundle["counts"],
+        "tools_counts": bundle["tools_counts"],
+        "scan_ms": bundle["scan_ms"],
         "match": match_raw,
+        "q": q_text,
+        "sort": sort,
         "host": "local",
         "note": (
             "Transcripts on this host's disk — not tmux. "
-            "Resume is copy-paste; does not spawn agents."
+            "Resume is copy-paste; does not spawn agents. "
+            "Click a tile to peek last turns."
         ),
     }
+
+
+def chats_peek_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    """Last user/assistant turns for one transcript (tile expand)."""
+    q = q or {}
+    try:
+        from . import chats as chat_find
+    except ImportError as exc:
+        return {"ok": False, "error": f"chats_unavailable: {exc}"}
+    tool = (q.get("tool") or [""])[0].strip()
+    sid = (q.get("session_id") or q.get("id") or [""])[0].strip()
+    try:
+        max_turns = max(1, min(20, int((q.get("turns") or ["8"])[0])))
+    except ValueError:
+        max_turns = 8
+    try:
+        return chat_find.peek_chat(tool, sid, max_turns=max_turns)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
 
 
 def grid_payload(lines: int = 14) -> dict[str, Any]:
@@ -2486,17 +2506,34 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .hosttag{font-size:9px;color:var(--text-dim);border:1px solid var(--line);
   border-radius:8px;padding:1px 6px;margin-left:6px;white-space:nowrap;flex-shrink:0}
 .tile.orph header{gap:6px}
+.tile.chat{cursor:pointer}
+.tile.chat.open{border-color:var(--amber);box-shadow:0 0 14px color-mix(in srgb, var(--amber) 20%, transparent)}
 .tile.chat header{gap:6px;flex-wrap:wrap}
-.tile.chat .tool{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim)}
-.tile.chat .st-live{color:var(--ok,#3dba6e)}
-.tile.chat .st-recent{color:var(--amber)}
-.tile.chat .st-stale{color:var(--stale)}
-.tile.chat .sum{font-size:11px;color:var(--text-dim);padding:0 10px 8px;line-height:1.4;max-height:4.2em;overflow:hidden}
-.tile.chat .cwd{font-size:10px;color:var(--text-dim);padding:0 10px 6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tile.chat .resume{font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;padding:6px 10px 10px;color:var(--amber);word-break:break-all}
-#chfilters{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px 0;align-items:center}
-#chfilters .hchip{cursor:pointer}
-#chfilters .hint{font-size:11px;color:var(--text-dim);margin-left:auto}
+.tile.chat .tool{font-size:10px;letter-spacing:1px;text-transform:uppercase;padding:1px 6px;border:1px solid var(--line);border-radius:3px;color:var(--text-dim)}
+.tile.chat .tool.claude{border-color:color-mix(in srgb, #d97757 50%, var(--line));color:#d97757}
+.tile.chat .tool.grok{border-color:color-mix(in srgb, var(--amber) 50%, var(--line));color:var(--amber)}
+.tile.chat .st-live{color:var(--ok,#3dba6e);font-size:10px;letter-spacing:1px;text-transform:uppercase}
+.tile.chat .st-recent{color:var(--amber);font-size:10px;letter-spacing:1px;text-transform:uppercase}
+.tile.chat .st-stale{color:var(--stale);font-size:10px;letter-spacing:1px;text-transform:uppercase}
+.tile.chat .gm{font-size:9px;letter-spacing:1px;color:var(--ok,#3dba6e);border:1px solid color-mix(in srgb, var(--ok,#3dba6e) 40%, var(--line));padding:0 4px;border-radius:2px}
+.tile.chat .sum{font-size:12px;color:var(--text);padding:4px 10px 6px;line-height:1.45;max-height:3.2em;overflow:hidden}
+.tile.chat .cwd{font-size:10px;color:var(--text-dim);padding:0 10px 4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile.chat .meta{font-size:10px;color:var(--text-dim);padding:0 10px 8px;display:flex;gap:10px;flex-wrap:wrap}
+.tile.chat .resume{font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;padding:0 10px 8px;color:var(--amber);word-break:break-all;opacity:.85}
+.tile.chat .peek{margin:0 10px 10px;padding:8px;background:color-mix(in srgb, var(--bg) 70%, #000);border:1px solid var(--line);border-radius:4px;max-height:180px;overflow:auto;font-size:11px;line-height:1.4}
+.tile.chat .peek .turn{margin-bottom:6px}
+.tile.chat .peek .role{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim);margin-bottom:2px}
+.tile.chat .peek .role.user{color:var(--amber)}
+.tile.chat .actions{display:flex;gap:6px;padding:0 10px 10px;flex-wrap:wrap}
+.tile.chat .actions .act{font-size:10px}
+#chbar{display:flex;flex-direction:column;gap:8px;padding:10px 14px 6px;border-bottom:1px solid var(--line)}
+#chbar .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#chbar .hchip{cursor:pointer}
+#chbar .hint{font-size:11px;color:var(--text-dim);margin-left:auto}
+#chbar #chq{flex:1;min-width:140px;max-width:280px;background:var(--panel);border:1px solid var(--line);color:var(--text);padding:5px 8px;font-size:12px;border-radius:4px;font-family:inherit}
+#chbar #chq:focus{outline:none;border-color:var(--amber-dim)}
+#chbar .stat{font-size:11px;color:var(--text-dim);letter-spacing:.3px}
+#chbar .stat b{color:var(--amber);font-weight:600}
 .oattach{margin-left:auto;flex-shrink:0}
 .owhy{font-size:9px;color:var(--text-dim);padding:4px 10px 8px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -2949,6 +2986,13 @@ function syncURL(){
   if(activeTag)p.set("tag",activeTag);
   if(filterStr)p.set("q",filterStr);
   if(modalSession)p.set("session",modalSession.name);
+  if(mode==="chats"){
+    if(CH.status&&CH.status!=="stale,recent")p.set("ch_status",CH.status);
+    if(CH.tool)p.set("ch_tool",CH.tool);
+    if(CH.match&&CH.match!=="greenmark")p.set("ch_match",CH.match);
+    if(CH.q)p.set("ch_q",CH.q);
+    if(CH.sort&&CH.sort!=="priority")p.set("ch_sort",CH.sort);
+  }
   const h=p.toString();
   if((location.hash.slice(1))!==h)
     history.replaceState(null,"",h?("#"+h):location.pathname+location.search);
@@ -3619,81 +3663,181 @@ async function openOrphans(){
 // ---- CHATS view: Claude Code + Grok Build transcripts on disk that are not
 // live in a process. ORPHANS = unknown tmux; CHATS = dropped agent missions.
 // Resume is copy-paste (spawn is a different path — do not auto-launch).
-const CH={rows:[],loading:false,gen:0,status:"stale,recent",match:"",counts:{}};
+// Click a tile to peek last turns from the transcript.
+const CH={rows:[],loading:false,gen:0,status:"stale,recent",match:"",tool:"",
+  q:"",sort:"priority",counts:{},tools_counts:{},scan_ms:0,matched:0,openKey:"",peeks:{}};
 function chatAge(h){
   if(h==null)return "—";
   if(h<1)return Math.round(h*60)+"m";
   if(h<48)return Math.round(h)+"h";
   return Math.round(h/24)+"d";
 }
+function chatKey(c){return (c.tool||"")+"|"+(c.session_id||"");}
+async function copyResume(text,btn){
+  try{await navigator.clipboard.writeText(text||"");btn.textContent="✓ COPIED";
+    setTimeout(()=>btn.textContent="⧉ COPY RESUME",1200);}
+  catch(_){btn.textContent="select + copy";}
+}
+async function toggleChatPeek(c,tile){
+  const key=chatKey(c);
+  if(CH.openKey===key){CH.openKey="";renderChats();return;}
+  CH.openKey=key;renderChats();
+  if(CH.peeks[key])return;
+  try{
+    const r=await api("/api/chats/peek?tool="+encodeURIComponent(c.tool)
+      +"&session_id="+encodeURIComponent(c.session_id)+"&turns=8");
+    CH.peeks[key]=r;
+  }catch(e){CH.peeks[key]={ok:false,error:"unreachable"};}
+  if(CH.openKey===key)renderChats();
+}
 function chatTile(c){
-  const t=document.createElement("div");t.className="tile chat";
+  const t=document.createElement("div");
+  const key=chatKey(c);
+  const open=CH.openKey===key;
+  t.className="tile chat"+(open?" open":"");
   const st=c.status||"stale";
   const h=document.createElement("header");
-  h.innerHTML='<span class="tool">'+esc(c.tool||"?")+'</span>'
-    +'<span class="nm">'+esc(c.title||c.session_id||"")+'</span>'
+  h.innerHTML='<span class="tool '+esc(c.tool||"")+'">'+esc(c.tool||"?")+'</span>'
+    +(c.greenmark?'<span class="gm">GM</span>':"")
+    +'<span class="nm" title="'+esc(c.session_id||"")+'">'+esc(c.title||c.session_id||"")+'</span>'
     +'<span class="st-'+esc(st)+'">'+esc(st)+'</span>'
     +'<span class="age t-old">'+chatAge(c.age_hours)+'</span>';
-  const b=document.createElement("button");b.className="act oattach";b.textContent="⧉ COPY RESUME";
-  b.onclick=async e=>{
-    e.stopPropagation();
-    try{await navigator.clipboard.writeText(c.resume||"");b.textContent="✓ COPIED";
-      setTimeout(()=>b.textContent="⧉ COPY RESUME",1200);}
-    catch(_){b.textContent="select + copy";}
-  };
-  h.appendChild(b);
-  const cwd=document.createElement("div");cwd.className="cwd";cwd.textContent=c.cwd||"";
   const sum=document.createElement("div");sum.className="sum";
   sum.textContent=c.summary||c.title||"(no summary)";
+  const cwd=document.createElement("div");cwd.className="cwd";cwd.title=c.cwd||"";
+  cwd.textContent=c.cwd||"";
+  const meta=document.createElement("div");meta.className="meta";
+  const bits=[];
+  if(c.messages!=null)bits.push(c.messages+" lines");
+  if(c.model)bits.push(String(c.model).split("/").pop());
+  if(c.branch)bits.push("⎇ "+c.branch);
+  if(c.mtime_iso)bits.push(c.mtime_iso.slice(0,10));
+  if(c.priority!=null)bits.push("prio "+c.priority);
+  meta.textContent=bits.join(" · ");
   const res=document.createElement("div");res.className="resume";res.textContent=c.resume||"";
-  t.appendChild(h);t.appendChild(cwd);t.appendChild(sum);t.appendChild(res);
+  const acts=document.createElement("div");acts.className="actions";
+  const bCopy=document.createElement("button");bCopy.className="act";bCopy.textContent="⧉ COPY RESUME";
+  bCopy.onclick=e=>{e.stopPropagation();copyResume(c.resume,bCopy);};
+  const bPeek=document.createElement("button");bPeek.className="act";
+  bPeek.textContent=open?"▾ CLOSE":"▸ PEEK";
+  bPeek.onclick=e=>{e.stopPropagation();toggleChatPeek(c,t);};
+  acts.appendChild(bCopy);acts.appendChild(bPeek);
+  t.appendChild(h);t.appendChild(sum);t.appendChild(cwd);t.appendChild(meta);
+  t.appendChild(res);t.appendChild(acts);
+  if(open){
+    const peek=document.createElement("div");peek.className="peek";
+    const cached=CH.peeks[key];
+    if(!cached)peek.innerHTML='<div class="role">loading last turns…</div>';
+    else if(!cached.ok)peek.innerHTML='<div class="role">peek failed</div><div>'
+      +esc(cached.error||"error")+'</div>';
+    else if(!(cached.turns||[]).length)peek.innerHTML='<div class="role">no turns found in tail</div>';
+    else (cached.turns||[]).forEach(tr=>{
+      const d=document.createElement("div");d.className="turn";
+      d.innerHTML='<div class="role '+esc(tr.role||"")+'">'+esc(tr.role||"?")+'</div>'
+        +'<div>'+esc(tr.text||"")+'</div>';
+      peek.appendChild(d);
+    });
+    t.appendChild(peek);
+  }
+  t.onclick=e=>{if(e.target.closest("button"))return;toggleChatPeek(c,t);};
   return t;
+}
+function chChip(label,on,attrs){
+  return '<span class="hchip'+(on?" on":"")+'" '+attrs+'>'+esc(label)+'</span>';
 }
 function renderChats(){
   const v=$("#views");
   if(mode!=="chats")return;
-  const sts=["stale,recent","stale","recent","live","all"];
-  const labels={ "stale,recent":"needs attention","stale":"stale","recent":"recent","live":"live","all":"all" };
-  v.innerHTML='<div id="chfilters">'
-    +sts.map(s=>'<span class="hchip'+(s===CH.status?" on":"")+'" data-st="'+s+'">'
-      +esc(labels[s]||s)+'</span>').join("")
-    +'<span class="hint">disk transcripts · not tmux · greenmark filter default on gmux</span></div>'
-    +'<div id="mverr"></div>';
-  v.querySelectorAll("#chfilters .hchip").forEach(el=>el.onclick=()=>{
-    CH.status=el.dataset.st;loadChats();
-  });
-  if(CH.loading){v.insertAdjacentHTML("beforeend",
+  const cnt=CH.counts||{};
+  const tc=CH.tools_counts||{};
+  const sts=[
+    ["stale,recent","needs attention"],
+    ["stale","stale"+(cnt.stale!=null?" · "+cnt.stale:"")],
+    ["recent","recent"+(cnt.recent!=null?" · "+cnt.recent:"")],
+    ["live","live"+(cnt.live!=null?" · "+cnt.live:"")],
+    ["all","all"+(cnt.total!=null?" · "+cnt.total:"")],
+  ];
+  const tools=[
+    ["","both tools"],
+    ["claude","claude"+(tc.claude!=null?" · "+tc.claude:"")],
+    ["grok","grok"+(tc.grok!=null?" · "+tc.grok:"")],
+  ];
+  const matches=[["greenmark","greenmark"],["all","all paths"]];
+  const sorts=[["priority","by urgency"],["mtime","by recency"]];
+  v.innerHTML='<div id="chbar">'
+    +'<div class="row" id="chstrow">'+sts.map(([k,l])=>chChip(l,CH.status===k,'data-st="'+k+'"')).join("")
+    +'<span class="hint">disk · not tmux · click tile to peek</span></div>'
+    +'<div class="row" id="chtoolrow">'+tools.map(([k,l])=>chChip(l,CH.tool===k,'data-tool="'+k+'"')).join("")
+    +matches.map(([k,l])=>chChip(l,(CH.match||"greenmark")===k,'data-match="'+k+'"')).join("")
+    +sorts.map(([k,l])=>chChip(l,CH.sort===k,'data-sort="'+k+'"')).join("")
+    +'</div>'
+    +'<div class="row">'
+    +'<input id="chq" type="search" placeholder="search title · cwd · id…" value="'+esc(CH.q)+'">'
+    +'<button class="act" id="chrefresh" type="button">↻ scan</button>'
+    +'<span class="stat">'+(CH.loading?"scanning…":
+      ('showing <b>'+CH.rows.length+'</b>'
+       +(CH.matched&&CH.matched!==CH.rows.length?(' of '+CH.matched):'')
+       +(CH.scan_ms?(' · '+CH.scan_ms+'ms'):'')
+       +(cnt.stale!=null?(' · <b>'+cnt.stale+'</b> stale'):'')))+'</span>'
+    +'</div></div><div id="mverr"></div>';
+  v.querySelectorAll("#chstrow .hchip").forEach(el=>el.onclick=()=>{CH.status=el.dataset.st;syncChatURL();loadChats();});
+  v.querySelectorAll("#chtoolrow .hchip[data-tool]").forEach(el=>el.onclick=()=>{CH.tool=el.dataset.tool||"";syncChatURL();loadChats();});
+  v.querySelectorAll("#chtoolrow .hchip[data-match]").forEach(el=>el.onclick=()=>{CH.match=el.dataset.match||"";syncChatURL();loadChats();});
+  v.querySelectorAll("#chtoolrow .hchip[data-sort]").forEach(el=>el.onclick=()=>{CH.sort=el.dataset.sort||"priority";syncChatURL();loadChats();});
+  const chq=$("#chq");
+  if(chq){let tmo=null;chq.oninput=()=>{clearTimeout(tmo);tmo=setTimeout(()=>{CH.q=chq.value.trim();syncChatURL();loadChats();},280);};
+    chq.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();CH.q=chq.value.trim();syncChatURL();loadChats();}};}
+  const chrf=$("#chrefresh");if(chrf)chrf.onclick=()=>{CH.peeks={};loadChats();};
+  if(CH.loading&&!CH.rows.length){v.insertAdjacentHTML("beforeend",
     '<div id="empty"><div class="glyph">💬</div><div>scanning Claude + Grok stores…</div></div>');return;}
-  if(!CH.rows.length){v.insertAdjacentHTML("beforeend",
+  if(!CH.loading&&!CH.rows.length){v.insertAdjacentHTML("beforeend",
     '<div id="empty"><div class="glyph">💬</div><div>no matching chats'
-    +(CH.counts&&CH.counts.stale!=null?(" · stale "+(CH.counts.stale||0)): "")
-    +'</div></div>');return;}
+    +(cnt.stale!=null?(" · "+cnt.stale+" stale on disk"):"")
+    +'<br><span style="font-size:12px">try “all paths” or clear search</span></div></div>');return;}
   const g=document.createElement("div");g.className="tilegrid";
   CH.rows.forEach(c=>g.appendChild(chatTile(c)));
   v.appendChild(g);
 }
+function syncChatURL(){
+  // fold chat filters into the hash when in chats view
+  if(mode!=="chats")return;
+  syncURL();
+}
 async function loadChats(){
   CH.loading=true;const gen=++CH.gen;renderChats();
-  let q="/api/chats?limit=60&recent_hours=24";
+  let q="/api/chats?limit=80&recent_hours=24&sort="+encodeURIComponent(CH.sort||"priority");
   if(CH.status&&CH.status!=="all")q+="&status="+encodeURIComponent(CH.status);
-  // empty match → server picks greenmark for gmux skin, all otherwise
+  // empty match → server defaults (greenmark on gmux skin, all otherwise)
   if(CH.match)q+="&match="+encodeURIComponent(CH.match);
+  if(CH.tool)q+="&tools="+encodeURIComponent(CH.tool);
+  if(CH.q)q+="&q="+encodeURIComponent(CH.q);
   try{
     const r=await api(q);
     if(gen!==CH.gen)return;
     CH.rows=r.ok?(r.chats||[]):[];
     CH.counts=r.counts||{};
-    if(!r.ok)$("#mverr")&&($("#mverr").textContent=r.error||"scan failed");
+    CH.tools_counts=r.tools_counts||{};
+    CH.scan_ms=r.scan_ms||0;
+    CH.matched=r.matched||CH.rows.length;
+    if(r.ok&&r.match&&!CH.match)CH.match=r.match;  // surface server default (gmux→greenmark)
+    if(!r.ok){const err=$("#mverr");if(err)err.textContent=r.error||"scan failed";}
   }catch(e){
     if(gen!==CH.gen)return;
     CH.rows=[];
     const err=$("#mverr");if(err)err.textContent="daemon unreachable";
   }
-  CH.loading=false;renderChats();
+  CH.loading=false;renderChats();updateChrome();
 }
 async function openChats(){
+  // restore filters from URL hash if present
+  const p=new URLSearchParams(location.hash.slice(1));
+  if(p.get("ch_status"))CH.status=p.get("ch_status");
+  if(p.get("ch_tool")!=null)CH.tool=p.get("ch_tool")||"";
+  if(p.get("ch_match"))CH.match=p.get("ch_match");
+  if(p.get("ch_q"))CH.q=p.get("ch_q");
+  if(p.get("ch_sort"))CH.sort=p.get("ch_sort");
   renderChats();
-  if(!CH.rows.length||CH.gen===0)loadChats();
+  loadChats();
 }
 
 function render(){
@@ -3703,7 +3847,7 @@ function render(){
   else if(mode==="flow")renderFlow();
   // orphans/chats are manual: the 2s poll must not rebuild them mid-click
   else if(mode==="orphans"){if(!document.getElementById("mvhosts"))openOrphans();}
-  else if(mode==="chats"){if(!document.getElementById("chfilters"))openChats();}
+  else if(mode==="chats"){if(!document.getElementById("chbar"))openChats();}
 }
 
 function pinned(){const c=$("#chat");return c.scrollHeight-c.scrollTop-c.clientHeight<60;}
@@ -4776,6 +4920,9 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         if url.path == "/api/chats":
             # Claude Code + Grok Build transcripts on disk (this host). Not tmux.
             self._json(chats_payload(parse_qs(url.query)))
+            return
+        if url.path == "/api/chats/peek":
+            self._json(chats_peek_payload(parse_qs(url.query)))
             return
         self._json({"ok": False, "error": "not_found"}, 404)
 
