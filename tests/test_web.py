@@ -234,6 +234,24 @@ def test_http_simple_status_always_available(daemon):
     assert "main" in body  # mocked live session
     assert "read-only" in body
     assert "auto-refresh" in body
+    assert "uptime" in body and "active" in body
+    assert 'class="chip' in body  # filters
+
+
+def test_http_simple_filters_and_peek(daemon):
+    """live=1 filters; peek=name captures pane (server-rendered)."""
+    status, body = _get(daemon + "/simple?live=1")
+    assert status == 200
+    assert "main" in body
+    assert "chip on" in body
+    status, body = _get(daemon + "/simple?peek=main")
+    assert status == 200
+    assert "pane peek" in body
+    assert "pane content here" in body or "empty pane" in body or "pre class='pane'" in body or 'pre class="pane"' in body
+    # stale peek message when name unknown under filter
+    status, body = _get(daemon + "/simple?live=1&peek=nope-session")
+    assert status == 200
+    assert "No session named" in body
 
 
 def test_normalize_public_path():
@@ -266,12 +284,19 @@ def test_http_ui_stamps_public_path_prefix(monkeypatch):
     thread.start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
     try:
-        # default landing = simple status
+        # default landing = simple status with filters/age
         status, body = _get(base + "/")
         assert status == 200
         assert "gmux status" in body
         assert "proof" in body and "LIVE" in body
         assert 'href="/gmux/room"' in body
+        assert "uptime" in body and "active" in body
+        # live filter drops unregistered-only noise when only registered live
+        status, body = _get(base + "/?live=1&registered=1")
+        assert status == 200 and "proof" in body
+        # peek under public path
+        status, body = _get(base + "/?peek=proof")
+        assert status == 200 and "pane peek" in body
         # full SPA still at /room with path stamp
         status, body = _get(base + "/room")
         assert status == 200

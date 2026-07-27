@@ -4203,20 +4203,46 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         html = _help.control_room_page(PAGE, __version__).replace("__OS__", _host_os())
         return self._with_public_path(html)
 
+    def _simple_status_from_url(self, url) -> str:
+        """Parse filter/peek query params for the simple status page."""
+        qs = parse_qs(url.query or "")
+
+        def _flag(name: str) -> bool:
+            vals = qs.get(name) or []
+            if not vals:
+                return False
+            return vals[0].lower() in ("1", "true", "yes", "on")
+
+        peek_vals = qs.get("peek") or []
+        peek = (peek_vals[0].strip() if peek_vals else "") or None
+        try:
+            line_vals = qs.get("lines") or []
+            lines = int(line_vals[0]) if line_vals else 24
+        except (TypeError, ValueError):
+            lines = 24
+        return simple_status_html(
+            __version__,
+            self.public_path or "",
+            live_only=_flag("live"),
+            registered_only=_flag("registered"),
+            peek=peek,
+            peek_lines=lines,
+        )
+
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
         url = urlparse(self.path)
         # Simple status first: under a public path mount, "/" is the testable
         # read-only table; full SPA lives at /room. Local loopback (no path)
         # keeps "/" as the full control room for existing muscle memory.
         if url.path in ("/simple", "/simple/", "/status", "/status/"):
-            self._send_html(simple_status_html(__version__, self.public_path or ""))
+            self._send_html(self._simple_status_from_url(url))
             return
         if url.path in ("/room", "/room/"):
             self._send_html(self._control_room_html())
             return
         if url.path == "/" or url.path == "/index.html":
             if self.public_path:
-                self._send_html(simple_status_html(__version__, self.public_path))
+                self._send_html(self._simple_status_from_url(url))
             else:
                 self._send_html(self._control_room_html())
             return
@@ -4564,73 +4590,224 @@ def normalize_public_path(path: str | None) -> str | None:
     return "/" + "/".join(segments)
 
 
-def simple_status_html(version: str, public_path: str = "") -> str:
+def _fmt_age(seconds: float | int | None) -> str:
+    """Human age for uptime / last-activity columns."""
+    if seconds is None:
+        return "—"
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return "—"
+    if s < 0:
+        s = 0
+    if s < 2:
+        return "now"
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
+def simple_status_html(
+    version: str,
+    public_path: str = "",
+    *,
+    live_only: bool = False,
+    registered_only: bool = False,
+    peek: str | None = None,
+    peek_lines: int = 24,
+) -> str:
     """Server-rendered, read-only session table — the first testable view.
 
-    No SPA, no keystroke UI. One HTML page, one meta refresh, plain table.
-    When public_path is set (e.g. /gmux), links stay under that prefix.
+    Filters, age columns, and optional pane peek are all query-string driven
+    (no SPA). When public_path is set (e.g. /gmux), links stay under that prefix.
     """
     import html as _html
     from datetime import datetime, timezone
+    from urllib.parse import urlencode
 
     base = public_path or ""
+    now_ts = time.time()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     payload = sessions_payload()
-    sessions = payload.get("sessions") or []
-    live_n = sum(1 for s in sessions if s.get("live"))
-    reg_n = sum(1 for s in sessions if s.get("registered"))
+    all_sessions = payload.get("sessions") or []
+    live_n = sum(1 for s in all_sessions if s.get("live"))
+    reg_n = sum(1 for s in all_sessions if s.get("registered"))
     ok = bool(payload.get("ok"))
     err = payload.get("error") or ""
 
+    sessions = list(all_sessions)
+    if live_only:
+        sessions = [s for s in sessions if s.get("live")]
+    if registered_only:
+        sessions = [s for s in sessions if s.get("registered")]
+
+    def _qs(**extra: Any) -> str:
+        """Build query string preserving active filters + optional overrides."""
+        q: dict[str, str] = {}
+        if live_only and "live" not in extra:
+            q["live"] = "1"
+        if registered_only and "registered" not in extra:
+            q["registered"] = "1"
+        if peek and "peek" not in extra:
+            q["peek"] = peek
+        for k, v in extra.items():
+            if v is None or v is False or v == "":
+                q.pop(k, None)
+                continue
+            if v is True:
+                q[k] = "1"
+            else:
+                q[k] = str(v)
+        # explicit clears
+        if extra.get("live") is False:
+            q.pop("live", None)
+        if extra.get("registered") is False:
+            q.pop("registered", None)
+        if extra.get("peek") is None and "peek" in extra:
+            q.pop("peek", None)
+        return ("?" + urlencode(q)) if q else ""
+
+    def _href(**extra: Any) -> str:
+        return f"{base}/{_qs(**extra)}"
+
+    # Filter chips (server-rendered links — no JS)
+    def chip(label: str, active: bool, **extra: Any) -> str:
+        cls = "chip on" if active else "chip"
+        return f'<a class="{cls}" href="{_html.escape(_href(**extra))}">{_html.escape(label)}</a>'
+
+    filters_html = (
+        chip("all", not live_only and not registered_only, live=False, registered=False)
+        + chip("live", live_only and not registered_only, live=True, registered=False)
+        + chip("registered", registered_only and not live_only, live=False, registered=True)
+        + chip("live · registered", live_only and registered_only, live=True, registered=True)
+    )
+
     rows: list[str] = []
+    peek_block = ""
+    peek_found = False
     for s in sessions:
-        name = _html.escape(str(s.get("name") or ""))
-        tmux = _html.escape(str(s.get("session") or ""))
+        name_raw = str(s.get("name") or "")
+        tmux_raw = str(s.get("session") or "")
+        name = _html.escape(name_raw)
+        tmux = _html.escape(tmux_raw)
         host = _html.escape(str(s.get("host") or "local"))
         desc = _html.escape(str(s.get("description") or "—"))
-        live = "LIVE" if s.get("live") else "stale"
-        live_cls = "live" if s.get("live") else "stale"
+        is_live = bool(s.get("live"))
+        live = "LIVE" if is_live else "stale"
+        live_cls = "live" if is_live else "stale"
         reg = "yes" if s.get("registered") else "no"
         tags = _html.escape(", ".join(s.get("tags") or []) or "—")
+
+        created = s.get("created_unix")
+        uptime = _fmt_age((now_ts - created) if created else None) if is_live else "—"
+        # activity is keyed by tmux session name in the poller cache
+        meta = _meta(tmux_raw) if is_live else {}
+        act_age = meta.get("last_change_age")
+        if is_live:
+            active = _fmt_age(act_age) if act_age is not None else "quiet"
+        else:
+            active = "gone"
+
+        is_peek = peek is not None and peek in (name_raw, tmux_raw)
+        if is_peek:
+            peek_found = True
+        open_href = _html.escape(_href(peek=name_raw))
+        close_href = _html.escape(_href(peek=None))
+        name_cell = (
+            f'<a class="name" href="{close_href}" title="close peek"><code>{name}</code> ▾</a>'
+            if is_peek
+            else f'<a class="name" href="{open_href}" title="peek pane"><code>{name}</code></a>'
+        )
+        row_cls = f"{live_cls}{' open' if is_peek else ''}"
         rows.append(
-            f"<tr class='{live_cls}'>"
-            f"<td><code>{name}</code></td>"
+            f"<tr class='{row_cls}'>"
+            f"<td>{name_cell}</td>"
             f"<td><code>{tmux}</code></td>"
             f"<td>{host}</td>"
             f"<td><span class='pill {live_cls}'>{live}</span></td>"
+            f"<td class='age' title='session uptime'>{uptime}</td>"
+            f"<td class='age' title='time since last pane change'>{active}</td>"
             f"<td>{reg}</td>"
             f"<td>{tags}</td>"
             f"<td>{desc}</td>"
             f"</tr>"
         )
+        if is_peek:
+            if not is_live:
+                pane_html = "<p class='peek-err'>Session is stale — no live pane to capture.</p>"
+            else:
+                cap = capture_payload(
+                    tmux_raw,
+                    lines=max(5, min(int(peek_lines), 200)),
+                    host=s.get("host"),
+                )
+                if not cap.get("ok"):
+                    pane_html = (
+                        f"<p class='peek-err'>capture failed: "
+                        f"{_html.escape(str(cap.get('error') or 'unknown'))}</p>"
+                    )
+                else:
+                    content = (cap.get("content") or "").rstrip("\n")
+                    # keep last peek_lines for display even if capture returned more
+                    lines = content.splitlines()
+                    if len(lines) > peek_lines:
+                        lines = lines[-peek_lines:]
+                    content = "\n".join(lines)
+                    pane_html = f"<pre class='pane'>{_html.escape(content) if content else '(empty pane)'}</pre>"
+            rows.append(
+                f"<tr class='peek-row'><td colspan='9'>"
+                f"<div class='peek'>"
+                f"<div class='peek-bar'>pane peek · <code>{name}</code> · last {peek_lines} lines · "
+                f"<a href='{close_href}'>close</a></div>"
+                f"{pane_html}"
+                f"</div></td></tr>"
+            )
+
+    if peek and not peek_found:
+        peek_block = (
+            f"<div class='summary bad'>No session named "
+            f"<code>{_html.escape(peek)}</code> in the current filter.</div>"
+        )
+
     body_rows = "\n".join(rows) if rows else (
-        "<tr><td colspan='7' class='empty'>No sessions in registry and none live in tmux.</td></tr>"
+        "<tr><td colspan='9' class='empty'>No sessions match this filter.</td></tr>"
     )
+    shown = len(sessions)
     status_line = (
-        f"ok · {live_n} live · {reg_n} registered · {len(sessions)} total"
+        f"ok · showing {shown} · {live_n} live · {reg_n} registered · {len(all_sessions)} total"
         if ok else f"error · {_html.escape(str(err))}"
     )
+    # meta-refresh keeps filters + peek
+    refresh_url = _html.escape(f"{base}/{_qs()}")
 
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="15">
+<meta http-equiv="refresh" content="15;url={refresh_url}">
 <title>gmux status</title>
 <style>
   :root {{ --bg:#f7f8f3; --ink:#1d2b23; --dim:#5c6b61; --line:#d5ddd6;
-           --live:#1a7a45; --stale:#8a6a2a; --card:#fff; --pill:#e8f5ee; }}
+           --live:#1a7a45; --stale:#8a6a2a; --card:#fff; --pill:#e8f5ee; --on:#203c31; }}
   * {{ box-sizing: border-box; }}
   body {{ margin:0; font:14px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--ink); }}
   header {{ padding:20px 24px 12px; border-bottom:1px solid var(--line); background:var(--card); }}
   h1 {{ margin:0 0 4px; font-size:18px; font-weight:600; }}
   .meta {{ color:var(--dim); font-size:12px; }}
   .meta a {{ color:var(--ink); }}
-  main {{ padding:16px 24px 40px; max-width:1100px; }}
-  .summary {{ margin:0 0 14px; padding:10px 12px; background:var(--card);
+  main {{ padding:16px 24px 40px; max-width:1200px; }}
+  .summary {{ margin:0 0 12px; padding:10px 12px; background:var(--card);
               border:1px solid var(--line); border-radius:6px; font-size:13px; }}
   .summary.bad {{ border-color:#c45; color:#822; }}
+  .filters {{ display:flex; flex-wrap:wrap; gap:6px; margin:0 0 14px; }}
+  .chip {{ display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px;
+           text-decoration:none; border:1px solid var(--line); color:var(--dim); background:var(--card); }}
+  .chip.on {{ background:var(--on); color:#f7f8f3; border-color:var(--on); }}
   table {{ width:100%; border-collapse:collapse; background:var(--card);
            border:1px solid var(--line); border-radius:6px; overflow:hidden; }}
   th, td {{ text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
@@ -4638,12 +4815,24 @@ def simple_status_html(version: str, public_path: str = "") -> str:
   th {{ font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--dim);
        background:#f0f3f0; }}
   tr:last-child td {{ border-bottom:0; }}
+  tr.open td {{ background:#f0f7f2; }}
+  a.name {{ color:var(--ink); text-decoration:none; }}
+  a.name:hover {{ color:var(--live); text-decoration:underline; }}
   code {{ font:12px/1.4 ui-monospace,Menlo,monospace; }}
+  .age {{ white-space:nowrap; color:var(--dim); font-variant-numeric:tabular-nums; }}
   .pill {{ display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px;
            font-weight:600; letter-spacing:.03em; }}
   .pill.live {{ background:var(--pill); color:var(--live); }}
   .pill.stale {{ background:#f5efdf; color:var(--stale); }}
   .empty {{ color:var(--dim); text-align:center; padding:24px; }}
+  .peek {{ background:#0f1411; color:#d7e0d9; border-radius:6px; overflow:hidden; }}
+  .peek-bar {{ padding:8px 12px; font-size:12px; color:#9aab9f; border-bottom:1px solid #243028; }}
+  .peek-bar a {{ color:#9fd6b0; }}
+  .peek-bar code {{ color:#e8f5ee; }}
+  pre.pane {{ margin:0; padding:12px 14px; font:12px/1.45 ui-monospace,Menlo,monospace;
+              white-space:pre-wrap; word-break:break-word; max-height:420px; overflow:auto; }}
+  .peek-err {{ margin:0; padding:12px 14px; color:#e8b4b4; }}
+  tr.peek-row td {{ padding:0; border-bottom:1px solid var(--line); }}
   footer {{ margin-top:14px; color:var(--dim); font-size:12px; }}
 </style>
 </head>
@@ -4658,10 +4847,13 @@ def simple_status_html(version: str, public_path: str = "") -> str:
 </header>
 <main>
   <div class="summary{' bad' if not ok else ''}" id="summary">{status_line} · checked {now}</div>
+  <div class="filters">{filters_html}</div>
+  {peek_block}
   <table>
     <thead>
       <tr>
         <th>name</th><th>tmux</th><th>host</th><th>state</th>
+        <th>uptime</th><th>active</th>
         <th>registered</th><th>tags</th><th>description</th>
       </tr>
     </thead>
@@ -4670,7 +4862,8 @@ def simple_status_html(version: str, public_path: str = "") -> str:
     </tbody>
   </table>
   <footer>
-    Gate is go door OIDC (strict). This page does not send keys — observation only.
+    Click a name to peek the live pane. Filters and peek survive refresh.
+    Gate is go door OIDC (strict). Observation only — no keystrokes.
     Path prefix: <code>{_html.escape(base or "/")}</code>
   </footer>
 </main>
