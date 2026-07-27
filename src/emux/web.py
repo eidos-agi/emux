@@ -3522,7 +3522,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 }
 @keyframes zoomin{from{transform:scale(.98);opacity:.4}to{transform:scale(1);opacity:1}}
 /* EID-1142: issue is hero; seat name is secondary identity */
-#modalhead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--bg-card);flex:0 0 auto;flex-wrap:wrap}
+#modalhead{display:flex;align-items:center;gap:var(--ms2,8px);padding:var(--ms3,12px) var(--ms4,16px);border-bottom:1px solid var(--line);background:var(--bg-card);flex:0 0 auto;flex-wrap:wrap}
 #modalidents{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1 1 180px}
 #modalhead .nmrow{display:flex;align-items:center;gap:8px;min-width:0;order:2}
 #modalhead .nm{font-family:inherit;font-size:12px;font-weight:600;color:var(--text-dim);letter-spacing:.2px}
@@ -3538,7 +3538,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 #modalclose,#modalpop{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 10px;margin-left:6px}
 #modalclose:hover,#modalpop:hover{color:var(--amber);border-color:var(--amber-dim)}
 /* One status banner (judge merged in) — never double strips */
-#modalbanner{display:none;align-items:center;gap:10px;padding:8px 14px;font-size:12.5px;line-height:1.35;
+#modalbanner{display:none;align-items:center;gap:var(--ms2,8px);padding:var(--ms2,8px) var(--ms4,16px);font-size:12.5px;line-height:1.35;
   border-bottom:1px solid var(--line);background:color-mix(in srgb, var(--bg-raise) 88%, var(--live) 10%);color:var(--text);flex:0 0 auto}
 #modalbanner.on{display:flex}
 #modalbanner .bstate{font-weight:700;letter-spacing:.6px;text-transform:uppercase;font-size:11px;white-space:nowrap}
@@ -3771,28 +3771,37 @@ button.linchat:disabled{opacity:.55;cursor:default}
 #modaliterm{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 10px;margin-left:6px}
 #modaliterm:hover{color:var(--amber);border-color:var(--amber-dim)}
 #modaliterm:disabled{opacity:.6;cursor:default}
-/* Body: left head column + right Tasks/Chat/Context drawer (target UX) */
+/* Body: left head column + right Tasks/Chat/Context drawer (target UX)
+   Spacing scale (normalized): --ms1=4 --ms2=8 --ms3=12 --ms4=16 --ms5=20 */
+#modalpanel{
+  --ms1:4px;--ms2:8px;--ms3:12px;--ms4:16px;--ms5:20px;
+}
 #modalbody{
   flex:1 1 0;min-height:160px;min-width:0;display:flex;flex-direction:row;
-  overflow:hidden;border-top:1px solid var(--line);
+  overflow:hidden;border-top:1px solid var(--line);gap:0;
 }
-#modalmain{flex:1 1 0;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+#modalmain{flex:1 1 0;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden;gap:0}
 #modalshell{
-  flex:1 1 0;min-height:0;min-width:0;position:relative;
+  flex:1 1 0;min-height:120px;min-width:0;position:relative;
   overflow:hidden;background:var(--bg-card);
 }
+#modalscreen.empty-placeholder{
+  display:flex;align-items:center;justify-content:center;
+  color:var(--text-dim);font-style:italic;font-size:13px;
+  white-space:normal;text-align:center;padding:var(--ms4);
+}
 #modaldrawer{
-  flex:0 0 300px;width:300px;max-width:46vw;min-width:0;
+  flex:0 0 320px;width:320px;max-width:42vw;min-width:0;
   display:flex;flex-direction:column;
   border-left:1px solid var(--line);background:var(--bg-raise);
   overflow:hidden;
 }
 #modaldrawer.collapsed{display:none}
-#drawertabs{display:flex;align-items:center;gap:2px;padding:6px 6px 0;border-bottom:1px solid var(--line);flex:0 0 auto}
+#drawertabs{display:flex;align-items:center;gap:2px;padding:var(--ms2) var(--ms2) 0;border-bottom:1px solid var(--line);flex:0 0 auto}
 #drawertabs .dtab{
   background:transparent;border:none;border-bottom:2px solid transparent;
   color:var(--text-dim);font:11px/1 inherit;letter-spacing:.6px;text-transform:uppercase;
-  padding:8px 10px;cursor:pointer;
+  padding:var(--ms2) var(--ms3);cursor:pointer;
 }
 #drawertabs .dtab.on{color:var(--amber);border-bottom-color:var(--amber);font-weight:700}
 #drawertabs .dtab .dtbadge{
@@ -3936,8 +3945,8 @@ button.linchat:disabled{opacity:.55;cursor:default}
 #modalclips .cliphint{font-size:10px;color:var(--text-dim);letter-spacing:.3px}
 /* the gist — reader's-digest + suggested replies, so you know what to do */
 #modaldigest{display:none;flex:0 0 auto;max-height:22vh;overflow:hidden}
-#modaldigest.on{display:block;padding:8px 14px;background:var(--bg-raise);
-  max-height:22vh;overflow-y:auto; /* never starve #modalshell of height */
+#modaldigest.on{display:block;padding:var(--ms2,8px) var(--ms4,16px);background:var(--bg-raise);
+  max-height:18vh;overflow-y:auto; /* never starve #modalshell of height */
   border-bottom:1px solid var(--amber-faint)}
 #modaldigest .dghead{display:flex;align-items:center;font-size:10px;letter-spacing:2px;
   text-transform:uppercase;color:var(--amber-dim);margin-bottom:4px;gap:8px}
@@ -3971,15 +3980,16 @@ button.linchat:disabled{opacity:.55;cursor:default}
 .obub.sel{box-shadow:0 0 0 3px var(--bg),0 0 0 5px var(--amber)}
 .obub:disabled{opacity:.45;cursor:default;box-shadow:none}
 .obub:disabled{opacity:.5;cursor:default}
-#modalchips{display:flex;gap:6px;padding:6px 10px 0;flex:0 0 auto}
-#modalclips{padding:0 10px 4px}
-#modalpending.on{margin:0 10px 4px;padding:5px 8px}
-#modalrow{display:flex;gap:8px;padding:8px 12px 10px;flex:0 0 auto;align-items:center}
+#modalchips{display:flex;gap:var(--ms2,8px);padding:var(--ms2,8px) var(--ms3,12px) 0;flex:0 0 auto}
+#modalclips{padding:0 var(--ms3,12px) var(--ms1,4px)}
+#modalpending.on{margin:0 var(--ms3,12px) var(--ms1,4px);padding:var(--ms2,8px)}
+#modalrow{display:flex;gap:var(--ms2,8px);padding:var(--ms2,8px) var(--ms3,12px) var(--ms3,12px);flex:0 0 auto;align-items:center}
 #modalinput{flex:1;min-width:0;background:var(--bg-card);border:1px solid var(--line);color:var(--text);
-  font:14px "IBM Plex Mono",monospace;padding:9px 12px;outline:none;caret-color:var(--amber);border-radius:6px}
+  font:14px "IBM Plex Mono",monospace;padding:var(--ms2,8px) var(--ms3,12px);outline:none;caret-color:var(--amber);border-radius:6px}
 #modalinput:focus{border-color:var(--amber-dim);box-shadow:0 0 12px color-mix(in srgb, var(--amber) 10%, transparent)}
-#modalauth{max-width:150px;border-radius:6px;padding:8px}
-#modalqueue,#modalsend{border-radius:6px;padding:8px 14px}
+#modalauth{max-width:150px;border-radius:6px;padding:var(--ms2,8px)}
+#modalqueue,#modalsend{border-radius:6px;padding:var(--ms2,8px) var(--ms3,12px)}
+#modalscreen{padding:var(--ms2,8px) var(--ms3,12px) var(--ms5,20px)}
 #modalsend{font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:0 20px;
   background:var(--amber);color:var(--on-accent);border:none;cursor:pointer}
 #modalsend:hover{box-shadow:0 0 18px color-mix(in srgb, var(--amber) 50%, transparent)}
@@ -4055,7 +4065,7 @@ button.linchat:disabled{opacity:.55;cursor:default}
 #nimtest{background:var(--bg-card);color:var(--text);border:1px solid var(--amber)}
 #nimtestout.ok,#setsaveout.ok{color:#2ea043;font-size:12px}
 #nimtestout.err,#setsaveout.err{color:#e05545;font-size:12px}
-/* --- multi side-chats (reply + as many topic/task chats as you want) --- */
+/* --- multi side-chats: floats are EXTRA only; default reply lives in Chat tab --- */
 #tchatstack{
   position:fixed;right:14px;bottom:14px;z-index:220;
   display:none;flex-direction:row-reverse;align-items:flex-end;gap:10px;
@@ -4070,11 +4080,21 @@ button.linchat:disabled{opacity:.55;cursor:default}
 #tchatstack .tchat.collapsed{width:auto}
 #tchatstack .tchat.collapsed .tchatpanel{display:none}
 #tchatstack .tchat:not(.collapsed) .tchatlauncher{display:none}
-#tchatstack .tchatlauncher{width:52px;height:52px;border-radius:50%;background:var(--amber);color:var(--on-accent);
-  border:none;font-size:20px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4);position:relative}
+#tchatstack .tchatlauncher{width:48px;height:48px;border-radius:50%;background:var(--amber);color:var(--on-accent);
+  border:none;font-size:18px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4);position:relative}
 #tchatstack .tchatbadge{position:absolute;top:-3px;right:-3px;background:#c0392b;color:#fff;font-size:11px;
   min-width:19px;height:19px;border-radius:10px;display:none;align-items:center;justify-content:center;
   padding:0 4px;font-weight:800;box-shadow:0 1px 4px rgba(0,0,0,.35)}
+/* Dismiss on collapsed FAB — was impossible before (✕ only minimized) */
+#tchatstack .tchatx{
+  position:absolute;top:-6px;left:-6px;z-index:2;
+  width:20px;height:20px;border-radius:50%;border:1px solid var(--line);
+  background:var(--bg-raise);color:var(--text-dim);font-size:11px;line-height:1;
+  cursor:pointer;display:none;align-items:center;justify-content:center;padding:0;
+  box-shadow:0 1px 4px rgba(0,0,0,.25);pointer-events:auto;
+}
+#tchatstack .tchat.collapsed .tchatx{display:flex}
+#tchatstack .tchatx:hover{background:var(--stale);color:#fff;border-color:var(--stale)}
 #tchatstack .tchatpanel{background:var(--bg-raise);border:1px solid var(--amber);border-radius:14px;overflow:hidden;
   box-shadow:0 12px 44px rgba(0,0,0,.5);display:flex;flex-direction:column;max-height:64vh;width:320px;max-width:min(320px,88vw)}
 #tchatstack .tchathead{background:var(--amber);color:var(--on-accent);padding:8px 10px;font-size:12px;font-weight:650;
@@ -4117,6 +4137,8 @@ button.linchat:disabled{opacity:.55;cursor:default}
   flex:0 0 auto;align-self:flex-end;margin-bottom:4px;
 }
 #tchat-addfab:hover{filter:brightness(1.08)}
+/* When no extra floats, hide the whole stack (Chat tab owns reply) */
+#tchatstack.idle{display:none!important}
 .happrove:disabled,.hdeny:disabled{opacity:.4;cursor:default}
 
 /* ── macOS-only controls (iTerm2 driven by AppleScript) — hidden anywhere the
@@ -6117,6 +6139,7 @@ let modalScrollMode="app"; // "app" | "tmux" from last capture
 let modalHistoryText="";   // durable chat transcript (disk) — makes HTML scroll real
 const MODAL_BOOK_MAX=40;
 function modalRenderBook(sc,atBottom,keepTop){
+  if(sc) sc.classList.remove("empty-placeholder");
   const sep="\n\n─── earlier view ───\n\n";
   const live=modalBook.length?modalBook.join(sep):"";
   let body="";
@@ -6205,13 +6228,19 @@ function openModal(s){
   $("#modalstatus").className="st";
   const iss=$("#modalissue"); if(iss){iss.hidden=true;iss.innerHTML="";}
   const ban=$("#modalbanner"); if(ban){ban.className="off";ban.textContent="";}
-  const sc=$("#modalscreen");sc.textContent="";sc.dataset.last="";sc.dataset.userPinned="0";
-  $("#modaldigest").className="";
-  const dgt0=$("#modaldigest .dgtext"); if(dgt0){dgt0.className="dgtext";dgt0.textContent="";}
+  const sc=$("#modalscreen");
+  sc.textContent="connecting to pane…";
+  sc.classList.add("empty-placeholder");
+  sc.dataset.last="";sc.dataset.userPinned="0";
+  modalCaptureDeep=false;
+  $("#modaldigest").className="on loading";
+  const dgt0=$("#modaldigest .dgtext"); if(dgt0){dgt0.className="dgtext placeholder";dgt0.textContent="";}
+  const spin0=$("#modaldigest .dgspin"); if(spin0) spin0.textContent="reading…";
   $("#modaldigest .dgsugg").innerHTML="";
   setPending("");$("#modalthink").className="";clearModalClips();
   tOpts=[];tSugg=[];tLoggedDigest="";
   sideChats=[];sideChatSeq=0;
+  // Default reply lives in Chat tab — do not float a sticky 💬 bubble on open
   switchArmed=null;$("#modalswitch").textContent="⇄ switch account";$("#modalswitch").className="";
   $("#modalswitch").classList.toggle("hot",!!s.cost);   // highlight when this session is throttled
   try{modalAuthMode=localStorage.getItem("emux_modal_auth")||"always";}catch(_){modalAuthMode="always";}
@@ -6230,7 +6259,9 @@ function openModal(s){
   renderDrawerScore();
   $("#modal").classList.add("open");
   updateModalJump();
-  modalRefresh();clearInterval(modalTimer);modalTimer=setInterval(modalRefresh,1200);
+  // First paint: shallow capture wins the race; deepen after first live frame
+  modalRefresh({shallow:true});
+  clearInterval(modalTimer);modalTimer=setInterval(()=>modalRefresh(),1200);
   loadModalHistory(s).then(()=>{
     if(!modalSession)return;
     if(modalHistoryText){
@@ -6249,7 +6280,8 @@ function openModal(s){
     updateModalIssueHeader();
     renderDrawerScore();
   });
-  loadDigest();
+  // Let capture claim a connection first; gist is secondary chrome
+  setTimeout(()=>{if(modalSession&&modalSession.name===s.name) loadDigest();},350);
   syncURL();
   setTimeout(()=>$("#modalinput").focus(),40);
   // EID-1141: re-scan Tasks after open even if capture is slow / stable
@@ -6266,7 +6298,8 @@ function closeModal(){
   const stack=$("#tchatstack");if(stack)stack.innerHTML="";
   syncURL();
 }
-async function modalRefresh(){
+let modalCaptureDeep=false; // after first live frame, deepen scrollback
+async function modalRefresh(opts){
   if(!modalSession)return;
   const sc=$("#modalscreen");
   // Honor explicit scroll-up: once user leaves the bottom, stay there across
@@ -6274,18 +6307,22 @@ async function modalRefresh(){
   const userPinned=sc.dataset.userPinned==="1";
   const atBottom=!userPinned&&modalScreenPinned(sc);
   const keepTop=sc.scrollTop;
+  // First paint: shallow lines (fast). Deepen only after we have content.
+  const wantShallow=!!(opts&&opts.shallow)||!modalCaptureDeep;
+  const lines=wantShallow?400:2000;
   try{
-    // Deep history when tmux has it; still fine for alt-screen (returns ~pane height).
-    const r=await api("/api/capture?session="+encodeURIComponent(modalSession.session)+"&lines=4000");
+    const r=await api("/api/capture?session="+encodeURIComponent(modalSession.session)+"&lines="+lines);
     if(r.ok){
       modalScrollMode=r.scroll_mode|| (r.history_size>0?"tmux":"app");
       const hist=typeof r.history_size==="number"?r.history_size:null;
       const modeTag=modalScrollMode==="tmux"?" · tmux history":" · in-app scroll";
       $("#modalstatus").textContent="live"+(hist!=null?" · hist "+hist:"")+modeTag;
       $("#modalstatus").style.color="";
+      $("#modalstatus").className="st live";
       const raw=(r.content||"").replace(/\s+$/,"");
       if(sc.dataset.last!==raw){
         sc.dataset.last=raw;
+        sc.classList.remove("empty-placeholder");
         // Accumulate unique snapshots → real HTML scroll depth over time
         if(raw&&(modalBook.length===0||modalBook[modalBook.length-1]!==raw)){
           modalBook.push(raw);
@@ -6294,6 +6331,14 @@ async function modalRefresh(){
         modalRenderBook(sc,atBottom,keepTop);
         // The Gist failed but the web changed — ok to try to recover, capped at 10
         if(digestErr&&digestRetries<10){digestRetries++;loadDigest();}
+      }else if(raw){
+        sc.classList.remove("empty-placeholder");
+      }
+      // After first successful live frame, deepen history on subsequent polls
+      if(raw&&!modalCaptureDeep){
+        modalCaptureDeep=true;
+        // one immediate deep refresh for tmux scrollback (no-op on alt-screen)
+        setTimeout(()=>{if(modalSession) modalRefresh({shallow:false});},200);
       }
       // EID-1141: always re-scan Tasks (not only on content delta)
       renderModalTasks();
@@ -6301,8 +6346,22 @@ async function modalRefresh(){
       updateThinking(r.thinking); // movement + timer while it generates
       // pending send has landed once the pane echoes it → clear the holding bubble
       if(pendingText&&r.content&&r.content.indexOf(pendingText.trim().slice(0,40))>=0)setPending("");
-    }else{$("#modalstatus").textContent=r.error||"error";$("#modalstatus").style.color="var(--stale)";}
-  }catch(e){$("#modalstatus").textContent="unreachable";$("#modalstatus").style.color="var(--stale)";}
+    }else{
+      $("#modalstatus").textContent=r.error||"capture failed";
+      $("#modalstatus").style.color="var(--stale)";
+      if(sc&&!sc.dataset.last){
+        sc.classList.add("empty-placeholder");
+        sc.textContent="could not capture pane — "+(r.error||"error");
+      }
+    }
+  }catch(e){
+    $("#modalstatus").textContent="unreachable";
+    $("#modalstatus").style.color="var(--stale)";
+    if(sc&&!sc.dataset.last){
+      sc.classList.add("empty-placeholder");
+      sc.textContent="daemon unreachable — retrying…";
+    }
+  }
   updateModalJump();
   modalJudge();
 }
@@ -6330,9 +6389,9 @@ async function loadDigest(opts){
   const sess=modalSession.session;
   const ctrl=typeof AbortController!=="undefined"?new AbortController():null;
   digestInflight=ctrl;
-  // Hard client timeout: model call is 45s server-side; don't hang the UI past 55s
+  // Client timeout: fail the chrome fast; don't leave "reading…" forever
   let timedOut=false;
-  const to=setTimeout(()=>{timedOut=true;try{ctrl&&ctrl.abort();}catch(_){}},55000);
+  const to=setTimeout(()=>{timedOut=true;try{ctrl&&ctrl.abort();}catch(_){}},18000);
   let r=null;
   try{
     r=await api("/api/reply",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -6386,10 +6445,12 @@ function ensureReplySideChat(){
   if(!modalSession) return null;
   let sc=sideChats.find(c=>c.kind==="reply");
   if(!sc){
-    sc={id:"reply",kind:"reply",title:"reply to "+modalSession.name,topic:null,collapsed:true,messages:[]};
+    // float:false → reply lives in Chat tab only (no sticky bottom-right bubble)
+    sc={id:"reply",kind:"reply",title:"reply to "+modalSession.name,topic:null,collapsed:true,float:false,messages:[]};
     sideChats.unshift(sc);
   }else{
     sc.title="reply to "+modalSession.name;
+    if(sc.float==null) sc.float=false;
   }
   return sc;
 }
@@ -6403,6 +6464,7 @@ function openSideChat(opts){
     const existing=sideChats.find(c=>c.topic===topic);
     if(existing){
       existing.collapsed=false;
+      if(existing.kind!=="reply") existing.float=true;
       activeSideChatId=existing.id;
       renderSideChats();
       renderDrawerChat();
@@ -6422,7 +6484,8 @@ function openSideChat(opts){
   }
   const id="sc-"+(++sideChatSeq);
   const title=opts.title||(topic?("about "+topic):("side chat "+sideChatSeq));
-  const sc={id,kind,title,topic,collapsed:false,messages:[],seatName:null};
+  // Extra chats float (user can ✕ to close for real). Reply never floats.
+  const sc={id,kind,title,topic,collapsed:false,float:true,messages:[],seatName:null};
   if(opts.seed) sc.messages.push({who:"bot",text:opts.seed});
   else if(topic&&isLinearIssueKey(topic)){
     sc.messages.push({who:"bot",text:
@@ -6442,13 +6505,17 @@ function openSideChat(opts){
   return sc;
 }
 function closeSideChat(id){
+  // Reply: never destroy (drawer needs it) — just hide the float completely
   if(id==="reply"){
     const sc=sideChats.find(c=>c.id==="reply");
-    if(sc){sc.collapsed=true;renderSideChats();}
+    if(sc){sc.collapsed=true;sc.float=false;renderSideChats();renderDrawerChat();}
     return;
   }
+  // Extra side chats: real close — remove entirely (not stuck as a FAB)
   sideChats=sideChats.filter(c=>c.id!==id);
+  if(activeSideChatId===id) activeSideChatId="reply";
   renderSideChats();
+  renderDrawerChat();
 }
 function focusSideChat(id){
   const el=document.querySelector('.tchat[data-id="'+id+'"] .tchatinput');
@@ -6468,8 +6535,20 @@ function tchatLog(who,text,chatId){
     log.appendChild(b);log.style.display="";log.scrollTop=log.scrollHeight;
   }else renderSideChats();
 }
-function renderOptions(opts){ tOpts=opts||[]; const sc=ensureReplySideChat(); if(sc&&(tOpts.length||tSugg.length)) sc.collapsed=false; renderSideChats(); }
-function setSuggestions(sugg){ tSugg=sugg||[]; const sc=ensureReplySideChat(); if(sc&&(tOpts.length||tSugg.length)) sc.collapsed=false; renderSideChats(); }
+function renderOptions(opts){
+  tOpts=opts||[];
+  ensureReplySideChat();
+  // Do NOT force-open a floating reply bubble — drawer Chat tab owns reply chips
+  renderSideChats();
+  if(drawerTab==="chat") renderDrawerChat();
+}
+function setSuggestions(sugg){
+  tSugg=sugg||[];
+  ensureReplySideChat();
+  // Suggestions land in drawer chips; never re-spawn the sticky 💬 FAB
+  renderSideChats();
+  if(drawerTab==="chat") renderDrawerChat();
+}
 async function sendOption(target){
   const cur=((tOpts.find(o=>o.selected))||tOpts[0]||{n:target}).n;
   const send=k=>api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -6487,25 +6566,37 @@ function composeSidePayload(sc, text){
 }
 function renderSideChats(){
   const stack=$("#tchatstack"); if(!stack) return;
-  if(!modalSession){stack.innerHTML="";return;}
+  if(!modalSession){stack.innerHTML="";stack.className="";return;}
   ensureReplySideChat();
+  // Only float EXTRA chats the operator opted into (float!==false). Reply is drawer-only.
+  const floating=sideChats.filter(sc=>sc.kind!=="reply"&&sc.float!==false);
+  if(!floating.length){
+    stack.innerHTML="";
+    stack.className="idle";
+    if(drawerTab==="chat") renderDrawerChat();
+    const chatBadge=$("#drawerchatbadge");
+    if(chatBadge) chatBadge.textContent=String(sideChats.length);
+    return;
+  }
+  stack.className="";
   let html="";
-  // FAB: add another freeform side chat
+  // FAB: add another freeform side chat (only when floats already exist)
   html+='<button type="button" id="tchat-addfab" title="New side chat about anything">+</button>';
-  sideChats.forEach(sc=>{
+  floating.forEach(sc=>{
     const isReply=sc.kind==="reply";
     html+='<div class="tchat'+(sc.collapsed?" collapsed":"")+'" data-id="'+esc(sc.id)+'">';
+    // Dismiss even when collapsed (fixes: cannot close bottom-right chat)
+    html+='<button type="button" class="tchatx" data-act="close" title="Close">✕</button>';
     // collapsed = floating bubble
     html+='<button type="button" class="tchatlauncher" data-act="expand" title="'+esc(sc.title)+'">'
       +(isReply?"💬":"◎")
-      +'<span class="tchatbadge"'+(isReply&&(tOpts.length+tSugg.length)?"":' style="display:none"')+'>'
-      +(isReply?(tOpts.length+tSugg.length):"")+'</span></button>';
+      +'<span class="tchatbadge" style="display:none">0</span></button>';
     html+='<div class="tchatpanel">';
     html+='<div class="tchathead"><span class="th-title">'+(isReply?'💬 reply to <b>'+esc(modalSession.name)+'</b>':'◎ '+esc(sc.title))+'</span>'
       +'<span class="th-acts">'
       +(sc.topic&&isLinearIssueKey(sc.topic)?'<button type="button" data-act="linear" title="Open in Linear">↗</button>':"")
       +'<button type="button" data-act="min" title="minimize">▾</button>'
-      +'<button type="button" data-act="close" title="'+(isReply?"minimize":"close side chat")+'">✕</button>'
+      +'<button type="button" data-act="close" title="close side chat">✕</button>'
       +'</span></div>';
     html+='<div class="tchatlog">';
     (sc.messages||[]).forEach(m=>{

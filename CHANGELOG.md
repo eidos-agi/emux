@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.68.17
+
+### Fixes
+- **First paint:** shallow capture (400 lines) then deepen; `#modalscreen` shows “connecting to pane…” instead of blank white; capture errors surface in status.
+- **Gist:** delayed start so capture wins the connection race; 18s client abort (no infinite “reading…”).
+- **Float chat close:** default reply is **drawer-only** (no sticky 💬 FAB). Extra side chats get a real ✕ (panel + collapsed bubble). Suggestions no longer re-open the float.
+- **Spacing:** normalized modal scale (`--ms1`…`--ms5`) on header/banner/gist/chips/composer/drawer.
+
 ## v0.68.16
 
 ### Fixes / polish (EID-1142)
