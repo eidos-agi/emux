@@ -330,7 +330,7 @@ _COMPANY_TABLE = [
     # Lives under repos-personal/, so it must be listed BEFORE `personal` (and `aic`,
     # for repos-aic/reeves-view) so the "reeves" match wins over the generic root.
     ("reeves", "Reeves", "#8ea0ff", ("reeves",), ("reeves",)),
-    ("aic", "AIC", "#c4a3ff", ("repos-aic", "repos-aic-holdings"), ("aic-",)),
+    ("aic", "AIC", "#143ca2", ("repos-aic", "repos-aic-holdings"), ("aic-",)),
     ("jetta", "Jetta", "#ffb27d", ("repos-jetta",), ("jetta",)),
     ("momentito", "Momentito", "#ff9ecf", ("repos-momentito",), ("momentito",)),
     ("rhea", "Rhea Impact", "#9ae6e6", ("repos-rheaimpact",), ("rheaimpact", "rhea-impact")),
@@ -3748,10 +3748,14 @@ function shown(){
 // ---- Brand + light/dark mode ----
 // Bug we hit: the ☾/☀ button only set data-theme=light|dark, while company
 // themes painted INLINE --amber etc. Inline wins → toggle looked broken.
-// Fix: brand (eidos/greenmark/reeves) × mode (light/dark) both go through
+// Fix: brand (eidos/greenmark/reeves/aic) × mode (light/dark) both go through
 // applyTheme(), which sets the CSS variables for real.
+// Product skins (gmux/reevux/amux) lock to their brand pack — company pills
+// filter the grid but must NOT repaint the room as Eidos brown / Greenmark green.
 const SKIN_ID="__SKIN_ID__";
+const DEFAULT_MODE="__DEFAULT_THEME__";
 const BRAND_DEFAULT=SKIN_ID==="gmux"?"greenmark":(SKIN_ID==="reevux"?"reeves":(SKIN_ID==="amux"?"aic":"eidos"));
+const PRODUCT_SKIN=SKIN_ID==="gmux"||SKIN_ID==="reevux"||SKIN_ID==="amux";
 const MODE_KEY="emux_mode_"+SKIN_ID;
 const BRAND_KEY="emux_brand_"+SKIN_ID;
 const THEMES={
@@ -3785,15 +3789,32 @@ const THEMES={
       "--text":"#e8eef8","--text-dim":"#8b96ab","--live":"#5fbf8f","--stale":"#e07050",
       "--line":"#2a3444","--user":"#7aa2ff","--on-accent":"#0e1218"},
   },
+  // AIC Holdings / Meridian brand plate (matches skin.py amux palettes)
+  aic:{
+    light:{"--bg":"#f3f5fa","--bg-raise":"#e8ecf5","--bg-card":"#ffffff",
+      "--amber":"#143ca2","--amber-dim":"#16438a","--amber-faint":"#d4dcf0",
+      "--text":"#151c36","--text-dim":"#5a6580","--live":"#1a7a45","--stale":"#a64b32",
+      "--line":"#c5cde0","--user":"#143ca2","--on-accent":"#ffffff"},
+    dark:{"--bg":"#151c36","--bg-raise":"#182148","--bg-card":"#1c2747",
+      "--amber":"#6b8fd4","--amber-dim":"#4a6fbf","--amber-faint":"#243056",
+      "--text":"#f0f3fa","--text-dim":"#9aa6c0","--live":"#5fbf8f","--stale":"#e07050",
+      "--line":"#2a3558","--user":"#e8eefc","--on-accent":"#151c36"},
+  },
 };
-const CO_BRAND={"":BRAND_DEFAULT,"eidos":"eidos","greenmark":"greenmark","reeves":"reeves"};
-let uiMode="light";
+const CO_BRAND={"":BRAND_DEFAULT,"eidos":"eidos","greenmark":"greenmark","reeves":"reeves","aic":"aic"};
+let uiMode=(DEFAULT_MODE==="dark")?"dark":"light";
 let uiBrand=BRAND_DEFAULT;
 function applyTheme(){
   const pack=THEMES[uiBrand]||THEMES[BRAND_DEFAULT]||THEMES.eidos;
   const t=pack[uiMode]||pack.light;
   const r=document.documentElement;
   for(const k in t) r.style.setProperty(k,t[k]);
+  // also keep --on/--ink/--dim/--card/--pill in sync (used by older rules)
+  r.style.setProperty("--on",t["--amber"]);
+  r.style.setProperty("--ink",t["--text"]);
+  r.style.setProperty("--dim",t["--text-dim"]);
+  r.style.setProperty("--card",t["--bg-card"]);
+  r.style.setProperty("--pill",t["--amber-faint"]);
   r.setAttribute("data-theme",uiMode);   // light | dark — real CSS hooks
   r.dataset.brand=uiBrand;
   try{localStorage.setItem(MODE_KEY,uiMode);localStorage.setItem(BRAND_KEY,uiBrand);}catch(e){}
@@ -3802,16 +3823,23 @@ function applyTheme(){
 }
 function toggleMode(){uiMode=uiMode==="dark"?"light":"dark";applyTheme();}
 function skinForCompany(){
-  uiBrand=CO_BRAND[activeCompany]||BRAND_DEFAULT;
+  // Product skins keep fixed brand chrome; company is a filter only.
+  if(PRODUCT_SKIN){ uiBrand=BRAND_DEFAULT; }
+  else { uiBrand=CO_BRAND[activeCompany]||BRAND_DEFAULT; }
   applyTheme();
 }
 (function(){
   try{
     const m=localStorage.getItem(MODE_KEY);
     if(m==="light"||m==="dark") uiMode=m;
+    else if(DEFAULT_MODE==="dark"||DEFAULT_MODE==="light") uiMode=DEFAULT_MODE;
     else if(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches) uiMode="dark";
-    const b=localStorage.getItem(BRAND_KEY);
-    if(b&&THEMES[b]) uiBrand=b;
+    if(!PRODUCT_SKIN){
+      const b=localStorage.getItem(BRAND_KEY);
+      if(b&&THEMES[b]) uiBrand=b;
+    } else {
+      uiBrand=BRAND_DEFAULT;
+    }
   }catch(e){}
   applyTheme();
 })();
