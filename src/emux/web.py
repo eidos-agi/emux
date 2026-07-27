@@ -1070,6 +1070,142 @@ def _spawn_session(data: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
+def _normalize_chat_cwd(cwd: str | None) -> str | None:
+    """Claude project dirs sometimes decode without a leading slash (Volumes/…)."""
+    if not cwd:
+        return None
+    c = cwd.strip()
+    if not c or c == "~":
+        return None
+    if c.startswith("Volumes/") or c.startswith("Users/") or c.startswith("private/"):
+        return "/" + c
+    return c
+
+
+def _resume_chat_in_fleet(data: dict[str, Any]) -> dict[str, Any]:
+    """Bring an abandoned Claude/Grok *transcript* back as a live fleet session.
+
+    CHATS rows are disk transcripts, not tmux. Resume = spawn tmux on this host
+    (where the transcript lives), launch `claude --resume <id>` or `grok` +
+    `/resume <id>`, register under a chat-* name. Distinct from /api/adopt
+    (already-running tmux) and from copy-paste resume (no fleet registration).
+    """
+    import asyncio
+    import shlex
+
+    tool = (data.get("tool") or "").strip().lower()
+    sid = (data.get("session_id") or data.get("id") or "").strip()
+    if tool not in ("claude", "grok"):
+        return {"ok": False, "error": "tool_must_be_claude_or_grok"}
+    if not sid:
+        return {"ok": False, "error": "missing_session_id"}
+
+    host = (data.get("host") or "").strip()
+    if host in ("", "local"):
+        host = None
+    # Transcripts are scanned on the daemon host only (v1). Remote resume would
+    # need remote home stores — refuse rather than spawn a blank wrong-host agent.
+    if host is not None:
+        return {
+            "ok": False,
+            "error": "chat_resume_local_only",
+            "hint": "transcripts live on this host; resume spawns a local tmux session",
+        }
+
+    try:
+        from . import chats as chat_find
+    except ImportError as exc:
+        return {"ok": False, "error": f"chats_unavailable: {exc}"}
+
+    if tool == "claude" and sid.lower() in chat_find._claude_live_ids():
+        return {
+            "ok": False,
+            "error": "already_live",
+            "hint": "process still holds this chat — attach/boss it, do not re-resume",
+            "session_id": sid,
+            "tool": tool,
+        }
+    if tool == "grok" and sid in chat_find._grok_live_ids():
+        return {
+            "ok": False,
+            "error": "already_live",
+            "hint": "process still holds this chat — attach/boss it, do not re-resume",
+            "session_id": sid,
+            "tool": tool,
+        }
+
+    cwd = _normalize_chat_cwd((data.get("cwd") or "").strip() or None)
+    name = (data.get("name") or "").strip()
+    if not name:
+        name = f"chat-{tool}-{sid[:8]}"
+    # tmux session names: no dots/colons
+    name = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-")[:48] or f"chat-{tool}"
+
+    title = (data.get("title") or sid)[:100]
+    tags = ["chat-resume", tool, "abandoned"]
+    if data.get("greenmark") or (cwd and re.search(r"greenmark|gmw|cerebro|gms", cwd, re.I)):
+        tags.append("greenmark")
+    desc = f"resumed {tool} transcript · {title}"
+
+    if tool == "claude":
+        command = f"claude --resume {shlex.quote(sid)}"
+    else:
+        command = "grok"
+
+    try:
+        r = asyncio.run(
+            _server.tmux_spawn(
+                name=name,
+                command=command,
+                host=None,
+                cwd=cwd,
+                gui=bool(data.get("gui", False)),
+                description=desc,
+                tags=tags,
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e), "tool": tool, "session_id": sid}
+
+    if not isinstance(r, dict):
+        return {"ok": False, "error": "spawn_failed", "tool": tool, "session_id": sid}
+    if not r.get("ok", True):
+        return {**r, "tool": tool, "session_id": sid, "fleet_name": name}
+
+    session = str(r.get("session") or name)
+    # Grok has no CLI --resume flag; open then /resume inside the TUI.
+    if tool == "grok":
+        time.sleep(2.5)
+        send = send_payload(session, f"/resume {sid}", literal=True, enter=True, host=None)
+        if not send.get("ok"):
+            return {
+                "ok": True,
+                "partial": True,
+                "warning": "grok_spawned_but_resume_send_failed",
+                "send_error": send.get("error"),
+                "name": name,
+                "session": session,
+                "tool": tool,
+                "session_id": sid,
+                "command": command,
+                "cwd": cwd,
+                **{k: v for k, v in r.items() if k not in ("ok", "name", "session")},
+            }
+
+    return {
+        "ok": True,
+        "name": name,
+        "session": session,
+        "tool": tool,
+        "session_id": sid,
+        "command": command,
+        "cwd": cwd,
+        "tags": tags,
+        "description": desc,
+        **{k: v for k, v in r.items() if k not in ("ok", "name", "session")},
+    }
+
+
 # which tool-calls are worth showing in the live feed — the fleet's meaningful
 # moves, not the capture/poll/classify read-noise that runs every tick.
 _FEED_OPS = {"tmux_spawn", "tmux_send", "tmux_register", "tmux_unregister",
@@ -1884,8 +2020,8 @@ def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
         "host": "local",
         "note": (
             "Transcripts on this host's disk — not tmux. "
-            "Resume is copy-paste; does not spawn agents. "
-            "Click a tile to peek last turns."
+            "POST /api/chats/resume spawns a registered fleet session "
+            "(claude --resume / grok + /resume). Click a tile to peek."
         ),
     }
 
@@ -3675,8 +3811,36 @@ function chatAge(h){
 function chatKey(c){return (c.tool||"")+"|"+(c.session_id||"");}
 async function copyResume(text,btn){
   try{await navigator.clipboard.writeText(text||"");btn.textContent="✓ COPIED";
-    setTimeout(()=>btn.textContent="⧉ COPY RESUME",1200);}
+    setTimeout(()=>btn.textContent="⧉ COPY",1200);}
   catch(_){btn.textContent="select + copy";}
+}
+async function resumeChatInFleet(c,btn){
+  if(!c||c.status==="live")return;
+  const prev=btn.textContent;btn.disabled=true;btn.textContent="RESUMING…";
+  const errEl=$("#mverr");
+  try{
+    const r=await api("/api/chats/resume",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({tool:c.tool,session_id:c.session_id,cwd:c.cwd,title:c.title,
+                           greenmark:!!c.greenmark,gui:false})});
+    if(!r.ok){
+      btn.disabled=false;btn.textContent=prev;
+      if(errEl)errEl.textContent=(r.error||"resume failed")+(r.hint?(" — "+r.hint):"");
+      return;
+    }
+    btn.textContent="✓ IN FLEET · "+(r.name||"");
+    if(errEl)errEl.textContent="resumed as “"+(r.name||"?")+"” · "+(r.command||"")
+      +(r.partial?" · (grok spawn ok, /resume may need a nudge)":"");
+    // refresh grid so the new session shows; jump to GRID so you can steer it
+    try{await poll();}catch(_){}
+    setTimeout(()=>{
+      setMode("grid");
+      const s=grid.find(x=>x.name===r.name||x.session===r.session);
+      if(s)openModal(s);
+    },400);
+  }catch(e){
+    btn.disabled=false;btn.textContent=prev;
+    if(errEl)errEl.textContent="daemon unreachable";
+  }
 }
 async function toggleChatPeek(c,tile){
   const key=chatKey(c);
@@ -3716,12 +3880,18 @@ function chatTile(c){
   meta.textContent=bits.join(" · ");
   const res=document.createElement("div");res.className="resume";res.textContent=c.resume||"";
   const acts=document.createElement("div");acts.className="actions";
-  const bCopy=document.createElement("button");bCopy.className="act";bCopy.textContent="⧉ COPY RESUME";
+  const bFleet=document.createElement("button");bFleet.className="act oattach";
+  bFleet.textContent=c.status==="live"?"● LIVE — ATTACH?":"⇤ RESUME IN FLEET";
+  bFleet.disabled=c.status==="live";
+  if(c.status==="live")bFleet.title="already running — use GRID/ORPHANS attach, do not double-resume";
+  else bFleet.title="spawn tmux + register in fleet with "+(c.tool==="claude"?"claude --resume":"grok /resume");
+  bFleet.onclick=e=>{e.stopPropagation();resumeChatInFleet(c,bFleet);};
+  const bCopy=document.createElement("button");bCopy.className="act";bCopy.textContent="⧉ COPY";
   bCopy.onclick=e=>{e.stopPropagation();copyResume(c.resume,bCopy);};
   const bPeek=document.createElement("button");bPeek.className="act";
   bPeek.textContent=open?"▾ CLOSE":"▸ PEEK";
   bPeek.onclick=e=>{e.stopPropagation();toggleChatPeek(c,t);};
-  acts.appendChild(bCopy);acts.appendChild(bPeek);
+  acts.appendChild(bFleet);acts.appendChild(bCopy);acts.appendChild(bPeek);
   t.appendChild(h);t.appendChild(sum);t.appendChild(cwd);t.appendChild(meta);
   t.appendChild(res);t.appendChild(acts);
   if(open){
@@ -3766,7 +3936,7 @@ function renderChats(){
   const sorts=[["priority","by urgency"],["mtime","by recency"]];
   v.innerHTML='<div id="chbar">'
     +'<div class="row" id="chstrow">'+sts.map(([k,l])=>chChip(l,CH.status===k,'data-st="'+k+'"')).join("")
-    +'<span class="hint">disk · not tmux · click tile to peek</span></div>'
+    +'<span class="hint">disk → fleet: RESUME IN FLEET spawns tmux · click tile to peek</span></div>'
     +'<div class="row" id="chtoolrow">'+tools.map(([k,l])=>chChip(l,CH.tool===k,'data-tool="'+k+'"')).join("")
     +matches.map(([k,l])=>chChip(l,(CH.match||"greenmark")===k,'data-match="'+k+'"')).join("")
     +sorts.map(([k,l])=>chChip(l,CH.sort===k,'data-sort="'+k+'"')).join("")
@@ -4960,7 +5130,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                 self._controller_error(exc)
             return
         if url.path not in ("/api/send", "/api/head", "/api/spawn", "/api/suggest",
-                            "/api/adopt", "/api/reply",
+                            "/api/adopt", "/api/reply", "/api/chats/resume",
                             "/api/hancock/approve", "/api/hancock/deny",
                             "/api/models", "/api/models/test", "/api/plan/switch"):
             self._json({"ok": False, "error": "not_found"}, 404)
@@ -4992,6 +5162,10 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/spawn":
             self._json(_spawn_session(data))
+            return
+        if url.path == "/api/chats/resume":
+            # Abandoned transcript → live registered fleet session (local host).
+            self._json(_resume_chat_in_fleet(data))
             return
         if url.path == "/api/reply":
             sess = (data.get("session") or "").strip()

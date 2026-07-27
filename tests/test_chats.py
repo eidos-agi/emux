@@ -146,3 +146,55 @@ def test_peek_chat_claude(tmp_path, monkeypatch):
 def test_format_text_empty():
     text = chats.format_text([])
     assert "No matching chats" in text
+
+
+def test_normalize_chat_cwd_and_resume_fleet(monkeypatch):
+    from emux import web
+
+    assert web._normalize_chat_cwd("Volumes/GREENMARK/foo") == "/Volumes/GREENMARK/foo"
+    assert web._normalize_chat_cwd("/Users/x/y") == "/Users/x/y"
+    assert web._normalize_chat_cwd(None) is None
+
+    calls = {}
+
+    async def fake_spawn(**kwargs):
+        calls.update(kwargs)
+        return {"ok": True, "name": kwargs["name"], "session": kwargs["name"], "launched": True}
+
+    monkeypatch.setattr(web._server, "tmux_spawn", fake_spawn)
+
+    import emux.chats as chat_find
+
+    monkeypatch.setattr(chat_find, "_claude_live_ids", lambda: set())
+    monkeypatch.setattr(chat_find, "_grok_live_ids", lambda: set())
+
+    r = web._resume_chat_in_fleet(
+        {
+            "tool": "claude",
+            "session_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "cwd": "Volumes/GREENMARK/Clouds/x",
+            "title": "fix the outage",
+            "greenmark": True,
+        }
+    )
+    assert r["ok"] is True
+    assert r["name"].startswith("chat-claude-")
+    assert "claude --resume" in r["command"]
+    assert calls["cwd"] == "/Volumes/GREENMARK/Clouds/x"
+    assert "chat-resume" in (calls.get("tags") or [])
+    assert "greenmark" in (calls.get("tags") or [])
+
+    # refuse remote host
+    bad = web._resume_chat_in_fleet(
+        {"tool": "claude", "session_id": "x", "host": "otherbox"}
+    )
+    assert bad["ok"] is False
+    assert bad["error"] == "chat_resume_local_only"
+
+    # refuse already live
+    monkeypatch.setattr(chat_find, "_claude_live_ids", lambda: {"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"})
+    live = web._resume_chat_in_fleet(
+        {"tool": "claude", "session_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}
+    )
+    assert live["ok"] is False
+    assert live["error"] == "already_live"
