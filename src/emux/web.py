@@ -336,17 +336,54 @@ def capture_payload(session: str, lines: int = 300,
 
     `socket` is an optional absolute tmux server socket path when the session
     lives off the default server (`tmux -S`).
+
+    Also returns ``history_size`` / ``pane_height`` so the UI knows whether
+    tmux scrollback exists (shells) or the app owns the alt-screen (Claude).
     """
     if host is None and _server._resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
+    lines = max(20, min(int(lines or 300), 8000))
+    # Prefer joined wrapped lines (-J) so long agent output doesn't hard-clip mid-row.
     code, out, err = _server._run_tmux(
-        ["capture-pane", "-t", session, "-p", "-S", f"-{lines}"],
+        ["capture-pane", "-t", session, "-p", "-J", "-S", f"-{lines}"],
         host=host, timeout=20, socket=socket)
     if code != 0:
+        # older tmux without -J
+        code, out, err = _server._run_tmux(
+            ["capture-pane", "-t", session, "-p", "-S", f"-{lines}"],
+            host=host, timeout=20, socket=socket)
+    if code != 0:
         return {"ok": False, "error": "tmux_capture_failed", "stderr": err}
-    return {"ok": True, "session": session, "host": host, "content": out,
-            "options": _parse_options(out),      # clickable menu bubbles, if a menu is up
-            "thinking": _thinking(out)}          # is it generating, and for how long
+    hist_size, pane_h, hist_lim = 0, 0, 0
+    try:
+        c2, meta, _e2 = _server._run_tmux(
+            ["display-message", "-p", "-t", session,
+             "#{history_size} #{pane_height} #{history_limit}"],
+            host=host, timeout=10, socket=socket,
+        )
+        if c2 == 0 and meta.strip():
+            parts = meta.strip().split()
+            if len(parts) >= 1:
+                hist_size = int(parts[0])
+            if len(parts) >= 2:
+                pane_h = int(parts[1])
+            if len(parts) >= 3:
+                hist_lim = int(parts[2])
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "ok": True,
+        "session": session,
+        "host": host,
+        "content": out,
+        "options": _parse_options(out),
+        "thinking": _thinking(out),
+        "history_size": hist_size,
+        "pane_height": pane_h,
+        "history_limit": hist_lim,
+        # Claude/Codex full-screen TUIs: history_size stays 0 — scroll must go to the app.
+        "scroll_mode": "tmux" if hist_size > 0 else "app",
+    }
 
 
 _THINK_TIME_RE = re.compile(r"(\d+m\s?\d+s|\d+m|\d+s)")
@@ -2748,11 +2785,19 @@ def scroll_payload(
     *,
     amount: str = "page",
     host: str | None = None,
+    mode: str | None = None,
 ) -> dict[str, Any]:
-    """Scroll a live tmux pane via copy-mode (real terminal scrollback).
+    """Scroll a live pane.
 
-    HTML capture can only show a snapshot; when that snapshot fits the modal,
-    wheel/PgUp need to drive tmux itself or the user sees no movement.
+    Two realities:
+
+    1. **Shell / normal buffer** (``history_size > 0``): use tmux copy-mode so
+       capture-pane shows older lines.
+    2. **Full-screen agent TUI** (Claude/Codex, ``history_size == 0``): the app
+       owns the alternate screen — copy-mode is empty. Send PageUp/PageDown
+       (or wheel keys) *into the app* so its own UI scrolls; then re-capture.
+
+    ``mode`` force: ``tmux`` | ``app`` | ``auto`` (default).
     """
     if host is None and _server._resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
@@ -2760,23 +2805,78 @@ def scroll_payload(
     amount = (amount or "page").strip().lower()
     if direction not in ("up", "down"):
         return {"ok": False, "error": "bad_direction"}
-    # Ensure copy-mode, then page/halfpage/line
-    code, _, err = _server._run_tmux(["copy-mode", "-t", session], host=host)
-    if code != 0:
-        return {"ok": False, "error": "tmux_copy_mode_failed", "stderr": err}
+    mode_f = (mode or "auto").strip().lower()
+    hist_size = 0
+    try:
+        c0, meta, _ = _server._run_tmux(
+            ["display-message", "-p", "-t", session, "#{history_size}"],
+            host=host, timeout=10,
+        )
+        if c0 == 0 and meta.strip().isdigit():
+            hist_size = int(meta.strip())
+    except Exception:  # noqa: BLE001
+        pass
+    if mode_f == "auto":
+        mode_f = "tmux" if hist_size > 0 else "app"
+
+    if mode_f == "tmux":
+        code, _, err = _server._run_tmux(["copy-mode", "-t", session], host=host)
+        if code != 0:
+            return {"ok": False, "error": "tmux_copy_mode_failed", "stderr": err}
+        if amount in ("line", "lines", "1"):
+            action = "scroll-up" if direction == "up" else "scroll-down"
+        elif amount in ("half", "halfpage"):
+            action = "halfpage-up" if direction == "up" else "halfpage-down"
+        else:
+            action = "page-up" if direction == "up" else "page-down"
+        code, _, err = _server._run_tmux(
+            ["send-keys", "-t", session, "-X", action],
+            host=host,
+        )
+        if code != 0:
+            return {
+                "ok": False, "error": "tmux_scroll_failed",
+                "stderr": err, "action": action, "mode": "tmux",
+            }
+        return {
+            "ok": True, "session": session, "direction": direction,
+            "amount": amount, "action": action, "mode": "tmux",
+            "history_size": hist_size,
+        }
+
+    # App / alt-screen path — keystrokes the TUI should handle
     if amount in ("line", "lines", "1"):
-        action = "scroll-up" if direction == "up" else "scroll-down"
+        keys = "Up" if direction == "up" else "Down"
+        # Some agents want mouse wheel for line scroll
+        wheel = "WheelUp" if direction == "up" else "WheelDown"
     elif amount in ("half", "halfpage"):
-        action = "halfpage-up" if direction == "up" else "halfpage-down"
+        keys = "PageUp" if direction == "up" else "PageDown"
+        wheel = keys
     else:
-        action = "page-up" if direction == "up" else "page-down"
+        keys = "PageUp" if direction == "up" else "PageDown"
+        wheel = keys
+    # Prefer PageUp/Down; also poke mouse-wheel for TUIs that only listen there.
     code, _, err = _server._run_tmux(
-        ["send-keys", "-t", session, "-X", action],
-        host=host,
+        ["send-keys", "-t", session, keys], host=host,
     )
     if code != 0:
-        return {"ok": False, "error": "tmux_scroll_failed", "stderr": err, "action": action}
-    return {"ok": True, "session": session, "direction": direction, "amount": amount, "action": action}
+        return {
+            "ok": False, "error": "app_scroll_failed", "stderr": err,
+            "keys": keys, "mode": "app", "history_size": hist_size,
+        }
+    # Best-effort second tick for mouse-only TUIs (ignore failure)
+    if wheel not in (keys,):
+        _server._run_tmux(["send-keys", "-t", session, wheel], host=host)
+    # Burst of PageUp for "page" so Claude conversation actually moves
+    if amount not in ("line", "lines", "1") and keys in ("PageUp", "PageDown"):
+        for _ in range(2):
+            _server._run_tmux(["send-keys", "-t", session, keys], host=host)
+    return {
+        "ok": True, "session": session, "direction": direction,
+        "amount": amount, "action": keys, "mode": "app",
+        "history_size": hist_size,
+        "hint": "alt-screen agent — scrolled inside the app, not tmux history",
+    }
 
 
 def _switch_plan(session: str, host: str | None = None, to: str | None = None,
@@ -3009,13 +3109,19 @@ body{
   font-size:9.5px;font-weight:800;letter-spacing:.5px;padding:3px 7px;border-radius:5px;
   box-shadow:0 1px 5px rgba(0,0,0,.35)}
 .card.costcap{border-left:4px solid #d99a00 !important;background:rgba(217,154,0,.07)}
-#costbanner{display:none;position:fixed;top:0;left:0;right:0;z-index:119;cursor:pointer;
+/* z-index 50: must sit *under* topbar controls and under #newmodal (EID-1110 dogfood).
+   When visible, shift chrome down so the banner never intercepts FEED/NEW/SETTINGS clicks. */
+#costbanner{display:none;position:fixed;top:0;left:0;right:0;z-index:50;cursor:pointer;
   background:#a06800;color:#fff;text-align:center;padding:9px 12px;font-weight:600;
   box-shadow:0 2px 14px rgba(160,104,0,.5)}
 #costbanner u{text-underline-offset:3px}
 #modalswitch.hot{border-color:#d99a00;color:#d99a00;font-weight:700}
 #modalswitch.armed{background:#a06800;color:#fff;border-color:#a06800;font-weight:700}
 body.costalert #costbanner{display:block;animation:costbannerpulse 1.4s ease-in-out infinite}
+body.costalert #topbar,
+body.costalert #side,
+body.costalert #feed,
+body.costalert #main{padding-top:40px;box-sizing:border-box}
 @keyframes costbannerpulse{0%,100%{background:#a06800}50%{background:#c48400}}
 .needbadge{position:absolute;top:7px;right:7px;z-index:5;background:#c0392b;color:#fff;
   font-size:9.5px;font-weight:800;letter-spacing:.6px;padding:3px 7px;border-radius:5px;
@@ -3239,7 +3345,8 @@ body.solo-session #modalpanel{
 }
 body.solo-session #modalpop{display:none} /* already in a tab */
 /* --- new-session modal --- */
-#newmodal{display:none;position:fixed;inset:0;z-index:60}
+/* Above costbanner (50) and room chrome; below steer #modal (200) is fine for spawn. */
+#newmodal{display:none;position:fixed;inset:0;z-index:180}
 #newmodal.open{display:block}
 #newback{position:absolute;inset:0;background:rgba(0,0,0,.72)}
 #newpanel{position:relative;margin:6vh auto;width:min(720px,92vw);background:var(--bg-card);
@@ -5195,10 +5302,90 @@ function modalScrollBottom(){
   const sc=$("#modalscreen");if(!sc)return;
   sc.scrollTop=sc.scrollHeight;updateModalJump();
 }
+// Rolling book of pane snapshots so HTML can scroll even when a single capture
+// is only one screen (Claude alt-screen has history_size=0).
+let modalBook=[];          // oldest → newest unique captures
+let modalScrollMode="app"; // "app" | "tmux" from last capture
+let modalHistoryText="";   // durable chat transcript (disk) — makes HTML scroll real
+const MODAL_BOOK_MAX=40;
+function modalRenderBook(sc,atBottom,keepTop){
+  const sep="\n\n─── earlier view ───\n\n";
+  const live=modalBook.length?modalBook.join(sep):"";
+  let body="";
+  if(modalHistoryText){
+    body+="══ conversation history (scroll up) ══\n\n"+modalHistoryText.trim()+"\n\n";
+    body+="══ live pane ══\n\n";
+  }
+  body+=live+"\n";
+  sc.textContent=body.replace(/\s+$/,"")+"\n";
+  const cur=document.createElement("span");cur.className="cursorblock";sc.appendChild(cur);
+  if(atBottom)sc.scrollTop=sc.scrollHeight;
+  else sc.scrollTop=keepTop;
+}
+async function loadModalHistory(s){
+  // Pull durable transcript so the modal is always HTML-scrollable even when
+  // the agent is full-screen with zero tmux history.
+  modalHistoryText="";
+  try{
+    const name=String(s.name||s.session||"");
+    const tags=(s.tags||[]).map(t=>String(t));
+    let tool=tags.some(t=>/^grok$/i.test(t)||/^gsid:/i.test(t))?"grok":"claude";
+    if(/grok/i.test(name))tool="grok";
+    let sid="";
+    for(const t of tags){
+      if(/^csid:/i.test(t)||/^gsid:/i.test(t)){sid=t.split(":").slice(1).join(":");break;}
+    }
+    // Full UUID in name/path
+    if(!sid){
+      const um=name.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+      if(um)sid=um[0];
+    }
+    // chat-claude-4149632f / chat-grok-… short prefix → search store
+    let q=name;
+    const sm=name.match(/chat-(?:claude|grok)-([0-9a-f]{6,})/i);
+    if(sm)q=sm[1];
+    if(!sid){
+      // Try a few queries — store match is substring on title/cwd/id
+      for(const qq of [q, sm?sm[1]:null, name.slice(0,24)].filter(Boolean)){
+        const list=await api("/api/chats?match=all&limit=20&tools="+tool+","+(tool==="claude"?"grok":"claude")
+          +"&q="+encodeURIComponent(qq));
+        const rows=(list&&list.chats)||[];
+        if(!rows.length)continue;
+        const hit=rows.find(c=>c.fleet_name===name)
+          ||rows.find(c=>c.session_id&&name.includes(String(c.session_id).slice(0,8)))
+          ||rows.find(c=>String(c.session_id||"").startsWith(qq))
+          ||rows[0];
+        if(hit&&hit.session_id){
+          sid=hit.session_id;
+          if(hit.tool)tool=hit.tool;
+          break;
+        }
+      }
+    }
+    if(!sid)return;
+    const peek=await api("/api/chats/peek?tool="+encodeURIComponent(tool)
+      +"&session_id="+encodeURIComponent(sid)+"&turns=16");
+    if(!peek||!peek.ok)return;
+    const turns=peek.turns||[];
+    const lines=[];
+    for(const t of turns){
+      const role=(t.role||"?").toString().toUpperCase();
+      const text=(t.text||"").toString().trim();
+      if(!text)continue;
+      lines.push(role+":\n"+text.slice(0,4000));
+    }
+    if(lines.length){
+      modalHistoryText=lines.join("\n\n");
+      // Bust live cache so next render includes history header
+      const sc=$("#modalscreen");if(sc)sc.dataset.last="";
+    }
+  }catch(e){/* history is best-effort */}
+}
 function openModal(s){
   document.body.classList.remove("nav-open");   // mobile: dismiss the session drawer
   modalSession=s;
   digestErr=false;digestRetries=0;
+  modalBook=[];modalScrollMode="app";modalHistoryText="";
   $("#modalname").textContent=s.name;
   $("#modalagent").innerHTML=agentHTML(s);
   $("#modalstatus").textContent="connecting…";$("#modalstatus").style.color="";
@@ -5211,7 +5398,23 @@ function openModal(s){
   $("#tchatsess").textContent=s.name;$("#tchat").className="collapsed";renderTChat();
   $("#modal").classList.add("open");
   updateModalJump();
+  // Live poll + async history (when history lands, re-render with scrollable transcript)
   modalRefresh();clearInterval(modalTimer);modalTimer=setInterval(modalRefresh,1200);
+  loadModalHistory(s).then(()=>{
+    if(!modalSession)return;
+    if(modalHistoryText){
+      const sc2=$("#modalscreen");
+      if(sc2){
+        sc2.dataset.last=""; // force book re-render on next tick too
+        modalRenderBook(sc2,true,0);
+        updateModalJump();
+        const st=$("#modalstatus");
+        if(st&&!(st.textContent||"").includes("history")){
+          st.textContent=(st.textContent||"live")+" · +history";
+        }
+      }
+    }
+  });
   loadDigest();                                  // the gist + suggested replies, up front
   syncURL();                                      // deep-link the open session
   setTimeout(()=>$("#modalinput").focus(),40);
@@ -5220,6 +5423,7 @@ function closeModal(){
   $("#modal").classList.remove("open");
   const j=$("#modaljump");if(j)j.classList.remove("on");
   clearInterval(modalTimer);modalTimer=null;modalSession=null;clearModalClips();
+  modalBook=[];modalHistoryText="";
   syncURL();                                      // drop the session from the URL
 }
 async function modalRefresh(){
@@ -5231,14 +5435,23 @@ async function modalRefresh(){
   const atBottom=!userPinned&&modalScreenPinned(sc);
   const keepTop=sc.scrollTop;
   try{
-    const r=await api("/api/capture?session="+encodeURIComponent(modalSession.session)+"&lines=800");
+    // Deep history when tmux has it; still fine for alt-screen (returns ~pane height).
+    const r=await api("/api/capture?session="+encodeURIComponent(modalSession.session)+"&lines=4000");
     if(r.ok){
-      $("#modalstatus").textContent="live";$("#modalstatus").style.color="";
-      if(sc.dataset.last!==r.content){
-        sc.dataset.last=r.content;sc.textContent=r.content.replace(/\s+$/,"")+"\n";
-        const cur=document.createElement("span");cur.className="cursorblock";sc.appendChild(cur);
-        if(atBottom)sc.scrollTop=sc.scrollHeight;
-        else sc.scrollTop=keepTop;  // textContent wipe resets scroll — restore
+      modalScrollMode=r.scroll_mode|| (r.history_size>0?"tmux":"app");
+      const hist=typeof r.history_size==="number"?r.history_size:null;
+      const modeTag=modalScrollMode==="tmux"?" · tmux history":" · in-app scroll";
+      $("#modalstatus").textContent="live"+(hist!=null?" · hist "+hist:"")+modeTag;
+      $("#modalstatus").style.color="";
+      const raw=(r.content||"").replace(/\s+$/,"");
+      if(sc.dataset.last!==raw){
+        sc.dataset.last=raw;
+        // Accumulate unique snapshots → real HTML scroll depth over time
+        if(raw&&(modalBook.length===0||modalBook[modalBook.length-1]!==raw)){
+          modalBook.push(raw);
+          if(modalBook.length>MODAL_BOOK_MAX)modalBook=modalBook.slice(-MODAL_BOOK_MAX);
+        }
+        modalRenderBook(sc,atBottom,keepTop);
         // The Gist failed but the web changed — ok to try to recover, capped at 10
         if(digestErr&&digestRetries<10){digestRetries++;loadDigest();}
       }
@@ -5346,10 +5559,25 @@ async function modalScrollTmux(direction,amount){
   if(!modalSession)return false;
   try{
     const r=await api("/api/scroll",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({session:modalSession.session,direction:direction||"up",amount:amount||"page"})});
-    // Pin HTML view so refresh doesn't yank; then re-capture the copy-mode view
-    const sc=$("#modalscreen");if(sc)sc.dataset.userPinned="1";
-    setTimeout(modalRefresh,120);
+      body:JSON.stringify({
+        session:modalSession.session,
+        direction:direction||"up",
+        amount:amount||"page",
+        mode:modalScrollMode==="tmux"?"tmux":"auto",
+      })});
+    const sc=$("#modalscreen");
+    // After in-app scroll, force a new snapshot into the book so HTML height grows
+    if(sc)sc.dataset.last=""; // bust so modalRefresh always re-renders
+    // Stay unpinned only if user was following live; else keep reading position
+    if(direction==="up"&&sc)sc.dataset.userPinned="1";
+    await modalRefresh();
+    if(r&&r.ok&&r.mode==="app"&&sc){
+      // Nudge status so operator knows we scrolled the agent, not empty tmux history
+      const st=$("#modalstatus");
+      if(st&&!(st.textContent||"").includes("scrolled")){
+        st.textContent=(st.textContent||"live")+" · scrolled agent";
+      }
+    }
     return !!(r&&r.ok);
   }catch(e){return false;}
 }
@@ -5747,8 +5975,7 @@ $("#newintent").addEventListener("keydown",e=>{if(e.key==="Enter")doSuggest();})
 $("#dgrefresh").onclick=loadDigest;
 $("#modalclose").onclick=closeModal;
 $("#modalback").onclick=closeModal;
-// Terminal scroll: HTML overflow when capture is tall; else tmux copy-mode.
-// Wheel / trackpad is the main path users try first.
+// Terminal scroll: HTML book when tall; else app/tmux scroll which feeds the book.
 (function(){
   const sc=$("#modalscreen"), j=$("#modaljump");
   let wheelBusy=false, wheelAcc=0, wheelTimer=null;
@@ -5763,30 +5990,25 @@ $("#modalback").onclick=closeModal;
       const canUp=sc.scrollTop>2;
       const canDown=sc.scrollTop+sc.clientHeight<sc.scrollHeight-2;
       const tall=sc.scrollHeight>sc.clientHeight+8;
-      // Prefer native HTML scroll when the capture actually overflows.
-      if(tall&&((e.deltaY<0&&canUp)||(e.deltaY>0&&canDown)||(e.deltaY<0&&canUp===false&&canDown===false&&sc.scrollTop<=2&&e.deltaY>0))){
-        // Let the browser scroll #modalscreen; mark pin when leaving bottom.
-        if(!modalScreenPinned(sc))sc.dataset.userPinned="1";
-        return;
-      }
+      // Native HTML scroll inside the accumulated book whenever possible.
+      if(tall&&e.deltaY<0&&canUp){sc.dataset.userPinned="1";return;}
       if(tall&&e.deltaY>0&&canDown){return;}
-      if(tall&&e.deltaY<0&&canUp){return;}
-      // No more HTML room (or capture fits the viewport) → drive tmux scrollback.
+      // At edge or single-screen capture → drive agent/tmux, which adds pages to the book.
       e.preventDefault();
       wheelAcc+=e.deltaY;
       if(wheelTimer)clearTimeout(wheelTimer);
       wheelTimer=setTimeout(()=>{wheelAcc=0;},180);
       if(wheelBusy)return;
-      if(Math.abs(wheelAcc)<28)return; // ignore tiny trackpad noise
+      if(Math.abs(wheelAcc)<24)return;
       const dir=wheelAcc<0?"up":"down";
-      const amount=Math.abs(wheelAcc)>140?"page":"half";
+      const amount=Math.abs(wheelAcc)>120?"page":"half";
       wheelAcc=0;wheelBusy=true;
       modalScrollTmux(dir,amount).finally(()=>{wheelBusy=false;});
     },{passive:false});
   }
   if(j)j.onclick=()=>{
     const s=$("#modalscreen");if(s)s.dataset.userPinned="0";
-    // Leave tmux copy-mode so the live agent is visible again
+    // Leave tmux copy-mode if we were in it; re-pin live bottom of the book
     if(modalSession){
       api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({session:modalSession.session,keys:"Escape",literal:false,enter:false})})
@@ -6564,7 +6786,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             self._json(steer_payload(data if isinstance(data, dict) else {}))
             return
         if url.path == "/api/scroll":
-            # Wheel / PgUp in modal → tmux copy-mode scrollback
+            # Wheel / PgUp → tmux history OR app alt-screen (Claude), auto-detected
             sess = (data.get("session") or data.get("name") or "").strip()
             if not sess:
                 self._json({"ok": False, "error": "missing_session"}, 400)
@@ -6574,6 +6796,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                 direction=str(data.get("direction") or "up"),
                 amount=str(data.get("amount") or "page"),
                 host=_session_host(sess),
+                mode=(str(data.get("mode") or "auto") or "auto"),
             ))
             return
         if url.path == "/api/reply":
@@ -7125,7 +7348,12 @@ def ai_diagnosis_markdown(
 
         cfg = _pc.load_product_config(sk.id)
         if cfg.is_manager:
-            probe = _probe_managed_planes(cfg)
+            # Share the same short-TTL cache as /api/managed (avoid double probe on cold /ai).
+            probe = _expensive_get(
+                f"managed:{cfg.product}:{cfg.path}",
+                _EXPENSIVE_TTL["managed"],
+                lambda: _probe_managed_planes(cfg),
+            )
             planes = probe.get("planes") or []
             down = [p for p in planes if not p.get("ok")]
             deg = [p for p in planes if p.get("ok") and p.get("degraded")]
@@ -7335,31 +7563,103 @@ def ai_diagnosis_markdown(
             lines.append(f"- `{s.get('name')}`: `{cmd}`")
 
     if include_panes and live:
+        # Cold /ai used to capture EVERY live pane serially (~0.5s × N → 15–30s).
+        # Cap + prioritize permanent seats + parallelize so diagnosis stays < budget.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        max_pane_samples = int(os.environ.get("EMUX_AI_PANE_SAMPLES", "8"))
+        max_pane_samples = max(0, min(max_pane_samples, 24))
+        priority_names = (
+            "directrux-vp",
+            "directrux-engine",
+            "directrux-health",
+            "fleet-vp",
+        )
+
+        def _pane_rank(s: dict[str, Any]) -> tuple:
+            name = str(s.get("name") or s.get("session") or "")
+            try:
+                prio = priority_names.index(name)
+            except ValueError:
+                prio = 100
+            # registered first, then name for stability
+            return (prio, 0 if s.get("registered") else 1, name)
+
+        candidates = [
+            s
+            for s in live
+            if not str(s.get("session") or "").startswith("socket:")
+        ]
+        candidates.sort(key=_pane_rank)
+        sample_sessions = candidates[:max_pane_samples]
+        skipped = max(0, len(candidates) - len(sample_sessions))
+
         lines += [
             "",
             f"## Pane samples (last {pane_lines} lines, LIVE only)",
             "",
             "Use these to see if agents are stuck on gates, idle shells, or errors.",
+            f"Showing **{len(sample_sessions)}** of {len(candidates)} live"
+            + (f" (skipped {skipped} for latency; set EMUX_AI_PANE_SAMPLES)" if skipped else "")
+            + ".",
             "",
         ]
-        for s in live:
+
+        def _one_pane(s: dict[str, Any]) -> tuple[str, str, str]:
             tmux_name = str(s.get("session") or "")
-            if tmux_name.startswith("socket:"):
-                continue
-            lines.append(f"### {s.get('name')} (`{tmux_name}`)")
-            lines.append("```")
-            cap = capture_payload(
-                tmux_name,
-                lines=max(5, min(pane_lines, 80)),
-                host=s.get("host"),
-                socket=s.get("socket_path"),
-            )
+            label = str(s.get("name") or tmux_name)
+            try:
+                cap = capture_payload(
+                    tmux_name,
+                    lines=max(5, min(pane_lines, 80)),
+                    host=s.get("host"),
+                    socket=s.get("socket_path"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                return label, tmux_name, f"(capture failed: {exc})"
             if not cap.get("ok"):
-                lines.append(f"(capture failed: {cap.get('error')})")
-            else:
-                content = (cap.get("content") or "").rstrip("\n")
-                sample = "\n".join(content.splitlines()[-pane_lines:])
-                lines.append(sample if sample else "(empty pane)")
+                return label, tmux_name, f"(capture failed: {cap.get('error')})"
+            content = (cap.get("content") or "").rstrip("\n")
+            sample = "\n".join(content.splitlines()[-pane_lines:])
+            return label, tmux_name, sample if sample else "(empty pane)"
+
+        pane_rows: list[tuple[str, str, str]] = []
+        if sample_sessions:
+            workers = min(6, len(sample_sessions))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futs = {pool.submit(_one_pane, s): s for s in sample_sessions}
+                try:
+                    for fut in as_completed(futs, timeout=8.0):
+                        try:
+                            pane_rows.append(fut.result(timeout=0.1))
+                        except Exception as exc:  # noqa: BLE001
+                            s = futs[fut]
+                            pane_rows.append(
+                                (
+                                    str(s.get("name") or "?"),
+                                    str(s.get("session") or "?"),
+                                    f"(capture failed: {exc})",
+                                )
+                            )
+                except TimeoutError:
+                    done_names = {r[0] for r in pane_rows}
+                    for s in sample_sessions:
+                        nm = str(s.get("name") or s.get("session") or "?")
+                        if nm not in done_names:
+                            pane_rows.append(
+                                (nm, str(s.get("session") or "?"), "(capture timeout)")
+                            )
+            # Keep priority order in the report
+            order = {
+                str(s.get("name") or s.get("session") or ""): i
+                for i, s in enumerate(sample_sessions)
+            }
+            pane_rows.sort(key=lambda r: order.get(r[0], 99))
+
+        for label, tmux_name, sample in pane_rows:
+            lines.append(f"### {label} (`{tmux_name}`)")
+            lines.append("```")
+            lines.append(sample)
             lines.append("```")
             lines.append("")
 
@@ -7397,7 +7697,12 @@ def ai_diagnosis_html(version: str, public_path: str = "") -> str:
     from . import skin as _skin
 
     sk = _skin.active_skin()
-    md = ai_diagnosis_markdown(version, public_path)
+    # Reuse the markdown cache so /ai.html after /ai (or concurrent) is free.
+    md = _expensive_get(
+        f"ai_md:{public_path or ''}",
+        _EXPENSIVE_TTL["ai_md"],
+        lambda: ai_diagnosis_markdown(version, public_path),
+    )
     base = public_path or ""
     return sk.apply(
         f"""<!doctype html>
