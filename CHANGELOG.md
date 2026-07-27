@@ -1,6 +1,11 @@
 # Changelog
 
 
+## v0.68.12
+
+### Features
+- **Many side chats:** the floating “reply to &lt;session&gt;” pattern becomes a stack — open as many topic/task side chats as you want (+ FAB or **💬 chat** on a Linear task). Each has its own log; messages inject into the parent head with a topic tag. **Fresh Claude** spawns a dedicated seat for that topic.
+
 ## v0.68.11
 
 ### Features

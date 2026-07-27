@@ -3739,14 +3739,14 @@ a.linlink:hover{color:var(--amber);border-bottom-style:solid;filter:brightness(1
 #modaltasks .mthead button:hover{color:var(--amber);border-color:var(--amber-dim)}
 #modaltasklist{flex:1 1 0;min-height:0;overflow:auto;padding:8px}
 #modaltasklist .mtempty{font-size:11px;color:var(--text-dim);line-height:1.45;padding:6px 4px}
-#modaltasklist a.mtask{
+#modaltasklist .mtask{
   display:flex;align-items:center;gap:8px;padding:8px 9px;margin-bottom:5px;
   border:1px solid var(--line);border-radius:6px;background:var(--bg-card);
   text-decoration:none;color:var(--text);font-size:12px;
 }
-#modaltasklist a.mtask:hover{border-color:var(--amber-dim);background:color-mix(in srgb, var(--amber) 8%, var(--bg-card))}
-#modaltasklist .mtkey{font-weight:700;color:var(--amber);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px}
-#modaltasklist .mtgo{margin-left:auto;color:var(--text-dim);font-size:11px}
+#modaltasklist .mtask:hover{border-color:var(--amber-dim);background:color-mix(in srgb, var(--amber) 8%, var(--bg-card))}
+#modaltasklist .mtkey{font-weight:700;color:var(--amber);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px;text-decoration:none}
+#modaltasklist .mtgo{color:var(--text-dim);font-size:11px;text-decoration:none}
 #modaltasksbtn{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:11px;cursor:pointer;padding:2px 8px;margin-left:6px;letter-spacing:.4px}
 #modaltasksbtn:hover,#modaltasksbtn.on{color:var(--amber);border-color:var(--amber-dim)}
 #modaltasksbtn .mtbadge{display:none;margin-left:4px;font-size:9px;padding:0 5px;border-radius:8px;background:var(--amber);color:var(--on-accent);font-weight:700}
@@ -3935,27 +3935,41 @@ a.linlink:hover{color:var(--amber);border-bottom-style:solid;filter:brightness(1
 #nimtest{background:var(--bg-card);color:var(--text);border:1px solid var(--amber)}
 #nimtestout.ok,#setsaveout.ok{color:#2ea043;font-size:12px}
 #nimtestout.err,#setsaveout.err{color:#e05545;font-size:12px}
-/* --- floating per-terminal chat: choices as chips + type-your-own, NCDMV-style --- */
-#tchat{position:fixed;right:26px;bottom:26px;z-index:60;width:340px;max-width:90vw}
-#tchat.collapsed #tchatpanel{display:none}
-#tchat:not(.collapsed) #tchatlauncher{display:none}
-#tchatlauncher{width:54px;height:54px;border-radius:50%;background:var(--amber);color:var(--on-accent);
-  border:none;font-size:23px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4);position:relative}
-#tchatbadge{position:absolute;top:-3px;right:-3px;background:#c0392b;color:#fff;font-size:11px;
+/* --- multi side-chats (reply + as many topic/task chats as you want) --- */
+#tchatstack{
+  position:fixed;right:14px;bottom:14px;z-index:220;
+  display:none;flex-direction:row-reverse;align-items:flex-end;gap:10px;
+  max-width:calc(100vw - 28px);overflow-x:auto;overflow-y:visible;
+  padding:4px;pointer-events:none;
+}
+#modal.open #tchatstack{display:flex}
+#tchatstack .tchat{
+  pointer-events:auto;width:320px;max-width:min(320px,88vw);flex:0 0 auto;
+  position:relative;
+}
+#tchatstack .tchat.collapsed{width:auto}
+#tchatstack .tchat.collapsed .tchatpanel{display:none}
+#tchatstack .tchat:not(.collapsed) .tchatlauncher{display:none}
+#tchatstack .tchatlauncher{width:52px;height:52px;border-radius:50%;background:var(--amber);color:var(--on-accent);
+  border:none;font-size:20px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4);position:relative}
+#tchatstack .tchatbadge{position:absolute;top:-3px;right:-3px;background:#c0392b;color:#fff;font-size:11px;
   min-width:19px;height:19px;border-radius:10px;display:none;align-items:center;justify-content:center;
   padding:0 4px;font-weight:800;box-shadow:0 1px 4px rgba(0,0,0,.35)}
-#tchatpanel{background:var(--bg-raise);border:1px solid var(--amber);border-radius:14px;overflow:hidden;
-  box-shadow:0 12px 44px rgba(0,0,0,.5);display:flex;flex-direction:column;max-height:64vh}
-#tchathead{background:var(--amber);color:var(--on-accent);padding:9px 13px;font-size:13px;font-weight:650;
-  display:flex;justify-content:space-between;align-items:center}
-#tchathead b{font-weight:800}
-#tchatmin{background:transparent;border:none;color:var(--on-accent);font-size:15px;cursor:pointer}
-#tchatlog{padding:9px 11px 0;display:flex;flex-direction:column;gap:6px;overflow:auto;max-height:26vh}
-#tchatlog:empty{display:none}
+#tchatstack .tchatpanel{background:var(--bg-raise);border:1px solid var(--amber);border-radius:14px;overflow:hidden;
+  box-shadow:0 12px 44px rgba(0,0,0,.5);display:flex;flex-direction:column;max-height:64vh;width:320px;max-width:min(320px,88vw)}
+#tchatstack .tchathead{background:var(--amber);color:var(--on-accent);padding:8px 10px;font-size:12px;font-weight:650;
+  display:flex;justify-content:space-between;align-items:center;gap:6px}
+#tchatstack .tchathead .th-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tchatstack .tchathead b{font-weight:800}
+#tchatstack .tchathead .th-acts{display:flex;gap:2px;flex:0 0 auto}
+#tchatstack .tchathead button{background:transparent;border:none;color:var(--on-accent);font-size:14px;cursor:pointer;padding:0 5px;opacity:.9}
+#tchatstack .tchathead button:hover{opacity:1}
+#tchatstack .tchatlog{padding:9px 11px 0;display:flex;flex-direction:column;gap:6px;overflow:auto;max-height:22vh}
+#tchatstack .tchatlog:empty{display:none}
 .tcmsg{max-width:86%;padding:6px 10px;border-radius:11px;font-size:12px;line-height:1.35;white-space:pre-wrap;word-break:break-word}
 .tcmsg.bot{align-self:flex-start;background:var(--bg-card);color:var(--text-dim);border:1px solid var(--line)}
 .tcmsg.you{align-self:flex-end;background:var(--amber);color:var(--on-accent);font-weight:600}
-#tchatchips{padding:11px;display:flex;flex-direction:column;gap:7px;overflow:auto}
+#tchatstack .tchatchips{padding:11px;display:flex;flex-direction:column;gap:7px;overflow:auto;max-height:18vh}
 .tc-opt,.tc-sug{border:none;border-radius:12px;padding:9px 13px;font-family:inherit;font-size:12.5px;
   font-weight:600;cursor:pointer;text-align:left;box-shadow:0 2px 5px rgba(0,0,0,.18);transition:filter .12s;
   display:flex;align-items:center;gap:8px}
@@ -3969,11 +3983,27 @@ a.linlink:hover{color:var(--amber);border-bottom-style:solid;filter:brightness(1
 .tc-opt:disabled,.tc-sug:disabled{opacity:.5;cursor:default}
 .tc-opt.sel{box-shadow:0 0 0 2px var(--bg-raise),0 0 0 4px var(--amber)}
 .tc-empty{color:var(--text-dim);font-size:12px;font-style:italic;padding:4px 2px}
-#tchatrow{display:flex;gap:6px;padding:10px 11px;border-top:1px solid var(--line);background:var(--bg-card)}
-#tchatinput{flex:1;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:9px;
-  padding:8px 11px;font-family:inherit;font-size:13px}
-#tchatsend{background:var(--amber);color:var(--on-accent);border:none;border-radius:9px;width:40px;
-  font-size:15px;cursor:pointer}
+#tchatstack .tchatrow{display:flex;gap:6px;padding:10px 11px;border-top:1px solid var(--line);background:var(--bg-card);align-items:center}
+#tchatstack .tchatinput{flex:1;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:9px;
+  padding:8px 11px;font-family:inherit;font-size:13px;min-width:0}
+#tchatstack .tchatsend{background:var(--amber);color:var(--on-accent);border:none;border-radius:9px;width:40px;
+  font-size:15px;cursor:pointer;flex:0 0 auto}
+#tchatstack .tchatfoot{display:flex;gap:6px;padding:0 11px 10px;background:var(--bg-card);flex-wrap:wrap}
+#tchatstack .tchatfoot .act{font-size:10px}
+#tchat-addfab{
+  pointer-events:auto;width:44px;height:44px;border-radius:50%;
+  background:var(--bg-raise);color:var(--amber);border:1px solid var(--amber);
+  font-size:22px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.35);
+  flex:0 0 auto;align-self:flex-end;margin-bottom:4px;
+}
+#tchat-addfab:hover{filter:brightness(1.08)}
+#modaltasklist a.mtask .mtacts{display:flex;gap:4px;margin-left:auto;align-items:center}
+#modaltasklist a.mtask .mtchat{
+  border:1px solid var(--amber-dim);background:transparent;color:var(--amber);
+  font-size:10px;padding:2px 7px;border-radius:4px;cursor:pointer;font-family:inherit;
+}
+#modaltasklist a.mtask .mtchat:hover{background:color-mix(in srgb, var(--amber) 18%, transparent)}
+#modaltasklist a.mtask .mtgo{margin-left:0}
 .happrove:disabled,.hdeny:disabled{opacity:.4;cursor:default}
 
 /* ── macOS-only controls (iTerm2 driven by AppleScript) — hidden anywhere the
@@ -4116,15 +4146,8 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
         <div id="modaltasklist"></div>
       </aside>
     </div>
-    <div id="tchat" class="collapsed">
-      <button id="tchatlauncher" onclick="tchatToggle()">💬<span id="tchatbadge"></span></button>
-      <div id="tchatpanel">
-        <div id="tchathead"><span>💬 reply to <b id="tchatsess"></b></span><button id="tchatmin" onclick="tchatToggle()" title="minimize">▾</button></div>
-        <div id="tchatlog"></div>
-        <div id="tchatchips"></div>
-        <div id="tchatrow"><input id="tchatinput" placeholder="choose one, or type your reply…" autocomplete="off" spellcheck="false"><button id="tchatsend" onclick="tchatSend()">➤</button></div>
-      </div>
-    </div>
+    <!-- Multi side-chats: default "reply to session" + N topic/task panels -->
+    <div id="tchatstack" aria-label="side chats"></div>
     <div id="modalopts"></div>
     <div id="modalchips">
       <button class="chip" data-keys="C-c">^C</button>
@@ -6024,14 +6047,16 @@ function openModal(s){
   const sc=$("#modalscreen");sc.textContent="";sc.dataset.last="";sc.dataset.userPinned="0";
   $("#modaldigest").className="";$("#modaldigest .dgtext").textContent="";$("#modaldigest .dgsugg").innerHTML="";
   setPending("");$("#modalthink").className="";clearModalClips();
-  tOpts=[];tSugg=[];tchatCollapsed=false;tLoggedDigest="";$("#tchatlog").innerHTML="";
+  tOpts=[];tSugg=[];tLoggedDigest="";
+  sideChats=[];sideChatSeq=0;
   switchArmed=null;$("#modalswitch").textContent="⇄ switch account";$("#modalswitch").className="";
   $("#modalswitch").classList.toggle("hot",!!s.cost);   // highlight when this session is throttled
-  $("#tchatsess").textContent=s.name;$("#tchat").className="collapsed";renderTChat();
   // Tasks drawer: prefer remembered open state; default open
   try{modalTasksOpen=localStorage.getItem("emux_modal_tasks")!=="0";}catch(_){modalTasksOpen=true;}
   toggleModalTasks(modalTasksOpen);
   renderModalTasks();
+  ensureReplySideChat();
+  renderSideChats();
   $("#modal").classList.add("open");
   updateModalJump();
   // Live poll + async history (when history lands, re-render with scrollable transcript)
@@ -6061,6 +6086,8 @@ function closeModal(){
   const j=$("#modaljump");if(j)j.classList.remove("on");
   clearInterval(modalTimer);modalTimer=null;modalSession=null;clearModalClips();
   modalBook=[];modalHistoryText="";
+  sideChats=[];sideChatSeq=0;
+  const stack=$("#tchatstack");if(stack)stack.innerHTML="";
   syncURL();                                      // drop the session from the URL
 }
 async function modalRefresh(){
@@ -6125,24 +6152,97 @@ async function loadDigest(){
   if(r.digest&&r.digest!==tLoggedDigest){tchatLog("bot",r.digest);tLoggedDigest=r.digest;}  // the gist opens the chat
   setSuggestions(r.suggestions||[]);   // gist replies become chips (with confidence pies)
 }
-// turn an on-screen numbered menu into clickable bubbles that answer it for you.
-// The choices for a terminal live in a floating chat LOCAL to that terminal:
-// on-screen menu options + the gist's suggested replies become quick chips, and
-// there's a box to type your own — choose one, or chat. (NCDMV-style.)
-let tOpts=[], tSugg=[], tchatCollapsed=false, tLoggedDigest="";
-// a green pie/wedge filled to the confidence %, shown on each suggested reply so you
-// can see at a glance how strong emux thinks that choice is.
+// Side chats: many floating panels per open session.
+// - kind "reply": default "reply to <session>" with menu chips + gist suggestions
+// - kind "task"/"topic": chat about a Linear issue or freeform topic (as many as you want)
+// Messages inject into the parent head with a topic prefix (unless you spawn a fresh Claude seat).
+let tOpts=[], tSugg=[], tLoggedDigest="";
+let sideChats=[]; // {id, kind, title, topic, collapsed, messages:[{who,text}], seatName?}
+let sideChatSeq=0;
 function pieHTML(pct){const p=Math.round(pct);
   return '<span class="cpie" title="'+p+'% confidence" style="background:conic-gradient(#2ea043 '+p+'%,rgba(127,127,127,.26) 0)"></span>'
     +'<span class="cpct">'+p+'%</span>';}
-function tchatLog(who,text){const log=$("#tchatlog");if(!log||!text)return;
-  const b=document.createElement("div");b.className="tcmsg "+who;b.textContent=text;
-  log.appendChild(b);log.scrollTop=log.scrollHeight;}
-function renderOptions(opts){ tOpts=opts||[]; renderTChat(); }   // a menu on screen → chips
-function setSuggestions(sugg){ tSugg=sugg||[]; renderTChat(); }  // gist replies → chips
+function ensureReplySideChat(){
+  if(!modalSession) return null;
+  let sc=sideChats.find(c=>c.kind==="reply");
+  if(!sc){
+    sc={id:"reply",kind:"reply",title:"reply to "+modalSession.name,topic:null,collapsed:true,messages:[]};
+    sideChats.unshift(sc);
+  }else{
+    sc.title="reply to "+modalSession.name;
+  }
+  return sc;
+}
+function openSideChat(opts){
+  // opts: {kind, title, topic, seed?, focus?}
+  if(!modalSession) return null;
+  const kind=opts.kind||"topic";
+  const topic=(opts.topic||"").trim()||null;
+  // Reuse open panel for same task/topic
+  if(topic){
+    const existing=sideChats.find(c=>c.topic===topic);
+    if(existing){
+      existing.collapsed=false;
+      renderSideChats();
+      focusSideChat(existing.id);
+      return existing;
+    }
+  }
+  if(kind==="reply"){
+    const sc=ensureReplySideChat();
+    sc.collapsed=false;
+    renderSideChats();
+    focusSideChat(sc.id);
+    return sc;
+  }
+  const id="sc-"+(++sideChatSeq);
+  const title=opts.title||(topic?("about "+topic):("side chat "+sideChatSeq));
+  const sc={id,kind,title,topic,collapsed:false,messages:[],seatName:null};
+  if(opts.seed) sc.messages.push({who:"bot",text:opts.seed});
+  else if(topic&&isLinearIssueKey(topic)){
+    sc.messages.push({who:"bot",text:
+      "Side chat about Linear "+topic+".\n"
+      +linearIssueUrl(topic)+"\n\n"
+      +"Messages you type are sent into the parent head ("+(modalSession.name||"?")
+      +") tagged with this issue. Use “Fresh Claude” for a dedicated seat."});
+  }else if(topic){
+    sc.messages.push({who:"bot",text:"Side chat about “"+topic+"”. Messages go to the parent head with this topic tag."});
+  }
+  sideChats.push(sc);
+  renderSideChats();
+  focusSideChat(id);
+  return sc;
+}
+function closeSideChat(id){
+  if(id==="reply"){
+    const sc=sideChats.find(c=>c.id==="reply");
+    if(sc){sc.collapsed=true;renderSideChats();}
+    return;
+  }
+  sideChats=sideChats.filter(c=>c.id!==id);
+  renderSideChats();
+}
+function focusSideChat(id){
+  const el=document.querySelector('.tchat[data-id="'+id+'"] .tchatinput');
+  if(el) setTimeout(()=>el.focus(),40);
+}
+function sideChatById(id){return sideChats.find(c=>c.id===id);}
+function tchatLog(who,text,chatId){
+  // Back-compat: log into reply sidechat (or explicit id)
+  const sc=sideChatById(chatId||"reply")||ensureReplySideChat();
+  if(!sc||!text) return;
+  sc.messages.push({who,text:String(text)});
+  // live-append if panel is mounted
+  const log=document.querySelector('.tchat[data-id="'+sc.id+'"] .tchatlog');
+  if(log){
+    const b=document.createElement("div");b.className="tcmsg "+who;
+    b.innerHTML=linkifyLinear(text);bindLinlinks(b);
+    log.appendChild(b);log.style.display="";log.scrollTop=log.scrollHeight;
+  }else renderSideChats();
+}
+function renderOptions(opts){ tOpts=opts||[]; const sc=ensureReplySideChat(); if(sc&&(tOpts.length||tSugg.length)) sc.collapsed=false; renderSideChats(); }
+function setSuggestions(sugg){ tSugg=sugg||[]; const sc=ensureReplySideChat(); if(sc&&(tOpts.length||tSugg.length)) sc.collapsed=false; renderSideChats(); }
 async function sendOption(target){
-  // walk the ❯ cursor to the target then confirm — works for any cursor menu
-  // (Claude/Codex), no reliance on digit-select.
   const cur=((tOpts.find(o=>o.selected))||tOpts[0]||{n:target}).n;
   const send=k=>api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({session:modalSession.session,keys:k,literal:false,enter:false})});
@@ -6151,36 +6251,176 @@ async function sendOption(target){
   await send("Enter");
   setTimeout(()=>{modalRefresh();loadDigest();},600);
 }
-function renderTChat(){
-  const chips=$("#tchatchips"); if(!chips)return;
-  const parts=[];
-  tOpts.forEach(o=>parts.push('<button class="tc-opt'+(o.selected?" sel":"")+'" data-n="'+o.n+'"><b>'+o.n+'</b> '+esc(o.label)+'</button>'));
-  tSugg.forEach((s,i)=>{
-    const c=Math.max(0,Math.min(100,s.confidence==null?50:s.confidence));
-    parts.push('<button class="tc-sug" data-i="'+i+'">'+pieHTML(c)+'<span class="tc-txt">'+esc(s.text||"")+'</span></button>');
+function composeSidePayload(sc, text){
+  if(!sc||sc.kind==="reply"||!sc.topic) return text;
+  if(isLinearIssueKey(sc.topic))
+    return "[side chat · Linear "+sc.topic+"] "+text;
+  return "[side chat · "+sc.topic+"] "+text;
+}
+function renderSideChats(){
+  const stack=$("#tchatstack"); if(!stack) return;
+  if(!modalSession){stack.innerHTML="";return;}
+  ensureReplySideChat();
+  let html="";
+  // FAB: add another freeform side chat
+  html+='<button type="button" id="tchat-addfab" title="New side chat about anything">+</button>';
+  sideChats.forEach(sc=>{
+    const isReply=sc.kind==="reply";
+    html+='<div class="tchat'+(sc.collapsed?" collapsed":"")+'" data-id="'+esc(sc.id)+'">';
+    // collapsed = floating bubble
+    html+='<button type="button" class="tchatlauncher" data-act="expand" title="'+esc(sc.title)+'">'
+      +(isReply?"💬":"◎")
+      +'<span class="tchatbadge"'+(isReply&&(tOpts.length+tSugg.length)?"":' style="display:none"')+'>'
+      +(isReply?(tOpts.length+tSugg.length):"")+'</span></button>';
+    html+='<div class="tchatpanel">';
+    html+='<div class="tchathead"><span class="th-title">'+(isReply?'💬 reply to <b>'+esc(modalSession.name)+'</b>':'◎ '+esc(sc.title))+'</span>'
+      +'<span class="th-acts">'
+      +(sc.topic&&isLinearIssueKey(sc.topic)?'<button type="button" data-act="linear" title="Open in Linear">↗</button>':"")
+      +'<button type="button" data-act="min" title="minimize">▾</button>'
+      +'<button type="button" data-act="close" title="'+(isReply?"minimize":"close side chat")+'">✕</button>'
+      +'</span></div>';
+    html+='<div class="tchatlog">';
+    (sc.messages||[]).forEach(m=>{
+      html+='<div class="tcmsg '+esc(m.who||"bot")+'">'+linkifyLinear(m.text||"")+'</div>';
+    });
+    html+='</div>';
+    if(isReply){
+      html+='<div class="tchatchips"></div>';
+    }
+    html+='<div class="tchatrow">'
+      +'<input class="tchatinput" placeholder="'+(isReply?"choose one, or type your reply…":"message about "+esc(sc.topic||"this")+"…")+'" autocomplete="off" spellcheck="false">'
+      +'<button type="button" class="tchatsend" data-act="send">➤</button></div>';
+    if(!isReply){
+      html+='<div class="tchatfoot">'
+        +'<button type="button" class="act" data-act="fresh" title="Spawn a dedicated Claude Code seat for this topic">⧉ Fresh Claude</button>'
+        +(sc.seatName?'<button type="button" class="act" data-act="openseat" title="Open the seat">↗ '+esc(sc.seatName)+'</button>':"")
+        +'</div>';
+    }
+    html+='</div></div>';
   });
-  chips.innerHTML=parts.join("")||'<div class="tc-empty">no suggestions right now — type your reply below</div>';
-  const n=tOpts.length+tSugg.length;
-  const badge=$("#tchatbadge");badge.textContent=n||"";badge.style.display=n?"inline-block":"none";
-  chips.querySelectorAll(".tc-opt").forEach(b=>b.onclick=()=>{
-    chips.querySelectorAll("button").forEach(x=>x.disabled=true);sendOption(+b.dataset.n);});
-  chips.querySelectorAll(".tc-sug").forEach(b=>b.onclick=()=>{
-    const t=(tSugg[+b.dataset.i]||{}).text||"";if(!t)return;
-    setPending(t);tchatLog("you",t);modalKeys(t,true,true);
-    tSugg=[];renderTChat();setTimeout(()=>{modalRefresh();loadDigest();},1500);});
-  // when a real choice lands, float the chat open (unless the user minimized it)
-  if(n&&!tchatCollapsed)$("#tchat").className="";
+  stack.innerHTML=html;
+  // reply chips
+  const replyEl=stack.querySelector('.tchat[data-id="reply"] .tchatchips');
+  if(replyEl){
+    const parts=[];
+    tOpts.forEach(o=>parts.push('<button class="tc-opt'+(o.selected?" sel":"")+'" data-n="'+o.n+'"><b>'+o.n+'</b> '+esc(o.label)+'</button>'));
+    tSugg.forEach((s,i)=>{
+      const c=Math.max(0,Math.min(100,s.confidence==null?50:s.confidence));
+      parts.push('<button class="tc-sug" data-i="'+i+'">'+pieHTML(c)+'<span class="tc-txt">'+esc(s.text||"")+'</span></button>');
+    });
+    replyEl.innerHTML=parts.join("")||'<div class="tc-empty">no suggestions right now — type below, or + for another side chat</div>';
+    replyEl.querySelectorAll(".tc-opt").forEach(b=>b.onclick=()=>{
+      replyEl.querySelectorAll("button").forEach(x=>x.disabled=true);sendOption(+b.dataset.n);});
+    replyEl.querySelectorAll(".tc-sug").forEach(b=>b.onclick=()=>{
+      const t=(tSugg[+b.dataset.i]||{}).text||"";if(!t)return;
+      setPending(t);tchatLog("you",t,"reply");modalKeys(t,true,true);
+      tSugg=[];renderSideChats();setTimeout(()=>{modalRefresh();loadDigest();},1500);});
+  }
+  stack.querySelectorAll(".tchat").forEach(el=>{
+    const id=el.dataset.id;
+    const sc=sideChatById(id);
+    if(!sc) return;
+    el.querySelectorAll("[data-act]").forEach(btn=>{
+      btn.onclick=e=>{
+        e.stopPropagation();
+        const act=btn.dataset.act;
+        if(act==="expand"){sc.collapsed=false;renderSideChats();focusSideChat(id);}
+        else if(act==="min"){sc.collapsed=true;renderSideChats();}
+        else if(act==="close"){closeSideChat(id);}
+        else if(act==="send"){sideChatSend(id);}
+        else if(act==="linear"&&sc.topic){window.open(linearIssueUrl(sc.topic),"_blank","noopener,noreferrer");}
+        else if(act==="fresh"){spawnSideChatClaude(id);}
+        else if(act==="openseat"&&sc.seatName){
+          setMode("grid");const s=grid.find(x=>x.name===sc.seatName);if(s)openModal(s);
+        }
+      };
+    });
+    const inp=el.querySelector(".tchatinput");
+    if(inp){
+      inp.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();sideChatSend(id);}};
+      inp.onpaste=e=>{if(modalSession)handleComposerPaste(e,modalSession.session||modalSession.name);};
+    }
+    const log=el.querySelector(".tchatlog");
+    if(log) log.scrollTop=log.scrollHeight;
+  });
+  const fab=stack.querySelector("#tchat-addfab");
+  if(fab) fab.onclick=()=>{
+    const topic=prompt("Side chat topic (Linear key like AIC-284, or any label):");
+    if(topic==null) return;
+    const t=topic.trim();
+    if(!t) return;
+    openSideChat({
+      kind:isLinearIssueKey(t)?"task":"topic",
+      topic:t,
+      title:isLinearIssueKey(t)?("about "+t):t,
+    });
+  };
+  bindLinlinks(stack);
 }
+function sideChatSend(id){
+  const sc=sideChatById(id); if(!sc||!modalSession) return;
+  const el=document.querySelector('.tchat[data-id="'+id+'"] .tchatinput');
+  const t=(el&&el.value||"").trim(); if(!t) return;
+  if(el) el.value="";
+  const payload=composeSidePayload(sc,t);
+  setPending(payload.length>180?payload.slice(0,180)+"…":payload);
+  tchatLog("you",t,id);
+  modalKeys(payload,true,true).then(ok=>{
+    if(!ok){
+      if(el&&!el.value) el.value=t;
+      setPending("");
+    }
+  });
+}
+async function spawnSideChatClaude(id){
+  const sc=sideChatById(id); if(!sc||!modalSession) return;
+  const topic=sc.topic||sc.title||"topic";
+  const slug=String(topic).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,24)||"side";
+  const name=("side-"+slug+"-"+Date.now().toString(36).slice(-4)).slice(0,48);
+  const url=isLinearIssueKey(topic)?linearIssueUrl(topic):"";
+  const prompt=
+    "You are a dedicated side seat for: "+topic+".\n"
+    +(url?("Linear: "+url+"\n"):"")
+    +"Parent session: "+(modalSession.name||"?")+" ("+(modalSession.session||"")+")\n"
+    +"Cwd hint: "+(modalSession.cwd||modalSession.path||".")+"\n\n"
+    +"Stay focused on this topic. Pull Linear context if you can. Report findings clearly.";
+  tchatLog("bot","Spawning Fresh Claude seat “"+name+"”…",id);
+  const st=$("#modalstatus");
+  if(st){st.textContent="spawning side seat…";st.style.color="";}
+  try{
+    const r=await api("/api/spawn",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        name,
+        command:"claude --dangerously-skip-permissions",
+        cwd:modalSession.cwd||modalSession.path||undefined,
+        prompt,
+        description:"Side chat · "+topic+(modalSession.name?(" · from "+modalSession.name):""),
+        tags:["sidechat", topic].concat(isLinearIssueKey(topic)?["linear",topic]:[]),
+      })});
+    if(r&&r.ok){
+      sc.seatName=r.name||name;
+      tchatLog("bot","Seat live: "+sc.seatName+(r.kickstarted?" (kickstarted on the task)":""),id);
+      renderSideChats();
+      try{await poll();}catch(_){}
+      if(st) st.textContent="side seat "+sc.seatName;
+    }else{
+      tchatLog("bot","Spawn failed: "+((r&&r.error)||"unknown"),id);
+      if(st){st.textContent="spawn failed";st.style.color="var(--stale)";}
+    }
+  }catch(e){
+    tchatLog("bot","Spawn unreachable",id);
+  }
+}
+// Back-compat aliases used elsewhere
 function tchatToggle(){
-  tchatCollapsed=!tchatCollapsed;
-  $("#tchat").className=tchatCollapsed?"collapsed":"";
-  if(!tchatCollapsed)setTimeout(()=>$("#tchatinput").focus(),50);
+  const sc=ensureReplySideChat();
+  if(!sc) return;
+  sc.collapsed=!sc.collapsed;
+  renderSideChats();
+  if(!sc.collapsed) focusSideChat("reply");
 }
-function tchatSend(){
-  const i=$("#tchatinput");const t=i.value.trim();if(!t)return;
-  i.value="";setPending(t);tchatLog("you",t);
-  modalKeys(t,true,true).then(ok=>{if(!ok){if(!i.value)i.value=t;setPending("");}});
-}
+function tchatSend(){ sideChatSend("reply"); }
+function renderTChat(){ renderSideChats(); }
 async function modalJudge(){
   if(!modalSession)return;
   const el=$("#modaljudge");
@@ -6391,11 +6631,7 @@ $("#modalinput").addEventListener("paste",e=>{
   if(!modalSession)return;
   handleComposerPaste(e,modalSession.session||modalSession.name);
 });
-$("#tchatinput").addEventListener("keydown",e=>{if(e.key==="Enter")tchatSend();});
-$("#tchatinput").addEventListener("paste",e=>{
-  if(!modalSession)return;
-  handleComposerPaste(e,modalSession.session||modalSession.name);
-});
+// Side-chat inputs are bound dynamically in renderSideChats()
 $("#modalpop").onclick=()=>popOutSessionTab();
 $("#modaliterm").onclick=async()=>{
   if(!modalSession)return;
@@ -6790,13 +7026,25 @@ function renderModalTasks(){
     badge.classList.toggle("on",keys.length>0);
   }
   if(!keys.length){
-    list.innerHTML='<div class="mtempty">No Linear tasks mentioned yet. When the head cites <b>AIC-123</b>, <b>EID-45</b>, <b>GMW-9</b>… they land here as links.</div>';
+    list.innerHTML='<div class="mtempty">No Linear tasks mentioned yet. When the head cites <b>AIC-123</b>, <b>EID-45</b>, <b>GMW-9</b>… they land here. Use <b>💬 chat</b> for a side chat, or <b>+</b> bottom-right for any topic.</div>';
     return;
   }
   list.innerHTML=keys.map(k=>
-    '<a class="mtask linlink" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer" title="Open '+esc(k)+' in Linear">'
-    +'<span class="mtkey">'+esc(k)+'</span><span class="mtgo">↗ Linear</span></a>'
+    '<div class="mtask" data-key="'+esc(k)+'">'
+    +'<a class="linlink mtkey" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer" title="Open in Linear">'+esc(k)+'</a>'
+    +'<span class="mtacts">'
+    +'<button type="button" class="mtchat" data-act="side" title="Open a side chat about this task">💬 chat</button>'
+    +'<a class="mtgo linlink" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer">↗</a>'
+    +'</span></div>'
   ).join("");
+  list.querySelectorAll(".mtchat").forEach(btn=>{
+    btn.onclick=e=>{
+      e.preventDefault();e.stopPropagation();
+      const key=btn.closest(".mtask")&&btn.closest(".mtask").dataset.key;
+      if(!key) return;
+      openSideChat({kind:"task",topic:key,title:"about "+key});
+    };
+  });
   bindLinlinks(list);
 }
 async function pollFeed(){
