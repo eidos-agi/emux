@@ -450,7 +450,7 @@ def scan_grok(
     try:
         from . import grok_control as gc
     except ImportError:
-        gc = None  # type: ignore[assignment]
+        gc = None
 
     if gc is not None:
         root = gc.sessions_root()
@@ -977,7 +977,7 @@ def peek_chat(
         try:
             from . import grok_control as gc
         except ImportError:
-            gc = None  # type: ignore[assignment]
+            gc = None
         root = gc.sessions_root() if gc is not None else (Path.home() / ".grok" / "sessions")
         # session id is often the directory name
         if root.is_dir():

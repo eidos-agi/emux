@@ -271,9 +271,13 @@ class GrokAcpClient:
 
     def _ingest_notification(self, msg: dict[str, Any]) -> None:
         method = (msg.get("method") or "").strip()
-        params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+        raw_params = msg.get("params")
+        params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
         if method in ("session/update", "session/updateNotification", "_x.ai/session/update"):
-            update = params.get("update") if isinstance(params.get("update"), dict) else params
+            raw_update = params.get("update")
+            update: dict[str, Any] = (
+                raw_update if isinstance(raw_update, dict) else params
+            )
             kind = ""
             text = ""
             if isinstance(update, dict):

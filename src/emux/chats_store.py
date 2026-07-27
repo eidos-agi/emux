@@ -434,7 +434,7 @@ class ChatStore:
         elif mkey in ("directrux", "director", "meta"):
             pat = _DIRECTRUX_RE
         else:
-            pat = re.compile(match, re.I)
+            pat = re.compile(match or "", re.I)
 
         # SQL prefilter for named lanes so we do not walk the entire laptop
         # index on every room load (EID-1100). Regex still applied below.

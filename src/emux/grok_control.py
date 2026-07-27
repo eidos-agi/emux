@@ -321,7 +321,8 @@ def enrich_session_dir(
 
     s_mtime, u_mtime = session_file_mtimes(d)
 
-    info = data.get("info") if isinstance(data.get("info"), dict) else {}
+    info_raw = data.get("info")
+    info: dict[str, Any] = info_raw if isinstance(info_raw, dict) else {}
     sid = str(info.get("id") or d.name)
     cwd = str(info.get("cwd") or "")
     project_key = d.parent.name if d.parent else ""
@@ -352,13 +353,16 @@ def enrich_session_dir(
                 snip = last_agent_snippet_from_updates(d)
                 if snip:
                     summary = snip
-        # Mission identity: keep generated_title / session_summary when present
-        # (AIC-283). last_user is for snippet + fallback title only — never clobber
-        # a real mission title with a typo'd one-liner ("do you udnrestand tha…").
+        # Mission identity: keep generated_title when present (AIC-283). Never
+        # clobber a real mission title with a typo'd last-user one-liner.
+        # Summary: prefer session_summary.json; else last human prompt beats
+        # agent-tail filler from updates.jsonl (control-room triage).
         if last_user:
             if not title:
                 title = last_user[:100]
-            if not summary:
+            if not str(data.get("session_summary") or "").strip():
+                summary = last_user[:240]
+            elif not summary:
                 summary = last_user[:240]
 
     if not title and last_user:

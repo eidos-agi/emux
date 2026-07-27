@@ -1379,7 +1379,7 @@ def _resume_chat_in_fleet(data: dict[str, Any]) -> dict[str, Any]:
         try:
             from . import grok_control as _gc
         except ImportError:
-            _gc = None  # type: ignore[assignment]
+            _gc = None
         bin_path = (
             (_gc.resolve_grok_bin() if _gc is not None else None)
             or _resolve_cli("grok")
@@ -2413,8 +2413,11 @@ def _probe_managed_planes(cfg: Any) -> dict[str, Any]:
         for p in planes:
             pid = getattr(p, "id", None) or (p.get("id") if isinstance(p, dict) else None)
             if pid not in done_ids:
-                if hasattr(p, "as_dict"):
-                    row = p.as_dict()
+                row: dict[str, Any]
+                as_dict_fn = getattr(p, "as_dict", None)
+                if callable(as_dict_fn):
+                    maybe = as_dict_fn()
+                    row = dict(maybe) if isinstance(maybe, dict) else {"id": pid}
                 elif isinstance(p, dict):
                     row = dict(p)
                 else:
@@ -2433,10 +2436,15 @@ def _probe_managed_planes(cfg: Any) -> dict[str, Any]:
     auth_gated = sum(1 for r in results if r.get("reason") == "auth_gated")
     healthy = sum(1 for r in results if r.get("ok") and not r.get("degraded"))
     mids = getattr(cfg, "managed_ids", None)
-    if callable(mids):
-        mid_list = sorted(mids())
-    else:
-        mid_list = sorted(mids or [])
+    raw_ids = mids() if callable(mids) else mids
+    mid_list: list[Any] = []
+    if isinstance(raw_ids, (list, tuple, set, frozenset)):
+        mid_list = sorted(raw_ids)
+    elif raw_ids is not None:
+        try:
+            mid_list = sorted(list(raw_ids))  # type: ignore[arg-type]
+        except TypeError:
+            mid_list = []
     return {
         "role": "manager",
         "product": getattr(cfg, "product", None),
@@ -2595,7 +2603,7 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
     try:
         from . import mgmt_ledger as _mgmt_ledger
     except ImportError:
-        _mgmt_ledger = None  # type: ignore[assignment]
+        _mgmt_ledger = None
     _lpath = os.path.join(os.path.expanduser("~"), ".config", "emux", "ledger.db")
     _green_lpath = os.path.join(os.path.expanduser("~"), ".config", "greenmux", "ledger.db")
     _led = None
@@ -8085,11 +8093,20 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
 
     def handle_error(self, request, client_address) -> None:  # noqa: ANN001
         """Swallow client disconnect noise; log real handler errors."""
+        import sys
         import traceback
+
         err = traceback.format_exc()
         if "BrokenPipeError" in err or "ConnectionResetError" in err:
             return
-        super().handle_error(request, client_address)
+        # Avoid super().handle_error typing issues under pyright (BaseHTTPRequestHandler stubs).
+        print("-" * 40, file=sys.stderr)
+        print(
+            f"Exception occurred during processing of request from {client_address}",
+            file=sys.stderr,
+        )
+        print(err, file=sys.stderr)
+        print("-" * 40, file=sys.stderr)
 
     def _control_room_html(self) -> str:
         html = _help.control_room_page(PAGE, __version__).replace("__OS__", _host_os())
@@ -10199,12 +10216,19 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
         request_queue_size = int(os.environ.get("EMUX_HTTP_BACKLOG", "256"))
 
         def handle_error(self, request, client_address) -> None:  # noqa: ANN001
+            import sys
             import traceback
 
             err = traceback.format_exc()
             if "BrokenPipeError" in err or "ConnectionResetError" in err:
                 return
-            super().handle_error(request, client_address)
+            print("-" * 40, file=sys.stderr)
+            print(
+                f"Exception occurred during processing of request from {client_address}",
+                file=sys.stderr,
+            )
+            print(err, file=sys.stderr)
+            print("-" * 40, file=sys.stderr)
 
     try:
         server = EmuxThreadingHTTPServer((host, port), EmuxWebHandler)
