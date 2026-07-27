@@ -1,6 +1,12 @@
 # Changelog
 
 
+## v0.68.9
+
+### Features
+- **Schedule calendar for every product:** in-process cron jobs + **CALENDAR** tab (week/month, series rail, plain-English `when` labels, skeleton + stale-while-revalidate load). Product-scoped `~/.config/<product>/schedule.json` (amux / gmux / reevux / directrux / emux). Range GET skips `next_run_at` so the calendar path stays light.
+- **CLI:** `emux schedule list|add|rm|run` with human schedule lines; desk default examples use weekdays (`1-5`).
+
 ## v0.68.8
 
 ### Fixes

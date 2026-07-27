@@ -368,32 +368,42 @@ One background thread captures every live pane on a timer into a shared cache, s
 
 API: `GET /healthz` (unauthenticated liveness), `GET /api/sessions`, `GET /api/grid?lines=` (captures + activity for all live panes in one call), `GET /api/capture?session=&lines=`, `POST /api/send {session, keys, literal, enter}`. The `/api/*` routes enforce the Host/Origin guards above. Same operations the MCP server exposes, over HTTP.
 
-### Schedule (in-process cron → session messages)
+### Schedule + CALENDAR (every product)
 
-The web daemon can fire **cron-scheduled messages** into registered sessions
-(or raw tmux names). Uses the **`croniter`** package for expression parsing;
-the daemon's background loop ticks jobs every ~15s. Jobs are **product-scoped**
-(`EMUX_PRODUCT=amux` → `~/.config/amux/schedule.json`).
+The control room **CALENDAR** tab and in-process cron jobs ship in the **shared
+engine** — not an amux-only feature. Every skin that runs `emux web` gets the
+same UI and API. Jobs are **product-scoped**:
+
+| Product | Schedule file | Room |
+|---------|---------------|------|
+| amux | `~/.config/amux/schedule.json` | `/amux/room` → CALENDAR |
+| gmux / greenmux | product config dir | Greenmark room |
+| reevux | `~/.config/reevux/schedule.json` | mini room |
+| directrux | `~/.config/directrux/schedule.json` | `/directrux/room` |
+| emux | `~/.config/emux/schedule.json` | base control room |
+
+Uses **`croniter`**. Tick ~15s. Sidebar shows plain-English `when` labels;
+cold open uses skeleton shimmer (same idea as CHATS). Range GET expands
+occurrences and skips `next_run_at` for speed.
 
 ```bash
-# list / add / fire / remove
-emux schedule list
-emux schedule add --cron '0 7 * * *' --timezone America/Chicago \
-  --target northstar-iran-daily \
-  --message 'Run the Iran War daily desk for today (SOP).'
-emux schedule run <id>     # fire now
+# honor EMUX_PRODUCT so you hit the right schedule file
+EMUX_PRODUCT=amux emux schedule list
+EMUX_PRODUCT=directrux emux schedule list
+emux schedule add --cron '0 7 * * 1-5' --timezone America/Chicago \
+  --title 'Desk job' --target some-seat --message '…'
+emux schedule run <id>
 emux schedule rm <id>
 
-# HTTP (same Host/Origin guards as other POSTs)
-GET  /api/schedule
-POST /api/schedule        {cron, target, message, timezone?, id?}
-POST /api/schedule/run    {id}
-POST /api/schedule/delete {id}
+# HTTP
+GET  /api/schedule                 # jobs (+ next_run_at)
+GET  /api/schedule?from=&to=       # + calendar events
+POST /api/schedule | /update | /run | /delete
 ```
 
-v1 is **message inject only** (like typing into the seat). It does not spawn
-sessions. Missed fires older than 15 minutes are skipped (laptop sleep), not
-backfilled. Requires `emux web` / `amux web` running (launchd KeepAlive).
+v1 is **message inject only** (does not spawn seats). Missed fires older than
+15 minutes are skipped (laptop sleep). Requires that product's `emux web`
+KeepAlive.
 
 ### Security
 
