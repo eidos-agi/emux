@@ -2947,47 +2947,75 @@ function shown(){
   return grid.filter(s=>baseMatch(s)||hot.has(comp[s.name]));
 }
 
-// ---- Company themes (runtime recolor). Product skin (__SKIN_ID__) sets the
-// DEFAULT when no company filter is active — gmux must NOT fall back to Eidos
-// amber/brown, which is what made go.greenmarkwaste.com/gmux/room look brown.
+// ---- Brand + light/dark mode ----
+// Bug we hit: the ☾/☀ button only set data-theme=light|dark, while company
+// themes painted INLINE --amber etc. Inline wins → toggle looked broken.
+// Fix: brand (eidos/greenmark/reeves) × mode (light/dark) both go through
+// applyTheme(), which sets the CSS variables for real.
 const SKIN_ID="__SKIN_ID__";
-const SKIN_DEFAULT_THEME=SKIN_ID==="gmux"?"greenmark":"eidos-light";
-const THEME_KEY="emux_theme_"+SKIN_ID;
+const BRAND_DEFAULT=SKIN_ID==="gmux"?"greenmark":"eidos";
+const MODE_KEY="emux_mode_"+SKIN_ID;
+const BRAND_KEY="emux_brand_"+SKIN_ID;
 const THEMES={
-  "eidos-light":{"--bg":"#f0ebe4","--bg-raise":"#e9e3db","--bg-card":"#e4ded6",
-    "--amber":"#8e6129","--amber-dim":"#a9853f","--amber-faint":"#d8cdba",
-    "--text":"#1e1a17","--text-dim":"#6b6159","--live":"#4a6a3a","--stale":"#ab5036",
-    "--line":"#cabfae","--user":"#8e6129","--on-accent":"#f5efe6"},
-  "eidos-dark":{"--bg":"#15110f","--bg-raise":"#1a1613","--bg-card":"#1e1a17",
-    "--amber":"#c4935a","--amber-dim":"#9a6d35","--amber-faint":"#3a2f22",
-    "--text":"#dcd5cb","--text-dim":"#8b8179","--live":"#7a8c72","--stale":"#c4694f",
-    "--line":"#332a20","--user":"#d4a870","--on-accent":"#1a1207"},
-  // Greenmark Waste — cool forest green on cool cream (not warm brown paper).
-  "greenmark":{"--bg":"#f4f7f4","--bg-raise":"#e8f0ea","--bg-card":"#ffffff",
-    "--amber":"#1b7a4e","--amber-dim":"#2d6a4f","--amber-faint":"#d4edda",
-    "--text":"#14261c","--text-dim":"#4d6356","--live":"#1a7a45","--stale":"#a67c2d",
-    "--line":"#c5d6cb","--user":"#203C31","--on-accent":"#f4f7f4"},
-  // Reeves — personal slate/navy, distinct from Eidos amber and Greenmark green.
-  "reeves":{"--bg":"#eef1f6","--bg-raise":"#e6ebf2","--bg-card":"#dee4ee",
-    "--amber":"#3b5ba5","--amber-dim":"#5a76bd","--amber-faint":"#ccd6e8",
-    "--text":"#182030","--text-dim":"#5c6678","--live":"#3d7a5a","--stale":"#b3503a",
-    "--line":"#c5cddd","--user":"#3b5ba5","--on-accent":"#f4f7fc"},
+  eidos:{
+    light:{"--bg":"#f0ebe4","--bg-raise":"#e9e3db","--bg-card":"#e4ded6",
+      "--amber":"#8e6129","--amber-dim":"#a9853f","--amber-faint":"#d8cdba",
+      "--text":"#1e1a17","--text-dim":"#6b6159","--live":"#4a6a3a","--stale":"#ab5036",
+      "--line":"#cabfae","--user":"#8e6129","--on-accent":"#f5efe6"},
+    dark:{"--bg":"#15110f","--bg-raise":"#1a1613","--bg-card":"#1e1a17",
+      "--amber":"#c4935a","--amber-dim":"#9a6d35","--amber-faint":"#3a2f22",
+      "--text":"#dcd5cb","--text-dim":"#8b8179","--live":"#7a8c72","--stale":"#c4694f",
+      "--line":"#332a20","--user":"#d4a870","--on-accent":"#1a1207"},
+  },
+  greenmark:{
+    light:{"--bg":"#f4f7f4","--bg-raise":"#e8f0ea","--bg-card":"#ffffff",
+      "--amber":"#1b7a4e","--amber-dim":"#2d6a4f","--amber-faint":"#d4edda",
+      "--text":"#14261c","--text-dim":"#4d6356","--live":"#1a7a45","--stale":"#a67c2d",
+      "--line":"#c5d6cb","--user":"#203C31","--on-accent":"#f4f7f4"},
+    dark:{"--bg":"#0c1611","--bg-raise":"#132019","--bg-card":"#1a2a21",
+      "--amber":"#5fbf8f","--amber-dim":"#3d9a6e","--amber-faint":"#1e3d30",
+      "--text":"#e8f0ea","--text-dim":"#8aa396","--live":"#5fbf8f","--stale":"#c9a227",
+      "--line":"#2a4034","--user":"#5fbf8f","--on-accent":"#0c1611"},
+  },
+  reeves:{
+    light:{"--bg":"#eef1f6","--bg-raise":"#e6ebf2","--bg-card":"#dee4ee",
+      "--amber":"#3b5ba5","--amber-dim":"#5a76bd","--amber-faint":"#ccd6e8",
+      "--text":"#182030","--text-dim":"#5c6678","--live":"#3d7a5a","--stale":"#b3503a",
+      "--line":"#c5cddd","--user":"#3b5ba5","--on-accent":"#f4f7fc"},
+    dark:{"--bg":"#0e1218","--bg-raise":"#151b24","--bg-card":"#1b2330",
+      "--amber":"#7aa2ff","--amber-dim":"#5a76bd","--amber-faint":"#243044",
+      "--text":"#e8eef8","--text-dim":"#8b96ab","--live":"#5fbf8f","--stale":"#e07050",
+      "--line":"#2a3444","--user":"#7aa2ff","--on-accent":"#0e1218"},
+  },
 };
-// company key → skin. Empty filter uses product-skin default (gmux → greenmark).
-const CO_THEME={"":SKIN_DEFAULT_THEME,"eidos":"eidos-dark","greenmark":"greenmark","reeves":"reeves"};
-function applyTheme(name){
-  const t=THEMES[name]||THEMES[SKIN_DEFAULT_THEME]||THEMES["eidos-light"];
+const CO_BRAND={"":BRAND_DEFAULT,"eidos":"eidos","greenmark":"greenmark","reeves":"reeves"};
+let uiMode="light";
+let uiBrand=BRAND_DEFAULT;
+function applyTheme(){
+  const pack=THEMES[uiBrand]||THEMES[BRAND_DEFAULT]||THEMES.eidos;
+  const t=pack[uiMode]||pack.light;
   const r=document.documentElement;
   for(const k in t) r.style.setProperty(k,t[k]);
-  r.dataset.theme=name;
-  try{localStorage.setItem(THEME_KEY,name);}catch(e){}
+  r.setAttribute("data-theme",uiMode);   // light | dark — real CSS hooks
+  r.dataset.brand=uiBrand;
+  try{localStorage.setItem(MODE_KEY,uiMode);localStorage.setItem(BRAND_KEY,uiBrand);}catch(e){}
+  const b=document.getElementById("themebtn");
+  if(b){b.textContent=uiMode==="dark"?"☀ light":"☾ dark";b.title="switch to "+(uiMode==="dark"?"light":"dark")+" mode";}
 }
-function skinForCompany(){applyTheme(CO_THEME[activeCompany]||SKIN_DEFAULT_THEME);}
-// Apply product default immediately (before first paint of company filter).
+function toggleMode(){uiMode=uiMode==="dark"?"light":"dark";applyTheme();}
+function skinForCompany(){
+  uiBrand=CO_BRAND[activeCompany]||BRAND_DEFAULT;
+  applyTheme();
+}
 (function(){
-  let start=SKIN_DEFAULT_THEME;
-  try{const s=localStorage.getItem(THEME_KEY); if(s&&THEMES[s]) start=s;}catch(e){}
-  applyTheme(start);
+  try{
+    const m=localStorage.getItem(MODE_KEY);
+    if(m==="light"||m==="dark") uiMode=m;
+    else if(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches) uiMode="dark";
+    const b=localStorage.getItem(BRAND_KEY);
+    if(b&&THEMES[b]) uiBrand=b;
+  }catch(e){}
+  applyTheme();
 })();
 
 function applyFilters(){localStorage.setItem("emux_company",activeCompany);
@@ -4193,31 +4221,19 @@ applyURL();   // restore view + filters + open session from the URL (falls back 
 poll();gridTimer=setInterval(poll,2000);
 </script>
 <script id="emux-theme">
+// Wire the topbar button to the real applyTheme() (brand × light/dark).
 (function(){
-  var KEY="__THEME_STORAGE_KEY__";
-  var def="__DEFAULT_THEME__";
-  function pref(){
-    try{var s=localStorage.getItem(KEY); if(s==="light"||s==="dark")return s;}catch(e){}
-    if(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
-    return (def==="dark")?"dark":"light";
-  }
-  function apply(t){
-    document.documentElement.setAttribute("data-theme", t);
+  function wire(){
     var b=document.getElementById("themebtn");
-    if(b){b.textContent=t==="dark"?"☀ light":"☾ dark";}
+    if(!b||b._emuxThemeWired) return;
+    b._emuxThemeWired=true;
+    b.addEventListener("click",function(e){
+      e.preventDefault();
+      if(typeof toggleMode==="function") toggleMode();
+    });
   }
-  function toggle(){
-    var cur=document.documentElement.getAttribute("data-theme")||pref();
-    var next=cur==="dark"?"light":"dark";
-    try{localStorage.setItem(KEY,next);}catch(e){}
-    apply(next);
-  }
-  apply(pref());
-  document.addEventListener("DOMContentLoaded",function(){
-    apply(pref());
-    var b=document.getElementById("themebtn");
-    if(b) b.addEventListener("click",toggle);
-  });
+  wire();
+  document.addEventListener("DOMContentLoaded",wire);
 })();
 </script>
 </body>
