@@ -16,6 +16,10 @@ stuck, and how do I jump in without `tmux attach`-ing around one at a time.*
   detected running in it (Claude Code, Codex, Gemini, Hermes…).
 - **click any box → zoom modal** — the full live screen plus an input bar to
   prompt/steer that session. Grab the wheel, then let go.
+- **session head target UX** — left: live head + gist + composer; right: tabbed
+  **Tasks / Chat / Context** drawer (Linear inventory, multi side-chats, auth
+  mode). Design mock + gap map: [target-ux-session-head.md](target-ux-session-head.md)
+  · image: [images/target-ux-sidechats-linear.png](images/target-ux-sidechats-linear.png).
 
 ## Target user
 

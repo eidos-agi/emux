@@ -1,18 +1,24 @@
-"""emux web — a persistent local daemon with monitoring + chat views.
+"""emux web — a persistent local daemon with monitoring + head views.
+
+Vocabulary (see docs/vocabulary.md):
+  Sessions run. Heads are how you attach. CHATS are past transcripts.
 
 `emux web` starts a long-running HTTP server (the daemon) that exposes the
 same registry + tmux operations as the MCP server, plus a browser UI with
 several views over the sessions emux knows about:
 
-- chat     — one session as a live screen you can type into. The pane updates
-             in place (it is the rendered terminal, not a growing transcript);
-             your keystrokes are logged as a chat above it.
+- head     — one session as a live head you can type into. The pane updates
+             in place (rendered terminal, not a growing transcript);
+             keystrokes are logged above the live screen. (legacy mode=chat)
 - grid     — every session as a live mini-pane tile, all streaming at once.
 - groups   — the same tiles sectioned by registry tag.
 - activity — change-detection strips per session: which panes moved, when.
 - flow     — agent topology: a layered hierarchy built from registry `manages`
              edges (orchestrators on top, the agents they drive below);
              sessions with no relationships sit in an "unconnected" row.
+- orphans  — live tmux sessions emux does not know about yet (per host).
+- chats    — CHATS: Claude/Grok transcripts on disk that are not live
+             (past missions). Resume into a session, then open a head.
 
 Design principles (same as the MCP server):
 - Operates on EXISTING tmux sessions only. Never spawns, never kills.
@@ -38,10 +44,11 @@ import sys
 import threading
 import time
 from collections import deque
+from datetime import UTC
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import __version__
 from . import help as _help
@@ -72,6 +79,88 @@ _SPINNER_RE = re.compile(
 _ACTIVITY: dict[str, dict[str, Any]] = {}   # session -> {norm, changed, last_change, samples}
 _CACHE: dict[str, dict[str, Any]] = {}      # session -> {content, ts, lines}
 _LOCK = threading.Lock()
+# Expensive GET responses: short TTL + single-flight so concurrent tabs/stress
+# do not stampede disk/tmux/remote probes (EID-1100 / 1107 / 1108 / 1109).
+_EXPENSIVE_CACHE: dict[str, tuple[float, Any]] = {}
+_EXPENSIVE_INFLIGHT: dict[str, threading.Event] = {}
+_EXPENSIVE_LOCK = threading.Lock()
+_EXPENSIVE_TTL = {
+    "ai_md": 8.0,
+    "ai_html": 8.0,
+    # Managed probes remote planes — keep fresh but serve stale while revalidating
+    # so concurrent room polls never block on 4× remote healthz (EID-1115).
+    "managed": 8.0,
+    "managed_stale": 45.0,
+    "chats": 4.0,
+    "sessions": 1.5,
+}
+
+
+def _expensive_get(key: str, ttl: float, factory, *, stale_ttl: float | None = None):
+    """Return cached value or run factory once; concurrent waiters share the result.
+
+    When ``stale_ttl`` is set and the cache is past ``ttl`` but within ``stale_ttl``,
+    return the stale value immediately and refresh in a background thread (EID-1115).
+    """
+    now = time.time()
+    with _EXPENSIVE_LOCK:
+        hit = _EXPENSIVE_CACHE.get(key)
+        if hit and (now - hit[0]) < ttl:
+            return hit[1]
+        # Stale-while-revalidate: serve old value, kick background refresh.
+        if (
+            stale_ttl is not None
+            and hit
+            and (now - hit[0]) < stale_ttl
+        ):
+            stale_val = hit[1]
+            ev = _EXPENSIVE_INFLIGHT.get(key)
+            if ev is None:
+                ev = threading.Event()
+                _EXPENSIVE_INFLIGHT[key] = ev
+
+                def _bg() -> None:
+                    try:
+                        value = factory()
+                        with _EXPENSIVE_LOCK:
+                            _EXPENSIVE_CACHE[key] = (time.time(), value)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    finally:
+                        with _EXPENSIVE_LOCK:
+                            _EXPENSIVE_INFLIGHT.pop(key, None)
+                        ev.set()
+
+                threading.Thread(target=_bg, name=f"emux-cache-{key[:24]}", daemon=True).start()
+            return stale_val
+        ev = _EXPENSIVE_INFLIGHT.get(key)
+        owner = False
+        if ev is None:
+            ev = threading.Event()
+            _EXPENSIVE_INFLIGHT[key] = ev
+            owner = True
+    if not owner:
+        # Wait briefly for owner; on timeout prefer stale cache then factory.
+        if not ev.wait(timeout=min(max(ttl, 2.0), 4.0)):
+            with _EXPENSIVE_LOCK:
+                hit = _EXPENSIVE_CACHE.get(key)
+                if hit:
+                    return hit[1]
+            return factory()
+        with _EXPENSIVE_LOCK:
+            hit = _EXPENSIVE_CACHE.get(key)
+            if hit:
+                return hit[1]
+        return factory()
+    try:
+        value = factory()
+        with _EXPENSIVE_LOCK:
+            _EXPENSIVE_CACHE[key] = (time.time(), value)
+        return value
+    finally:
+        with _EXPENSIVE_LOCK:
+            _EXPENSIVE_INFLIGHT.pop(key, None)
+        ev.set()
 # The Gist, cached server-side by content hash so it's not recomputed while the
 # pane is unchanged; warmed proactively the moment a session stops (see
 # _capture_and_observe) so its result is ready before you open it.
@@ -104,11 +193,25 @@ def _should_warm_gist(state: str, age: float | None, norm: str | None,
 # ---------------------------------------------------------------------------
 
 def sessions_payload() -> dict[str, Any]:
-    """Merged registry + live view: registered entries first, then live unregistered."""
+    """Merged registry + live view: registered entries first, then live unregistered.
+
+    Live discovery walks every readable local tmux socket (see server._live_sessions).
+    Returns `scope` describing what was scanned so UIs do not overclaim "all work".
+    """
     if _server._resolve_tmux() is None:
-        return {"ok": False, "error": "tmux_not_installed", "sessions": []}
+        return {
+            "ok": False,
+            "error": "tmux_not_installed",
+            "sessions": [],
+            "scope": {
+                "claim": "tmux not installed — no scan",
+                "sockets": [],
+            },
+        }
     live = _server._live_sessions()
+    scan = _server.tmux_scan_scope()
     registry = _server._load_registry()
+    # Prefer matching live rows by name; keep socket metadata when present.
     live_by_name = {s["name"]: s for s in live}
     # a registered session may live on another machine — probe each distinct
     # remote host once so it shows LIVE, not "gone".
@@ -121,11 +224,12 @@ def sessions_payload() -> dict[str, Any]:
     for name, entry in sorted(registry.items()):
         target = entry.get("session")
         host = entry.get("host")
+        live_row = live_by_name.get(target) if not host else None
         if host:
             is_live = target in remote_live.get(host, set())
         else:
             is_live = target in live_by_name
-        cwd = live_by_name.get(target, {}).get("cwd") or entry.get("cwd")
+        cwd = (live_row or {}).get("cwd") or entry.get("cwd")
         sessions.append({
             "name": name,
             "session": target,
@@ -135,9 +239,12 @@ def sessions_payload() -> dict[str, Any]:
             "manages": entry.get("manages") or [],
             "registered": True,
             "live": is_live,
-            "attached": live_by_name.get(target, {}).get("attached", False),
-            "created_unix": live_by_name.get(target, {}).get("created_unix"),
+            "state": "live" if is_live else "stale",
+            "attached": (live_row or {}).get("attached", False),
+            "created_unix": (live_row or {}).get("created_unix"),
             "cwd": cwd,
+            "socket": (live_row or {}).get("socket") or "default",
+            "socket_path": (live_row or {}).get("socket_path"),
             # explicit override (remote worker / manager) wins over cwd-derivation
             "company": _company_by_key(entry.get("company")) or _detect_company(cwd),
             "_co_explicit": bool(entry.get("company")),
@@ -154,11 +261,34 @@ def sessions_payload() -> dict[str, Any]:
             "manages": [],
             "registered": False,
             "live": True,
+            "state": "live",
             "attached": s.get("attached", False),
             "created_unix": s.get("created_unix"),
             "cwd": s.get("cwd"),
+            "socket": s.get("socket") or "default",
+            "socket_path": s.get("socket_path"),
             "company": _detect_company(s.get("cwd")),
         })
+    # Socket we could not read → synthetic "unknown" row (not silent absence).
+    for sock in scan:
+        if sock.get("status") == "unknown":
+            label = sock.get("socket") or "?"
+            sessions.append({
+                "name": f"socket:{label}",
+                "session": f"socket:{label}",
+                "description": f"tmux socket not readable: {sock.get('error') or sock.get('path') or label}",
+                "tags": ["scan", "unknown"],
+                "manages": [],
+                "registered": False,
+                "live": False,
+                "state": "unknown",
+                "attached": False,
+                "created_unix": None,
+                "cwd": sock.get("dir") or sock.get("path"),
+                "socket": label,
+                "socket_path": sock.get("path"),
+                "company": {},
+            })
     # A manager belongs to the company of what it SUPERVISES, not where its
     # process runs. So if it manages workers that agree on one company, adopt it
     # — overriding a cwd-derived guess, but never an explicit override.
@@ -175,7 +305,28 @@ def sessions_payload() -> dict[str, Any]:
             s["company"] = next(iter(managed_cos.values()))
     for s in sessions:
         s.pop("_co_explicit", None)
-    return {"ok": True, "sessions": sessions}
+    import getpass
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = str(os.getuid()) if hasattr(os, "getuid") else "?"
+    ok_socks = [s for s in scan if s.get("status") == "ok"]
+    unknown_socks = [s for s in scan if s.get("status") == "unknown"]
+    claim = (
+        f"tmux sessions on {len(ok_socks)} readable socket(s) for user {user} "
+        f"— not all host processes; not other users' servers"
+    )
+    if unknown_socks:
+        claim += f"; {len(unknown_socks)} socket(s) unknown/unreadable"
+    return {
+        "ok": True,
+        "sessions": sessions,
+        "scope": {
+            "claim": claim,
+            "user": user,
+            "sockets": scan,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -215,20 +366,62 @@ def _session_host(session: str) -> str | None:
 
 
 def capture_payload(session: str, lines: int = 300,
-                    host: str | None = None) -> dict[str, Any]:
+                    host: str | None = None,
+                    socket: str | None = None) -> dict[str, Any]:
     """Capture the active pane of `session` (raw tmux session name), local or —
     when `host` is set — over ssh. Always live; the chat/modal want fresh, deep
-    scrollback for one session, which is cheap."""
+    scrollback for one session, which is cheap.
+
+    `socket` is an optional absolute tmux server socket path when the session
+    lives off the default server (`tmux -S`).
+
+    Also returns ``history_size`` / ``pane_height`` so the UI knows whether
+    tmux scrollback exists (shells) or the app owns the alt-screen (Claude).
+    """
     if host is None and _server._resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
+    lines = max(20, min(int(lines or 300), 8000))
+    # Prefer joined wrapped lines (-J) so long agent output doesn't hard-clip mid-row.
     code, out, err = _server._run_tmux(
-        ["capture-pane", "-t", session, "-p", "-S", f"-{lines}"],
-        host=host, timeout=20)
+        ["capture-pane", "-t", session, "-p", "-J", "-S", f"-{lines}"],
+        host=host, timeout=20, socket=socket)
+    if code != 0:
+        # older tmux without -J
+        code, out, err = _server._run_tmux(
+            ["capture-pane", "-t", session, "-p", "-S", f"-{lines}"],
+            host=host, timeout=20, socket=socket)
     if code != 0:
         return {"ok": False, "error": "tmux_capture_failed", "stderr": err}
-    return {"ok": True, "session": session, "host": host, "content": out,
-            "options": _parse_options(out),      # clickable menu bubbles, if a menu is up
-            "thinking": _thinking(out)}          # is it generating, and for how long
+    hist_size, pane_h, hist_lim = 0, 0, 0
+    try:
+        c2, meta, _e2 = _server._run_tmux(
+            ["display-message", "-p", "-t", session,
+             "#{history_size} #{pane_height} #{history_limit}"],
+            host=host, timeout=10, socket=socket,
+        )
+        if c2 == 0 and meta.strip():
+            parts = meta.strip().split()
+            if len(parts) >= 1:
+                hist_size = int(parts[0])
+            if len(parts) >= 2:
+                pane_h = int(parts[1])
+            if len(parts) >= 3:
+                hist_lim = int(parts[2])
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "ok": True,
+        "session": session,
+        "host": host,
+        "content": out,
+        "options": _parse_options(out),
+        "thinking": _thinking(out),
+        "history_size": hist_size,
+        "pane_height": pane_h,
+        "history_limit": hist_lim,
+        # Claude/Codex full-screen TUIs: history_size stays 0 — scroll must go to the app.
+        "scroll_mode": "tmux" if hist_size > 0 else "app",
+    }
 
 
 _THINK_TIME_RE = re.compile(r"(\d+m\s?\d+s|\d+m|\d+s)")
@@ -259,7 +452,7 @@ _COMPANY_TABLE = [
     # Lives under repos-personal/, so it must be listed BEFORE `personal` (and `aic`,
     # for repos-aic/reeves-view) so the "reeves" match wins over the generic root.
     ("reeves", "Reeves", "#8ea0ff", ("reeves",), ("reeves",)),
-    ("aic", "AIC", "#c4a3ff", ("repos-aic", "repos-aic-holdings"), ("aic-",)),
+    ("aic", "AIC", "#143ca2", ("repos-aic", "repos-aic-holdings"), ("aic-",)),
     ("jetta", "Jetta", "#ffb27d", ("repos-jetta",), ("jetta",)),
     ("momentito", "Momentito", "#ff9ecf", ("repos-momentito",), ("momentito",)),
     ("rhea", "Rhea Impact", "#9ae6e6", ("repos-rheaimpact",), ("rheaimpact", "rhea-impact")),
@@ -534,19 +727,68 @@ def _extract_json(text: str) -> dict[str, Any]:
         return {"_error": "unparseable JSON", "raw": m.group(0)[:300]}
 
 
+def _agent_path_prefix() -> str:
+    """Dirs launchd usually omits — prepend so which/spawn can find claude/grok."""
+    home = Path.home()
+    return os.pathsep.join(
+        [
+            str(home / ".local" / "bin"),
+            str(home / "bin"),
+            str(home / ".grok" / "bin"),
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+        ]
+    )
+
+
+def _resolve_cli(name: str) -> str | None:
+    """Absolute path to a CLI (claude/grok). launchd PATH is often /usr/bin:/bin only."""
+    import shutil
+
+    env_key = f"EMUX_{name.upper()}_BIN"
+    override = (os.environ.get(env_key) or "").strip()
+    if override and Path(override).is_file():
+        return override
+    # Prefer an augmented PATH over bare which() under launchd.
+    search_path = _agent_path_prefix() + os.pathsep + (os.environ.get("PATH") or "")
+    found = shutil.which(name, path=search_path)
+    if found:
+        return found
+    for cand in (
+        Path.home() / ".local" / "bin" / name,
+        Path.home() / "bin" / name,
+        Path("/opt/homebrew/bin") / name,
+        Path("/usr/local/bin") / name,
+    ):
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
+
+
+def _ensure_agent_path_env() -> None:
+    """Mutate process PATH once so gist/spawn children see claude (launchd-safe)."""
+    prefix = _agent_path_prefix()
+    cur = os.environ.get("PATH") or ""
+    if prefix.split(os.pathsep)[0] in cur.split(os.pathsep):
+        return
+    os.environ["PATH"] = prefix + os.pathsep + cur if cur else prefix
+
+
 def _claude_json(prompt: str, timeout: int = 90) -> dict[str, Any]:
     """One fixed-cost `claude -p` call that must answer with a JSON object.
     Never the API — the CLI only."""
-    import shutil
     import subprocess
-    claude = shutil.which("claude")
+
+    _ensure_agent_path_env()
+    claude = _resolve_cli("claude")
     if claude is None:
-        return {"_error": "claude CLI not on PATH"}
+        return {"_error": "claude CLI not on PATH (checked ~/.local/bin, brew, EMUX_CLAUDE_BIN)"}
     try:
         proc = subprocess.run(
             [claude, "-p", prompt, "--model",
              os.environ.get("EMUX_NAV_MODEL", "claude-haiku-4-5-20251001")],
             capture_output=True, text=True, timeout=timeout,
+            env={**os.environ, "PATH": os.environ.get("PATH", "")},
         )
     except (subprocess.TimeoutExpired, OSError) as e:
         return {"_error": f"claude -p failed: {e}"}
@@ -959,6 +1201,42 @@ def _compute_gist(pane: str) -> dict[str, Any]:
     return {"ok": True, "digest": (r.get("digest") or "").strip(), "suggestions": sugg}
 
 
+def _target_ux_score() -> dict[str, Any]:
+    """How close the shipped session-head is to docs/target-ux-session-head.md.
+
+    Server-side checklist (features compiled into this binary). The room UI
+    also runs a live DOM score in the drawer UX tab — both should track.
+    """
+    checks = [
+        {"id": "right_rail", "pts": 12, "ok": True, "label": "Right work drawer (Tasks/Chat/Context)"},
+        {"id": "tab_tasks", "pts": 10, "ok": True, "label": "Tasks tab"},
+        {"id": "tab_chat", "pts": 10, "ok": True, "label": "Chat tab (docked multi side-chats)"},
+        {"id": "tab_context", "pts": 10, "ok": True, "label": "Context tab"},
+        {"id": "linear_list", "pts": 10, "ok": True, "label": "Linear task inventory from chat text"},
+        {"id": "multi_sidechat", "pts": 10, "ok": True, "label": "Multi side-chat model"},
+        {"id": "pursue_bubble", "pts": 8, "ok": True, "label": "💬 pursue on TEAM-123 keys"},
+        {"id": "issue_header", "pts": 10, "ok": True, "label": "Active Linear issue in session header"},
+        {"id": "auth_mode", "pts": 6, "ok": True, "label": "Per-session authorization mode"},
+        {"id": "queue_send", "pts": 6, "ok": True, "label": "Queue vs Send Now"},
+        {"id": "status_banner", "pts": 4, "ok": True, "label": "Classifier status banner"},
+        {"id": "open_head", "pts": 4, "ok": True, "label": "Open HEAD action"},
+        # Remaining mockup items not fully done — track as not-ok for honesty:
+        {"id": "linear_titles", "pts": 5, "ok": False, "label": "Linear issue titles hydrated (API)"},
+        {"id": "running_pct", "pts": 5, "ok": False, "label": "Running % + wall-clock work duration"},
+    ]
+    earned = sum(c["pts"] for c in checks if c["ok"])
+    total = sum(c["pts"] for c in checks)
+    return {
+        "ok": True,
+        "doc": "docs/target-ux-session-head.md",
+        "version": __version__,
+        "earned": earned,
+        "total": total,
+        "pct": round(100 * earned / total) if total else 0,
+        "checks": checks,
+    }
+
+
 def _spawn_session(data: dict[str, Any]) -> dict[str, Any]:
     """Create a new session (local or remote) — and KICKSTART it.
 
@@ -997,6 +1275,234 @@ def _spawn_session(data: dict[str, Any]) -> dict[str, Any]:
         return r
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": str(e)}
+
+
+def _normalize_chat_cwd(cwd: str | None) -> str | None:
+    """Claude project dirs sometimes decode without a leading slash (Volumes/…)."""
+    if not cwd:
+        return None
+    c = cwd.strip()
+    if not c or c == "~":
+        return None
+    if c.startswith("Volumes/") or c.startswith("Users/") or c.startswith("private/"):
+        return "/" + c
+    return c
+
+
+def _resume_chat_in_fleet(data: dict[str, Any]) -> dict[str, Any]:
+    """Bring an abandoned Claude/Grok *transcript* back as a live fleet session.
+
+    CHATS rows are disk transcripts, not tmux. Resume = spawn tmux on this host
+    (where the transcript lives), launch `claude --resume <id>` or
+    `grok --resume <id>` (absolute bin via _resolve_cli / grok_control),
+    register under a chat-* name. Distinct from /api/adopt (already-running
+    tmux) and from copy-paste resume (no fleet registration).
+    """
+    import asyncio
+    import shlex
+
+    tool = (data.get("tool") or "").strip().lower()
+    sid = (data.get("session_id") or data.get("id") or "").strip()
+    if tool not in ("claude", "grok"):
+        return {"ok": False, "error": "tool_must_be_claude_or_grok"}
+    if not sid:
+        return {"ok": False, "error": "missing_session_id"}
+
+    host = (data.get("host") or "").strip()
+    if host in ("", "local"):
+        host = None
+    # Transcripts are scanned on the daemon host only (v1). Remote resume would
+    # need remote home stores — refuse rather than spawn a blank wrong-host agent.
+    if host is not None:
+        return {
+            "ok": False,
+            "error": "chat_resume_local_only",
+            "hint": "transcripts live on this host; resume spawns a local tmux session",
+        }
+
+    try:
+        from . import chats as chat_find
+    except ImportError as exc:
+        return {"ok": False, "error": f"chats_unavailable: {exc}"}
+
+    force = bool(data.get("force"))
+    if (
+        tool == "claude"
+        and not force
+        and sid.lower() in chat_find._claude_live_ids()
+    ):
+        return {
+            "ok": False,
+            "error": "already_live",
+            "hint": "CLI still holds this chat — attach/boss it, or pass force=true to re-spawn",
+            "session_id": sid,
+            "tool": tool,
+        }
+    if tool == "grok" and not force and sid in chat_find._grok_live_ids():
+        return {
+            "ok": False,
+            "error": "already_live",
+            "hint": "process still holds this chat — attach/boss it, or pass force=true",
+            "session_id": sid,
+            "tool": tool,
+        }
+
+    cwd = _normalize_chat_cwd((data.get("cwd") or "").strip() or None)
+    name = (data.get("name") or "").strip()
+    if not name:
+        name = f"chat-{tool}-{sid[:8]}"
+    # tmux session names: no dots/colons
+    name = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-")[:48] or f"chat-{tool}"
+
+    title = (data.get("title") or sid)[:100]
+    tags = ["chat-resume", tool, "abandoned"]
+    if data.get("greenmark") or (cwd and re.search(r"greenmark|gmw|cerebro|gms", cwd, re.I)):
+        tags.append("greenmark")
+    # Embed Grok/Claude transcript id so headless/ACP steer can find it later
+    tags.append(f"gsid:{sid}" if tool == "grok" else f"csid:{sid}")
+    desc = f"resumed {tool} transcript · {title}"
+
+    _ensure_agent_path_env()
+    # Absolute binary + exec: launchd/tmux often lack ~/.local/bin; bare `claude`
+    # then fails and keys dump into zsh (looks "stuck" with a shell prompt).
+    if tool == "claude":
+        bin_path = _resolve_cli("claude")
+        if not bin_path:
+            return {
+                "ok": False,
+                "error": "claude_not_found",
+                "hint": "install claude or set EMUX_CLAUDE_BIN to the absolute path",
+            }
+        command = f"exec {shlex.quote(bin_path)} --resume {shlex.quote(sid)}"
+    else:
+        # Prefer grok_control: absolute bin + documented `grok --resume <id>`.
+        try:
+            from . import grok_control as _gc
+        except ImportError:
+            _gc = None
+        bin_path = (
+            (_gc.resolve_grok_bin() if _gc is not None else None)
+            or _resolve_cli("grok")
+        )
+        if not bin_path:
+            return {
+                "ok": False,
+                "error": "grok_not_found",
+                "hint": "install grok or set EMUX_GROK_BIN to the absolute path",
+            }
+        if _gc is not None:
+            command = _gc.resume_shell_command(
+                sid, bin_path=bin_path, cwd=None, use_exec=True
+            )
+        else:
+            command = f"exec {shlex.quote(bin_path)} --resume {shlex.quote(sid)}"
+
+    try:
+        r = asyncio.run(
+            _server.tmux_spawn(
+                name=name,
+                command=command,
+                host=None,
+                cwd=cwd,
+                gui=bool(data.get("gui", False)),
+                description=desc,
+                tags=tags,
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e), "tool": tool, "session_id": sid}
+
+    if not isinstance(r, dict):
+        return {"ok": False, "error": "spawn_failed", "tool": tool, "session_id": sid}
+    if not r.get("ok", True):
+        return {**r, "tool": tool, "session_id": sid, "fleet_name": name}
+
+    session = str(r.get("session") or name)
+
+    # Wait until the pane is actually the agent (not a leftover zsh prompt).
+    agent_up = _wait_pane_command(session, want=("claude", "node", "grok"), timeout=12.0)
+    if not agent_up:
+        # One retry: clear line and re-exec absolute binary
+        send_payload(session, "C-c", literal=False, enter=False, host=None)
+        time.sleep(0.3)
+        send_payload(session, command, literal=True, enter=True, host=None)
+        agent_up = _wait_pane_command(session, want=("claude", "node", "grok"), timeout=10.0)
+
+    # Durable memory: never re-discover this mission as "new abandoned" work
+    try:
+        from . import chats_store
+
+        store = chats_store.open_store()
+        try:
+            store.mark_resumed(tool, sid, name, notes=f"fleet:{session}")
+        finally:
+            store.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+    out = {
+        "ok": True,
+        "name": name,
+        "session": session,
+        "tool": tool,
+        "session_id": sid,
+        "command": command,
+        "bin": bin_path,
+        "cwd": cwd,
+        "tags": tags,
+        "description": desc,
+        "agent_up": agent_up,
+        **{k: v for k, v in r.items() if k not in ("ok", "name", "session")},
+    }
+    if not agent_up:
+        out["partial"] = True
+        out["warning"] = (
+            "spawned but pane not yet running agent binary — "
+            "wait a few seconds or attach; do not send prompts into a bare shell"
+        )
+    return out
+
+
+def _wait_pane_command(
+    session: str,
+    want: tuple[str, ...],
+    timeout: float = 10.0,
+    host: str | None = None,
+) -> bool:
+    """True if pane looks like an agent (not bare shell) within timeout.
+
+    Claude Code sometimes reports pane_current_command as a version string
+    (e.g. 2.1.218) rather than 'claude' — also accept capture containing
+    'Claude Code'.
+    """
+    deadline = time.time() + timeout
+    want_l = {w.lower() for w in want}
+    shells = {"zsh", "bash", "sh", "-zsh", "-bash", "fish", ""}
+    while time.time() < deadline:
+        try:
+            code, out, _err = _server._run_tmux(
+                ["display-message", "-p", "-t", session, "#{pane_current_command}"],
+                host=host,
+            )
+            cmd = (out or "").strip().lower()
+            if code == 0 and any(w in cmd for w in want_l):
+                return True
+            # non-shell process name (versioned claude binary, node, …)
+            if code == 0 and cmd and cmd not in shells and not cmd.startswith("-"):
+                # confirm with a short capture when command name is odd
+                c2, pane, _e2 = _server._run_tmux(
+                    ["capture-pane", "-p", "-t", session, "-J"],
+                    host=host,
+                )
+                blob = (pane or "")
+                if "Claude Code" in blob or "claude" in cmd or "node" in cmd:
+                    return True
+                if c2 == 0 and cmd[0].isdigit():  # e.g. 2.1.218
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.4)
+    return False
 
 
 # which tool-calls are worth showing in the live feed — the fleet's meaningful
@@ -1751,6 +2257,336 @@ def poll_once(lines: int = 14) -> None:
         pass
 
 
+def _probe_managed_planes(cfg: Any) -> dict[str, Any]:
+    """Manager glance: probe **only** product.json allowlist (fail closed if empty).
+
+    Prefer ``healthz_loopback`` when set (same-host operational truth). Public
+    OIDC/Authentik redirects (3xx / non-JSON) are **auth_gated** degraded — still
+    ok=True so workers_ok is not false for a gate, but degraded for honesty.
+    """
+    import urllib.error
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    planes = list(getattr(cfg, "managed_planes", ()) or [])
+    if not planes:
+        return {
+            "role": "manager",
+            "product": getattr(cfg, "product", None),
+            "chats_match": getattr(cfg, "chats_match", None),
+            "planes": [],
+            "workers_ok": False,
+            "probed": 0,
+            "error": "no_managed_planes",
+            "hint": "install ~/.config/<product>/product.json with managed_planes allowlist",
+            "source": getattr(cfg, "source", None),
+            "path": getattr(cfg, "path", None),
+        }
+
+    def _hit(url: str, *, timeout: float) -> dict[str, Any]:
+        """Probe one URL. Returns partial out fields: ok/degraded/version/…/error/probe_url."""
+        out: dict[str, Any] = {
+            "ok": False,
+            "degraded": True,
+            "version": None,
+            "live_sessions": None,
+            "http_status": None,
+            "error": None,
+            "probe_url": url,
+            "reason": None,
+        }
+        try:
+            # No redirect-follow: Authentik/login HTML is auth_gated, not a hang.
+            class _NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+                    return None
+
+            opener = urllib.request.build_opener(_NoRedirect)
+            req = urllib.request.Request(
+                url, headers={"User-Agent": f"emux-manager/{__version__}"}
+            )
+            with opener.open(req, timeout=timeout) as resp:
+                body = resp.read(65536).decode("utf-8", errors="replace")
+                code = getattr(resp, "status", None) or resp.getcode()
+                out["http_status"] = code
+                try:
+                    parsed = json.loads(body)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, dict) and parsed.get("ok"):
+                    out["ok"] = True
+                    out["degraded"] = False
+                    out["version"] = parsed.get("version")
+                    out["live_sessions"] = parsed.get("live_sessions")
+                    out["reason"] = "healthy"
+                elif code and 300 <= int(code) < 400:
+                    out["ok"] = True
+                    out["degraded"] = True
+                    out["error"] = f"auth_gated ({code})"
+                    out["reason"] = "auth_gated"
+                elif code and int(code) < 500:
+                    out["ok"] = True
+                    out["degraded"] = True
+                    out["error"] = f"non_json_health ({code})"
+                    out["reason"] = "non_json"
+                else:
+                    out["error"] = f"http_{code}"
+                    out["reason"] = "http_error"
+        except urllib.error.HTTPError as exc:
+            code = int(getattr(exc, "code", 0) or 0)
+            out["http_status"] = code or None
+            if 300 <= code < 400:
+                out["ok"] = True
+                out["degraded"] = True
+                out["error"] = f"auth_gated ({code})"
+                out["reason"] = "auth_gated"
+            elif code and code < 500:
+                out["ok"] = True
+                out["degraded"] = True
+                out["error"] = f"non_json_health ({code})"
+                out["reason"] = "non_json"
+            else:
+                out["error"] = f"http_{code or 'err'}"
+                out["reason"] = "http_error"
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = str(exc)[:200]
+            out["reason"] = "unreachable"
+        return out
+
+    def one(plane: Any) -> dict[str, Any]:
+        row = plane.as_dict() if hasattr(plane, "as_dict") else dict(plane)
+        loop = (row.get("healthz_loopback") or "").strip()
+        public = (row.get("healthz") or "").strip()
+        base = {
+            **row,
+            "ok": False,
+            "degraded": True,
+            "version": None,
+            "live_sessions": None,
+            "http_status": None,
+            "error": None,
+            "probe_url": None,
+            "reason": None,
+        }
+        # Prefer loopback (operational truth) then public (may be OIDC-gated).
+        candidates: list[tuple[str, float, str]] = []
+        if loop:
+            candidates.append((loop, 1.0, "loopback"))
+        if public and public != loop:
+            candidates.append((public, 1.5, "public"))
+        if not candidates:
+            base["error"] = "no_healthz_url"
+            base["reason"] = "no_url"
+            return base
+        last = base
+        for url, timeout, kind in candidates:
+            hit = _hit(url, timeout=timeout)
+            last = {**base, **hit, "probe_kind": kind}
+            # Clean JSON health wins immediately.
+            if hit.get("ok") and not hit.get("degraded"):
+                return last
+            # Loopback unreachable → try public; public auth_gated is still a result.
+            if kind == "loopback" and hit.get("reason") in ("unreachable", "http_error", "probe_timeout"):
+                continue
+            # auth_gated / non_json on public is honest degraded — stop.
+            if hit.get("ok"):
+                return last
+        return last
+
+    results: list[dict[str, Any]] = []
+    # Hard wall: never block the accept path more than ~3s total (EID-1115).
+    wall = 3.0
+    with ThreadPoolExecutor(max_workers=min(6, len(planes))) as pool:
+        futs = {pool.submit(one, p): p for p in planes}
+        try:
+            for fut in as_completed(futs, timeout=wall):
+                try:
+                    results.append(fut.result(timeout=0.05))
+                except Exception as exc:  # noqa: BLE001
+                    results.append(
+                        {"id": "?", "ok": False, "degraded": True, "error": str(exc)[:200],
+                         "reason": "probe_error"}
+                    )
+        except TimeoutError:
+            pass
+        done_ids = {r.get("id") for r in results}
+        for p in planes:
+            pid = getattr(p, "id", None) or (p.get("id") if isinstance(p, dict) else None)
+            if pid not in done_ids:
+                row: dict[str, Any]
+                as_dict_fn = getattr(p, "as_dict", None)
+                if callable(as_dict_fn):
+                    maybe = as_dict_fn()
+                    row = dict(maybe) if isinstance(maybe, dict) else {"id": pid}
+                elif isinstance(p, dict):
+                    row = dict(p)
+                else:
+                    row = {"id": pid}
+                results.append(
+                    {**row, "ok": False, "degraded": True, "error": "probe_timeout",
+                     "reason": "probe_timeout"}
+                )
+    order = {
+        (getattr(p, "id", None) or (p.get("id") if isinstance(p, dict) else None)): i
+        for i, p in enumerate(planes)
+    }
+    results.sort(key=lambda r: order.get(r.get("id"), 99))
+    # workers_ok: reachable (ok) including auth_gated; only hard-down fails the fleet.
+    workers_ok = all(r.get("ok") for r in results)
+    auth_gated = sum(1 for r in results if r.get("reason") == "auth_gated")
+    healthy = sum(1 for r in results if r.get("ok") and not r.get("degraded"))
+    mids = getattr(cfg, "managed_ids", None)
+    raw_ids = mids() if callable(mids) else mids
+    mid_list: list[Any] = []
+    if isinstance(raw_ids, (list, tuple, set, frozenset)):
+        mid_list = sorted(raw_ids)
+    elif raw_ids is not None:
+        try:
+            mid_list = sorted(list(raw_ids))  # type: ignore[arg-type]
+        except TypeError:
+            mid_list = []
+    return {
+        "role": "manager",
+        "product": getattr(cfg, "product", None),
+        "chats_match": getattr(cfg, "chats_match", None),
+        "planes": results,
+        "workers_ok": workers_ok,
+        "probed": len(results),
+        "healthy": healthy,
+        "auth_gated": auth_gated,
+        "managed_ids": mid_list,
+        "source": getattr(cfg, "source", None),
+        "path": getattr(cfg, "path", None),
+        "notes": (
+            "ok=True+degraded+reason=auth_gated means public healthz is OIDC/login "
+            "(reachable, not operational JSON). Prefer healthz_loopback for same-host truth."
+        ),
+    }
+
+
+def chats_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    """Claude Code + Grok chats — durable index first, disk scan only when stale.
+
+    Query params (parse_qs style): match, status (comma-separated), tools,
+    limit, recent_hours, q (text search), sort (priority|mtime),
+    refresh=1 to force a full disk re-index into ~/.config/*/chats.db.
+    Default match: greenmark when skin is gmux; personal when skin is reevux;
+    aic when skin is amux; directrux-only when skin is directrux (meta — NOT all);
+    all when bare emux.
+    """
+    q = q or {}
+    try:
+        from . import chats_store
+        from . import skin as _skin
+    except ImportError as exc:
+        return {"ok": False, "error": f"chats_unavailable: {exc}"}
+
+    sk = _skin.active_skin()
+    match_raw = (q.get("match") or [""])[0].strip()
+    if not match_raw:
+        # Product config (worker vs manager) owns the default — managers never "all".
+        try:
+            from . import product_config as _pc
+
+            match_raw = _pc.default_chats_match_for_skin(sk.id)
+        except Exception:
+            if sk.id == "gmux":
+                match_raw = "greenmark"
+            elif sk.id == "reevux":
+                match_raw = "personal"
+            elif sk.id == "amux":
+                match_raw = "aic"
+            elif sk.id == "directrux":
+                match_raw = "directrux"
+            else:
+                match_raw = "all"
+    status_raw = (q.get("status") or [""])[0].strip()
+    statuses = [s.strip() for s in status_raw.split(",") if s.strip()] or None
+    tools_raw = (q.get("tools") or ["claude,grok"])[0]
+    tools = [t.strip() for t in tools_raw.split(",") if t.strip()] or ["claude", "grok"]
+    q_text = (q.get("q") or [""])[0].strip()
+    sort = (q.get("sort") or ["priority"])[0].strip() or "priority"
+    if sort not in ("priority", "mtime", "age"):
+        sort = "priority"
+    refresh = (q.get("refresh") or ["0"])[0].strip().lower() in ("1", "true", "yes")
+    try:
+        limit = max(1, min(200, int((q.get("limit") or ["50"])[0])))
+    except ValueError:
+        limit = 50
+    try:
+        recent_hours = float((q.get("recent_hours") or ["24"])[0])
+    except ValueError:
+        recent_hours = 24.0
+
+    try:
+        bundle = chats_store.list_or_sync(
+            refresh=refresh,
+            tools=tools,
+            match=match_raw,
+            statuses=statuses,
+            limit=limit,
+            q=q_text or None,
+            sort=sort,
+            recent_hours=recent_hours,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+    chats = bundle["hits"]
+    # hits from store are already dicts; from legacy scan would be ChatHit
+    out_chats = []
+    for h in chats:
+        if hasattr(h, "as_dict"):
+            out_chats.append(h.as_dict())
+        else:
+            out_chats.append(h)
+
+    return {
+        "ok": True,
+        "chats": out_chats,
+        "count": bundle["returned"],
+        "matched": bundle["matched"],
+        "counts": bundle["counts"],
+        "tools_counts": bundle["tools_counts"],
+        "scan_ms": bundle["scan_ms"],
+        "match": match_raw,
+        "q": q_text,
+        "sort": sort,
+        "host": "local",
+        "source": bundle.get("source") or "store",
+        "did_sync": bool(bundle.get("did_sync")),
+        "store_path": bundle.get("store_path"),
+        "store_rows": bundle.get("store_rows"),
+        "last_full_scan": bundle.get("last_full_scan"),
+        "query_ms": bundle.get("query_ms"),
+        "index_ms": bundle.get("index_ms"),
+        "sync": bundle.get("sync"),
+        "note": (
+            "Durable chats.db index — disk is scanned only when the store is "
+            "stale or ?refresh=1. POST /api/chats/resume spawns a fleet session."
+        ),
+    }
+
+
+def chats_peek_payload(q: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    """Last user/assistant turns for one transcript (tile expand)."""
+    q = q or {}
+    try:
+        from . import chats as chat_find
+    except ImportError as exc:
+        return {"ok": False, "error": f"chats_unavailable: {exc}"}
+    tool = (q.get("tool") or [""])[0].strip()
+    sid = (q.get("session_id") or q.get("id") or [""])[0].strip()
+    try:
+        max_turns = max(1, min(20, int((q.get("turns") or ["8"])[0])))
+    except ValueError:
+        max_turns = 8
+    try:
+        return chat_find.peek_chat(tool, sid, max_turns=max_turns)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
 def grid_payload(lines: int = 14) -> dict[str, Any]:
     """Session list with a mini pane capture + activity meta per live session.
     Serves from the daemon cache when fresh; captures on miss (cold start, or
@@ -1762,9 +2598,20 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
     # EID-881: prefer the durable ledger for sessions it has receipts for (driven
     # work) — the ledger knows a task is running even when the pane looks static.
     # Read-only: only open it if a writer (the drive path) has created it.
-    from . import mgmt_ledger
+    # Soft import: greenmux may ship an emux wheel that predates mgmt_ledger;
+    # grid must still load (FORBIDDEN_HOST-looking empty status was a 500 crash).
+    try:
+        from . import mgmt_ledger as _mgmt_ledger
+    except ImportError:
+        _mgmt_ledger = None
     _lpath = os.path.join(os.path.expanduser("~"), ".config", "emux", "ledger.db")
-    _led = mgmt_ledger.Ledger(_lpath) if os.path.exists(_lpath) else None
+    _green_lpath = os.path.join(os.path.expanduser("~"), ".config", "greenmux", "ledger.db")
+    _led = None
+    if _mgmt_ledger is not None:
+        for _cand in (_lpath, _green_lpath):
+            if os.path.exists(_cand):
+                _led = _mgmt_ledger.Ledger(_cand)
+                break
     # capture every stale/missing live pane IN PARALLEL (remotes are ssh hops).
     misses = []
     for item in base["sessions"]:
@@ -1787,9 +2634,9 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
             item["state"] = (ce or {}).get("state") or "idle"
             item["summary"] = (ce or {}).get("summary") or ""
             item["state_source"] = "classifier"
-            if _led is not None:
+            if _led is not None and _mgmt_ledger is not None:
                 try:
-                    _ls = mgmt_ledger.ui_state(_led.state(item["name"]))
+                    _ls = _mgmt_ledger.ui_state(_led.state(item["name"]))
                     if _ls is not None:               # ledger only speaks for driven work
                         item["state"] = _ls
                         item["state_source"] = "ledger"
@@ -1816,6 +2663,279 @@ def grid_payload(lines: int = 14) -> dict[str, Any]:
 # send
 # ---------------------------------------------------------------------------
 
+# Web-composer image paste: browser has the laptop pasteboard; we write the file
+# on the daemon host (where Claude/Grok run) and inject the path into the pane.
+_CLIP_DIR = Path(os.environ.get("EMUX_CLIP_DIR") or "/tmp/gmux-clip")
+_CLIP_MAX_BYTES = 8 * 1024 * 1024  # 8 MiB decoded
+_CLIP_MIME = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
+
+def _clip_image_save(data: dict[str, Any]) -> dict[str, Any]:
+    """Save a base64 image from the room composer onto this host's disk.
+
+    Returns a path the remote agent can Read. Only runs when the operator pastes
+    into the web UI — not a system-wide clipboard hijack.
+    """
+    import base64
+    import re as _re
+
+    raw_b64 = (data.get("data") or data.get("image") or "").strip()
+    if not raw_b64:
+        return {"ok": False, "error": "missing_image_data"}
+    mime = (data.get("mime") or data.get("type") or "image/png").strip().lower()
+    # data:image/png;base64,....
+    if raw_b64.startswith("data:"):
+        try:
+            header, raw_b64 = raw_b64.split(",", 1)
+            if ";" in header:
+                mime = header.split(";")[0].split(":", 1)[1].strip().lower() or mime
+        except ValueError:
+            return {"ok": False, "error": "bad_data_url"}
+    ext = _CLIP_MIME.get(mime)
+    if not ext:
+        return {"ok": False, "error": f"unsupported_mime:{mime}"}
+    try:
+        blob = base64.b64decode(raw_b64, validate=False)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"bad_base64:{exc}"}
+    if not blob:
+        return {"ok": False, "error": "empty_image"}
+    if len(blob) > _CLIP_MAX_BYTES:
+        return {
+            "ok": False,
+            "error": "image_too_large",
+            "max_bytes": _CLIP_MAX_BYTES,
+            "got_bytes": len(blob),
+        }
+    # light magic-byte check
+    if ext == ".png" and not blob.startswith(b"\x89PNG"):
+        return {"ok": False, "error": "not_a_png"}
+    if ext == ".jpg" and not blob.startswith(b"\xff\xd8"):
+        return {"ok": False, "error": "not_a_jpeg"}
+
+    session = (data.get("session") or data.get("name") or "session").strip()
+    safe = _re.sub(r"[^A-Za-z0-9._-]+", "-", session)[:48] or "session"
+    _CLIP_DIR.mkdir(parents=True, exist_ok=True)
+    # best-effort dir perms for multi-user hosts
+    try:
+        os.chmod(_CLIP_DIR, 0o700)
+    except OSError:
+        pass
+    ts = int(time.time() * 1000)
+    path = _CLIP_DIR / f"{safe}-{ts}{ext}"
+    try:
+        path.write_bytes(blob)
+        os.chmod(path, 0o600)
+    except OSError as exc:
+        return {"ok": False, "error": f"write_failed:{exc}"}
+
+    # prune old clips (keep last 40 files)
+    try:
+        files = sorted(_CLIP_DIR.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for old in files[40:]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+    return {
+        "ok": True,
+        "path": str(path),
+        "mime": mime,
+        "bytes": len(blob),
+        "session": session,
+        "note": "Paste path into agent prompt or send with your message — Claude Read works on paths.",
+    }
+
+
+def _gsid_from_registry(session: str) -> tuple[str | None, str | None, list[str]]:
+    """Return (tool_hint, transcript_session_id, tags) from registry if known."""
+    try:
+        reg = _server._load_registry()
+    except Exception:  # noqa: BLE001
+        return None, None, []
+    entry = next(
+        (e for e in reg.values() if e.get("session") == session or e.get("name") == session),
+        None,
+    )
+    if not isinstance(entry, dict):
+        return None, None, []
+    tags = [str(t) for t in (entry.get("tags") or [])]
+    tool = None
+    gsid = None
+    for t in tags:
+        low = t.lower()
+        if low == "grok":
+            tool = "grok"
+        elif low == "claude":
+            tool = "claude"
+        if low.startswith("gsid:"):
+            gsid = t.split(":", 1)[1].strip()
+            tool = tool or "grok"
+        elif low.startswith("csid:"):
+            gsid = t.split(":", 1)[1].strip()
+            tool = tool or "claude"
+    return tool, gsid, tags
+
+
+def steer_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Steer a session: Grok headless/ACP when possible, else tmux send-keys (PTY).
+
+    Body: prompt|keys, session (tmux name), mode=auto|headless|acp|pty,
+    session_id (Grok/Claude transcript uuid), cwd, timeout, tool.
+
+    Modes:
+    - auto — Grok (tags/gsid) → **ACP then headless then PTY**; Claude → PTY
+    - headless — ``grok -p`` one-shot (Phase B)
+    - acp — ``grok agent stdio`` ACP prompt (Phase C); no fallback unless auto
+    - pty — tmux send-keys into live pane
+    """
+    prompt = (data.get("prompt") or data.get("keys") or data.get("text") or "").strip()
+    session = (data.get("session") or data.get("name") or "").strip()
+    if not prompt:
+        return {"ok": False, "error": "missing_prompt"}
+    if not session:
+        return {"ok": False, "error": "missing_session"}
+
+    requested = (data.get("mode") or "auto").strip().lower()
+    if requested not in ("auto", "headless", "acp", "pty"):
+        requested = "auto"
+    mode = requested
+
+    tool_hint, gsid_reg, tags = _gsid_from_registry(session)
+    tool = (data.get("tool") or tool_hint or "").strip().lower()
+    gsid = (data.get("session_id") or data.get("grok_session_id") or gsid_reg or "").strip()
+    cwd = (data.get("cwd") or "").strip() or None
+    try:
+        timeout = float(data.get("timeout") or 120)
+    except (TypeError, ValueError):
+        timeout = 120.0
+    timeout = max(10.0, min(600.0, timeout))
+
+    is_grok = tool == "grok" or bool(gsid) or "grok" in {str(t).lower() for t in tags}
+    if mode == "auto":
+        # Protocol-first for Grok: ACP → headless → PTY
+        mode = "acp" if is_grok else "pty"
+
+    fallbacks: list[str] = []
+
+    if mode == "acp":
+        try:
+            from . import acp_grok as acp
+            from . import grok_control as gc
+        except ImportError as exc:
+            if requested == "acp":
+                return {"ok": False, "error": f"acp_unavailable:{exc}", "mode": "acp"}
+            fallbacks.append(f"acp_unavailable:{exc}")
+            mode = "headless"
+        else:
+            if not gc.resolve_grok_bin() and not data.get("bin_path"):
+                if requested == "acp":
+                    return {
+                        "ok": False,
+                        "error": "grok_not_found",
+                        "mode": "acp",
+                        "hint": "set EMUX_GROK_BIN or install grok",
+                    }
+                fallbacks.append("acp_grok_not_found")
+                mode = "headless"
+            else:
+                result = acp.run_acp_prompt(
+                    prompt,
+                    session_id=gsid or None,
+                    cwd=cwd,
+                    bin_path=(data.get("bin_path") or None),
+                    model=(data.get("model") or None),
+                    timeout=timeout,
+                    always_approve=bool(data.get("always_approve", True)),
+                )
+                result["tmux_session"] = session
+                result["tool"] = "grok"
+                if result.get("ok"):
+                    if data.get("also_pty"):
+                        send_payload(
+                            session, prompt, literal=True, enter=True,
+                            host=_session_host(session),
+                        )
+                    if fallbacks:
+                        result["fallbacks_skipped"] = fallbacks
+                    return result
+                # ACP failed — cascade on auto only
+                if requested == "acp":
+                    result["tmux_session"] = session
+                    result["tool"] = "grok"
+                    return result
+                fallbacks.append(f"acp:{result.get('error') or 'failed'}")
+                mode = "headless"
+
+    if mode == "headless":
+        try:
+            from . import grok_control as gc
+        except ImportError as exc:
+            if requested == "headless":
+                return {"ok": False, "error": f"grok_control_unavailable:{exc}", "mode": "headless"}
+            fallbacks.append(f"headless_unavailable:{exc}")
+            mode = "pty"
+        else:
+            if not gc.resolve_grok_bin():
+                if requested == "headless":
+                    return {
+                        "ok": False,
+                        "error": "grok_not_found",
+                        "mode": "headless",
+                        "hint": "set EMUX_GROK_BIN or install grok",
+                    }
+                fallbacks.append("headless_grok_not_found")
+                mode = "pty"
+            else:
+                result = gc.run_headless_steer(
+                    prompt,
+                    session_id=gsid or None,
+                    continue_recent=bool(data.get("continue_recent")) and not gsid,
+                    cwd=cwd,
+                    model=(data.get("model") or None),
+                    timeout=timeout,
+                    always_approve=bool(data.get("always_approve", True)),
+                )
+                result["tmux_session"] = session
+                result["tool"] = "grok"
+                if result.get("ok"):
+                    if data.get("also_pty"):
+                        send_payload(
+                            session, prompt, literal=True, enter=True,
+                            host=_session_host(session),
+                        )
+                    if fallbacks:
+                        result["via_fallback"] = True
+                        result["fallbacks"] = fallbacks
+                    return result
+                if requested == "headless":
+                    return result
+                fallbacks.append(f"headless:{result.get('error') or 'failed'}")
+                mode = "pty"
+
+    # PTY path (Claude default, or Grok last resort)
+    host = _session_host(session)
+    r = send_payload(session, prompt, literal=True, enter=True, host=host)
+    r["mode"] = "pty"
+    r["tool"] = tool or "unknown"
+    r["tmux_session"] = session
+    if gsid:
+        r["session_id"] = gsid
+    if fallbacks:
+        r["via_fallback"] = True
+        r["fallbacks"] = fallbacks
+    return r
+
+
 def send_payload(session: str, keys: str, literal: bool = True, enter: bool = True,
                  host: str | None = None) -> dict[str, Any]:
     """Send keys to `session`, local or — when `host` is set — over ssh. literal=
@@ -1823,6 +2943,17 @@ def send_payload(session: str, keys: str, literal: bool = True, enter: bool = Tr
     those characters; literal=False interprets tmux key names (UI control chips)."""
     if host is None and _server._resolve_tmux() is None:
         return {"ok": False, "error": "tmux_not_installed"}
+    shell_warn = False
+    try:
+        code, cmd, _e = _server._run_tmux(
+            ["display-message", "-p", "-t", session, "#{pane_current_command}"],
+            host=host,
+        )
+        c = (cmd or "").strip().lower()
+        if code == 0 and c in ("zsh", "bash", "sh", "-zsh", "-bash", "fish"):
+            shell_warn = True
+    except Exception:  # noqa: BLE001
+        pass
     if literal:
         if keys:
             code, _, err = _server._run_tmux(["send-keys", "-t", session, "-l", keys], host=host)
@@ -1845,7 +2976,114 @@ def send_payload(session: str, keys: str, literal: bool = True, enter: bool = Tr
         code, _, err = _server._run_tmux(args, host=host)
         if code != 0:
             return {"ok": False, "error": "tmux_send_failed", "stderr": err}
-    return {"ok": True, "session": session, "sent": keys, "literal": literal, "enter": enter}
+    return {
+        "ok": True,
+        "session": session,
+        "sent": keys,
+        "literal": literal,
+        "enter": enter,
+        "shell_warn": shell_warn,
+    }
+
+
+def scroll_payload(
+    session: str,
+    direction: str = "up",
+    *,
+    amount: str = "page",
+    host: str | None = None,
+    mode: str | None = None,
+) -> dict[str, Any]:
+    """Scroll a live pane.
+
+    Two realities:
+
+    1. **Shell / normal buffer** (``history_size > 0``): use tmux copy-mode so
+       capture-pane shows older lines.
+    2. **Full-screen agent TUI** (Claude/Codex, ``history_size == 0``): the app
+       owns the alternate screen — copy-mode is empty. Send PageUp/PageDown
+       (or wheel keys) *into the app* so its own UI scrolls; then re-capture.
+
+    ``mode`` force: ``tmux`` | ``app`` | ``auto`` (default).
+    """
+    if host is None and _server._resolve_tmux() is None:
+        return {"ok": False, "error": "tmux_not_installed"}
+    direction = (direction or "up").strip().lower()
+    amount = (amount or "page").strip().lower()
+    if direction not in ("up", "down"):
+        return {"ok": False, "error": "bad_direction"}
+    mode_f = (mode or "auto").strip().lower()
+    hist_size = 0
+    try:
+        c0, meta, _ = _server._run_tmux(
+            ["display-message", "-p", "-t", session, "#{history_size}"],
+            host=host, timeout=10,
+        )
+        if c0 == 0 and meta.strip().isdigit():
+            hist_size = int(meta.strip())
+    except Exception:  # noqa: BLE001
+        pass
+    if mode_f == "auto":
+        mode_f = "tmux" if hist_size > 0 else "app"
+
+    if mode_f == "tmux":
+        code, _, err = _server._run_tmux(["copy-mode", "-t", session], host=host)
+        if code != 0:
+            return {"ok": False, "error": "tmux_copy_mode_failed", "stderr": err}
+        if amount in ("line", "lines", "1"):
+            action = "scroll-up" if direction == "up" else "scroll-down"
+        elif amount in ("half", "halfpage"):
+            action = "halfpage-up" if direction == "up" else "halfpage-down"
+        else:
+            action = "page-up" if direction == "up" else "page-down"
+        code, _, err = _server._run_tmux(
+            ["send-keys", "-t", session, "-X", action],
+            host=host,
+        )
+        if code != 0:
+            return {
+                "ok": False, "error": "tmux_scroll_failed",
+                "stderr": err, "action": action, "mode": "tmux",
+            }
+        return {
+            "ok": True, "session": session, "direction": direction,
+            "amount": amount, "action": action, "mode": "tmux",
+            "history_size": hist_size,
+        }
+
+    # App / alt-screen path — keystrokes the TUI should handle
+    if amount in ("line", "lines", "1"):
+        keys = "Up" if direction == "up" else "Down"
+        # Some agents want mouse wheel for line scroll
+        wheel = "WheelUp" if direction == "up" else "WheelDown"
+    elif amount in ("half", "halfpage"):
+        keys = "PageUp" if direction == "up" else "PageDown"
+        wheel = keys
+    else:
+        keys = "PageUp" if direction == "up" else "PageDown"
+        wheel = keys
+    # Prefer PageUp/Down; also poke mouse-wheel for TUIs that only listen there.
+    code, _, err = _server._run_tmux(
+        ["send-keys", "-t", session, keys], host=host,
+    )
+    if code != 0:
+        return {
+            "ok": False, "error": "app_scroll_failed", "stderr": err,
+            "keys": keys, "mode": "app", "history_size": hist_size,
+        }
+    # Best-effort second tick for mouse-only TUIs (ignore failure)
+    if wheel not in (keys,):
+        _server._run_tmux(["send-keys", "-t", session, wheel], host=host)
+    # Burst of PageUp for "page" so Claude conversation actually moves
+    if amount not in ("line", "lines", "1") and keys in ("PageUp", "PageDown"):
+        for _ in range(2):
+            _server._run_tmux(["send-keys", "-t", session, keys], host=host)
+    return {
+        "ok": True, "session": session, "direction": direction,
+        "amount": amount, "action": keys, "mode": "app",
+        "history_size": hist_size,
+        "hint": "alt-screen agent — scrolled inside the app, not tmux history",
+    }
 
 
 def _switch_plan(session: str, host: str | None = None, to: str | None = None,
@@ -1892,26 +3130,13 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>emux — control room</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230c0a07'/><rect x='3' y='3' width='10' height='10' rx='2' fill='%23ffb000'/></svg>">
+<title>__ROOM_TITLE__</title>
+<style id="skin-theme">__THEME_CSS__</style>
+<link rel="icon" href="__FAVICON__">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=VT323&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
 <style>
-:root{   /* Eidos light — the default skin; JS may swap to another via a company pill */
-  --bg:#f0ebe4;
-  --bg-raise:#e9e3db;
-  --bg-card:#e4ded6;
-  --amber:#8e6129;
-  --amber-dim:#a9853f;
-  --amber-faint:#d8cdba;
-  --text:#1e1a17;
-  --text-dim:#6b6159;
-  --live:#4a6a3a;
-  --stale:#ab5036;
-  --line:#cabfae;
-  --user:#8e6129;
-  --on-accent:#f5efe6;
-}
+/* Color tokens come from skin (light/dark). Layout only below. */
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{
@@ -1926,11 +3151,55 @@ body{
   background:var(--bg-raise);border-right:1px solid var(--line);
 }
 #brand{padding:18px 18px 10px}
-#brand h1{
-  font-family:"VT323",monospace;font-size:44px;font-weight:400;letter-spacing:2px;
-  color:var(--amber);text-shadow:0 0 18px rgba(255,176,0,.45),0 0 2px rgba(255,176,0,.9);
+#brand .brand-top{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
 }
-#brand small{color:var(--text-dim);font-size:11px;letter-spacing:3px;text-transform:uppercase}
+#brand .brand-mark{
+  display:flex;align-items:center;gap:10px;color:var(--amber);
+}
+#brand .skin-logo{flex:none;display:block}
+#brand .brand-word{
+  font-family:"VT323",monospace;font-size:40px;font-weight:400;letter-spacing:2px;
+  color:var(--amber);line-height:1;
+  text-shadow:0 0 18px color-mix(in srgb, var(--amber) 45%, transparent);
+}
+/* Manager vs worker — structural role mark (not color-alone) */
+.rolechip{
+  display:inline-block;font:700 10px/1 "IBM Plex Mono",monospace;
+  letter-spacing:1.2px;text-transform:uppercase;
+  padding:4px 8px;border-radius:999px;border:1px solid var(--amber);
+  color:var(--on-accent);background:var(--amber);vertical-align:middle;
+}
+.rolechip.worker{
+  background:transparent;color:var(--text-dim);border-color:var(--line);font-weight:600;
+}
+#brand small,#brand #brandtag{
+  display:block;margin-top:6px;color:var(--text-dim);font-size:11px;
+  letter-spacing:.5px;text-transform:none;line-height:1.35;
+}
+/* Manager allowlist — primary surface for manager products */
+#managed{margin-top:10px;display:flex;flex-direction:column;gap:6px}
+#managed[hidden]{display:none!important}
+#managed .mhd{
+  font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-dim);
+  margin:2px 0 0;
+}
+.mplane{
+  border:1px solid var(--line);border-left:3px solid var(--amber);
+  background:var(--bg-card);padding:8px 10px;border-radius:4px;
+  display:grid;grid-template-columns:1fr auto;gap:2px 8px;align-items:center;
+}
+.mplane .mid{font-weight:700;color:var(--amber);font-size:12px;letter-spacing:.3px}
+.mplane .mlane{font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.8px}
+.mplane .mstat{font-size:10px;grid-column:1/-1;color:var(--text-dim)}
+.mplane .mstat.up{color:var(--live)}
+.mplane .mstat.down{color:var(--stale)}
+.mplane .mstat.deg{color:var(--amber)}
+.mplane a.mopen{
+  grid-column:1/-1;font-size:10px;color:var(--amber);text-decoration:none;
+  border-top:1px dashed var(--line);padding-top:5px;margin-top:2px;
+}
+.mplane a.mopen:hover{text-decoration:underline}
 #tagbar{display:flex;flex-wrap:wrap;gap:4px;padding:4px 8px 0;max-height:26vh;overflow-y:auto}  /* EID-880: cap tag noise so the session list isn't buried */
 #tagbar:empty{display:none}
 .tagchip{font-size:10px;letter-spacing:.5px;padding:2px 7px;border:1px solid var(--line);
@@ -1956,7 +3225,7 @@ body{
   transition:border-color .15s, transform .15s;
 }
 .card:hover{border-color:var(--amber-dim);transform:translateX(2px)}
-.card.active{border-left-color:var(--amber);box-shadow:0 0 14px rgba(255,176,0,.12) inset}
+.card.active{border-left-color:var(--amber);box-shadow:0 0 14px color-mix(in srgb, var(--amber) 12%, transparent) inset}
 .card .nm{color:var(--amber);font-weight:600}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:1px}
 .dot.live{background:var(--live);box-shadow:0 0 6px var(--live)}
@@ -1978,7 +3247,7 @@ body{
   font-size:18px;cursor:pointer;line-height:1;padding:0 4px}
 #feedclose:hover{color:var(--amber)}
 #feedlist{flex:1;overflow-y:auto;padding:6px 0}
-.fev{display:flex;gap:8px;padding:5px 12px;border-bottom:1px solid rgba(255,176,0,.05);font-size:11px;align-items:baseline}
+.fev{display:flex;gap:8px;padding:5px 12px;border-bottom:1px solid color-mix(in srgb, var(--amber) 5%, transparent);font-size:11px;align-items:baseline}
 .fev .fage{color:var(--text-dim);font-size:9px;white-space:nowrap;min-width:26px}
 .fev .ftag{font-weight:700;white-space:nowrap}
 .fev .fsess{color:var(--amber-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:90px}
@@ -1988,7 +3257,7 @@ body{
 .fev.k-PROGRESS .ftag{color:var(--user)}
 .fev.k-op .ftag{color:var(--amber-dim)}
 .fev.fresh{animation:fevin .5s ease}
-@keyframes fevin{from{background:rgba(255,176,0,.18)}to{background:transparent}}
+@keyframes fevin{from{background:color-mix(in srgb, var(--amber) 18%, transparent)}to{background:transparent}}
 #topbar{
   flex:none;display:flex;align-items:center;gap:14px;flex-wrap:wrap;
   padding:10px 22px;border-bottom:1px solid var(--line);background:var(--bg-raise);
@@ -2010,7 +3279,7 @@ body{
   display:flex;flex-direction:column;transition:border-color .2s, box-shadow .4s;
 }
 .tile:hover{border-color:var(--amber-dim)}
-.tile.hot{border-color:var(--amber);box-shadow:0 0 16px rgba(255,176,0,.25)}
+.tile.hot{border-color:var(--amber);box-shadow:0 0 16px color-mix(in srgb, var(--amber) 25%, transparent)}
 .tile.dead{opacity:.45}
 /* WAITING ON YOU: marching ants around the edge + a slow breathing orb glow, so a
    session that needs your decision is impossible to miss on a wall of tiles. */
@@ -2028,7 +3297,7 @@ body{
   background-repeat:repeat-x, repeat-x, repeat-y, repeat-y;
   animation:ants .55s infinite linear}
 @keyframes ants{to{background-position:14px 0, -14px 100%, 0 -14px, 100% 14px}}
-@keyframes orb{0%,100%{box-shadow:0 0 6px rgba(255,176,0,.35)}50%{box-shadow:0 0 22px 3px rgba(255,176,0,.6)}}
+@keyframes orb{0%,100%{box-shadow:0 0 6px color-mix(in srgb, var(--amber) 35%, transparent)}50%{box-shadow:0 0 22px 3px color-mix(in srgb, var(--amber) 60%, transparent)}}
 .card.needy{border-left-color:var(--amber)}
 /* LOUD needs-you: a red ring + glow + a pulsing corner badge — red reads as
    "attention" against the amber theme, which amber-on-amber ants did not. */
@@ -2047,13 +3316,19 @@ body{
   font-size:9.5px;font-weight:800;letter-spacing:.5px;padding:3px 7px;border-radius:5px;
   box-shadow:0 1px 5px rgba(0,0,0,.35)}
 .card.costcap{border-left:4px solid #d99a00 !important;background:rgba(217,154,0,.07)}
-#costbanner{display:none;position:fixed;top:0;left:0;right:0;z-index:119;cursor:pointer;
+/* z-index 50: must sit *under* topbar controls and under #newmodal (EID-1110 dogfood).
+   When visible, shift chrome down so the banner never intercepts FEED/NEW/SETTINGS clicks. */
+#costbanner{display:none;position:fixed;top:0;left:0;right:0;z-index:50;cursor:pointer;
   background:#a06800;color:#fff;text-align:center;padding:9px 12px;font-weight:600;
   box-shadow:0 2px 14px rgba(160,104,0,.5)}
 #costbanner u{text-underline-offset:3px}
 #modalswitch.hot{border-color:#d99a00;color:#d99a00;font-weight:700}
 #modalswitch.armed{background:#a06800;color:#fff;border-color:#a06800;font-weight:700}
 body.costalert #costbanner{display:block;animation:costbannerpulse 1.4s ease-in-out infinite}
+body.costalert #topbar,
+body.costalert #side,
+body.costalert #feed,
+body.costalert #main{padding-top:40px;box-sizing:border-box}
 @keyframes costbannerpulse{0%,100%{background:#a06800}50%{background:#c48400}}
 .needbadge{position:absolute;top:7px;right:7px;z-index:5;background:#c0392b;color:#fff;
   font-size:9.5px;font-weight:800;letter-spacing:.6px;padding:3px 7px;border-radius:5px;
@@ -2087,7 +3362,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .actrow .nm{color:var(--amber);font-weight:600;width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:none}
 .cells{display:flex;gap:2px;flex:1;min-width:0}
 .cell{width:9px;height:18px;background:var(--bg-card);flex:none}
-.cell.on{background:var(--amber);box-shadow:0 0 5px rgba(255,176,0,.6)}
+.cell.on{background:var(--amber);box-shadow:0 0 5px color-mix(in srgb, var(--amber) 60%, transparent)}
 .cell.recent{background:var(--user)}
 .actrow .age{font-size:11px;color:var(--text-dim);width:120px;text-align:right;flex:none;letter-spacing:1px}
 /* flow view — live mini-pane boxes over an SVG edge layer */
@@ -2099,7 +3374,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
   transition:border-color .2s, box-shadow .4s;
 }
 .fbox:hover{border-color:var(--amber-dim)}
-.fbox.hot{border-color:var(--amber);box-shadow:0 0 16px rgba(255,176,0,.25)}
+.fbox.hot{border-color:var(--amber);box-shadow:0 0 16px color-mix(in srgb, var(--amber) 25%, transparent)}
 .fbox.dead{opacity:.45}
 .fbox .ftitle{display:flex;align-items:center;gap:6px;padding:5px 9px;background:var(--bg-card);border-bottom:1px solid var(--line)}
 .fbox .ftitle .nm{color:var(--amber);font-weight:600;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -2130,7 +3405,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
   width:14px;height:14px;margin-right:6px;border-radius:50%;
   background:var(--amber);color:var(--on-accent);font-weight:800;font-size:10px;
   vertical-align:middle;animation:qpulse 1.1s ease-in-out infinite}
-@keyframes qpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,176,0,.5)}50%{box-shadow:0 0 0 4px rgba(255,176,0,0)}}
+@keyframes qpulse{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb, var(--amber) 50%, transparent)}50%{box-shadow:0 0 0 4px color-mix(in srgb, var(--amber) 1%, transparent)}}
 /* the summary rail — a thin always-on "what's happening", hover for the full text */
 .rail{position:relative;font-size:9.5px;line-height:1.5;padding:2px 10px;
   background:var(--bg-raise);border-bottom:1px solid var(--line);color:var(--text-dim);
@@ -2163,13 +3438,13 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .ag-grok{color:#e8e8e8}.ag-opencode{color:#b57bff}.ag-aider{color:#f0a020}
 .ag-hermes{color:#b07de0}.ag-shell{color:#8a8a72}.ag-editor{color:#8a8a72}
 .edge{stroke:var(--amber);stroke-width:2;fill:none;stroke-dasharray:7 5;animation:flow 1.1s linear infinite;
-  filter:drop-shadow(0 0 4px rgba(255,176,0,.4))}
+  filter:drop-shadow(0 0 4px color-mix(in srgb, var(--amber) 40%, transparent))}
 @keyframes flow{to{stroke-dashoffset:-12}}
 .rowlabel{fill:var(--text-dim);font:10px "IBM Plex Mono",monospace;letter-spacing:2px;text-transform:uppercase}
 .sep{stroke:var(--line);stroke-width:1;stroke-dasharray:3 5}
 #flowhint{color:var(--text-dim);font-size:11px;font-style:italic;margin-top:6px}
 #flowhint code{color:var(--amber-dim);font-style:normal}
-#chat{flex:1;overflow-y:auto;padding:22px;display:none;flex-direction:column;gap:12px}
+#head{flex:1;overflow-y:auto;padding:22px;display:none;flex-direction:column;gap:12px}
 .bubble{max-width:88%;padding:10px 14px;border:1px solid var(--line);position:relative}
 .bubble .who{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);margin-bottom:5px}
 .bubble.user{
@@ -2187,10 +3462,10 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 }
 #screen.dimmed{opacity:.35}
 .cursorblock{display:inline-block;width:8px;height:14px;background:var(--amber);
-  vertical-align:-2px;animation:blink 1.1s steps(1) infinite;box-shadow:0 0 8px rgba(255,176,0,.8)}
+  vertical-align:-2px;animation:blink 1.1s steps(1) infinite;box-shadow:0 0 8px color-mix(in srgb, var(--amber) 80%, transparent)}
 @keyframes blink{50%{opacity:0}}
 #empty{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;color:var(--text-dim);height:100%}
-#empty .glyph{font-family:"VT323",monospace;font-size:80px;color:var(--amber-faint);text-shadow:0 0 30px rgba(255,176,0,.15)}
+#empty .glyph{font-family:"VT323",monospace;font-size:80px;color:var(--amber-faint);text-shadow:0 0 30px color-mix(in srgb, var(--amber) 15%, transparent)}
 #composer{flex:none;border-top:1px solid var(--line);background:var(--bg-raise);padding:12px 22px 16px}
 #chips{display:flex;gap:8px;margin-bottom:10px}
 .chip{
@@ -2203,12 +3478,12 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
   flex:1;background:var(--bg-card);border:1px solid var(--line);color:var(--text);
   font:14px "IBM Plex Mono",monospace;padding:11px 14px;outline:none;caret-color:var(--amber);
 }
-#input:focus{border-color:var(--amber-dim);box-shadow:0 0 12px rgba(255,176,0,.1)}
+#input:focus{border-color:var(--amber-dim);box-shadow:0 0 12px color-mix(in srgb, var(--amber) 10%, transparent)}
 #send{
   font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:0 26px;
   background:var(--amber);color:var(--on-accent);border:none;cursor:pointer;
 }
-#send:hover{box-shadow:0 0 18px rgba(255,176,0,.5)}
+#send:hover{box-shadow:0 0 18px color-mix(in srgb, var(--amber) 50%, transparent)}
 /* recency-tiered age coloring (#17) */
 .age.t-now{color:var(--amber)}
 .age.t-min{color:var(--amber-dim)}
@@ -2238,26 +3513,67 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
   position:absolute;left:50%;transform:translateX(-50%);bottom:96px;display:none;
   font-family:"VT323",monospace;font-size:16px;letter-spacing:1px;
   background:var(--amber);color:var(--on-accent);border:none;padding:4px 16px;cursor:pointer;
-  box-shadow:0 0 14px rgba(255,176,0,.5);z-index:5;
+  box-shadow:0 0 14px color-mix(in srgb, var(--amber) 50%, transparent);z-index:5;
 }
-/* zoom-in steer modal */
-#modal{position:fixed;inset:0;z-index:200;display:none;align-items:center;justify-content:center}
+/* zoom-in steer modal — fills most of the viewport (not a fixed 900×620 card) */
+#modal{position:fixed;inset:0;z-index:200;display:none;align-items:stretch;justify-content:stretch;padding:1vh 1vw;box-sizing:border-box}
 #modal.open{display:flex}
 #modalback{position:absolute;inset:0;background:rgba(6,4,2,.72);backdrop-filter:blur(2px)}
 #modalpanel{
-  position:relative;width:min(900px,86vw);height:min(620px,82vh);display:flex;flex-direction:column;
-  background:var(--bg-raise);border:1px solid var(--amber-dim);box-shadow:0 0 50px rgba(255,176,0,.18);
+  position:relative;flex:1 1 auto;width:100%;height:100%;min-height:0;min-width:0;
+  display:flex;flex-direction:column;
+  /* clip: children (esp. #modalscreen) must scroll inside, not grow the panel */
+  overflow:hidden;
+  background:var(--bg-raise);border:1px solid var(--amber-dim);
+  box-shadow:0 0 50px color-mix(in srgb, var(--amber) 18%, transparent);
   animation:zoomin .16s ease-out;
 }
-@keyframes zoomin{from{transform:scale(.92);opacity:.4}to{transform:scale(1);opacity:1}}
-#modalhead{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--line);background:var(--bg-card)}
-#modalhead .nm{font-family:"VT323",monospace;font-size:24px;color:var(--amber);letter-spacing:1px}
-#modalhead .ag{color:var(--amber-dim);font-size:12px;letter-spacing:1px}
-#modalhead .st{margin-left:auto;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim)}
-#modalclose{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:14px;cursor:pointer;padding:2px 11px;margin-left:10px}
-#modalclose:hover{color:var(--amber);border-color:var(--amber-dim)}
+@keyframes zoomin{from{transform:scale(.98);opacity:.4}to{transform:scale(1);opacity:1}}
+/* EID-1142: issue is hero; seat name is secondary identity */
+#modalhead{display:flex;align-items:center;gap:var(--ms2,8px);padding:var(--ms3,12px) var(--ms4,16px);border-bottom:1px solid var(--line);background:var(--bg-card);flex:0 0 auto;flex-wrap:wrap}
+#modalidents{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1 1 180px}
+#modalhead .nmrow{display:flex;align-items:center;gap:8px;min-width:0;order:2}
+#modalhead .nm{font-family:inherit;font-size:12px;font-weight:600;color:var(--text-dim);letter-spacing:.2px}
+#modalhead .ag{color:var(--text-dim);font-size:11px;letter-spacing:.3px;opacity:.85}
+#modalhead .issuerow{order:1;font-size:17px;line-height:1.25;color:var(--text);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:inherit;letter-spacing:.1px}
+#modalhead .issuerow a{color:var(--amber);text-decoration:none}
+#modalhead .issuerow a:hover{text-decoration:underline;text-underline-offset:2px}
+#modalhead .issuerow .issuetitle{color:var(--text);font-weight:600;margin-left:2px}
+#modalhead .issuerow .issuemeta{color:var(--text-dim);font-weight:500;font-size:12px;margin-left:4px}
+#modalhead .issuerow .linchat{margin-left:8px;vertical-align:middle}
+#modalhead .st{margin-left:auto;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim);font-variant-numeric:tabular-nums}
+#modalhead .st.live{color:var(--live)}
+#modalclose,#modalpop{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 10px;margin-left:6px}
+#modalclose:hover,#modalpop:hover{color:var(--amber);border-color:var(--amber-dim)}
+/* One status banner (judge merged in) — never double strips */
+#modalbanner{display:none;align-items:center;gap:var(--ms2,8px);padding:var(--ms2,8px) var(--ms4,16px);font-size:12.5px;line-height:1.35;
+  border-bottom:1px solid var(--line);background:color-mix(in srgb, var(--bg-raise) 88%, var(--live) 10%);color:var(--text);flex:0 0 auto}
+#modalbanner.on{display:flex}
+#modalbanner .bstate{font-weight:700;letter-spacing:.6px;text-transform:uppercase;font-size:11px;white-space:nowrap}
+#modalbanner .bconf{color:var(--text-dim);font-size:11px;white-space:nowrap;font-variant-numeric:tabular-nums}
+#modalbanner .bsum{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+#modalbanner .bbadge{font-size:9px;letter-spacing:.8px;text-transform:uppercase;border:1px solid var(--line);padding:2px 7px;border-radius:4px;color:var(--text-dim);white-space:nowrap;flex:0 0 auto}
+#modalbanner .bbadge.warn{border-color:#c45;color:#e88;background:color-mix(in srgb,#c45 12%,transparent)}
+#modaljudge{display:none!important} /* EID-1142: folded into #modalbanner */
+/* solo tab: one session fills the Chrome tab — no fleet chrome */
+body.solo-session #side,
+body.solo-session #feed,
+body.solo-session #topbar,
+body.solo-session #costbanner,
+body.solo-session #scrim,
+body.solo-session #footer{display:none!important}
+body.solo-session #main{margin:0;padding:0;width:100%;height:100vh;overflow:hidden}
+body.solo-session #views,body.solo-session #head,body.solo-session #composer,body.solo-session #jump{display:none!important}
+body.solo-session #modal{display:flex!important;padding:0}
+body.solo-session #modalback{display:none}
+body.solo-session #modalpanel{
+  width:100vw;height:100vh;max-height:100vh;border:none;box-shadow:none;border-radius:0;animation:none;
+  overflow:hidden;
+}
+body.solo-session #modalpop{display:none} /* already in a tab */
 /* --- new-session modal --- */
-#newmodal{display:none;position:fixed;inset:0;z-index:60}
+/* Above costbanner (50) and room chrome; below steer #modal (200) is fine for spawn. */
+#newmodal{display:none;position:fixed;inset:0;z-index:180}
 #newmodal.open{display:block}
 #newback{position:absolute;inset:0;background:rgba(0,0,0,.72)}
 #newpanel{position:relative;margin:6vh auto;width:min(720px,92vw);background:var(--bg-card);
@@ -2318,7 +3634,7 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .lane{font-size:10px;letter-spacing:.5px;padding:3px 10px;border:1px solid var(--line);
   color:var(--text-dim);cursor:pointer;user-select:none;border-radius:3px}
 .lane:hover{border-color:var(--amber-faint);color:var(--amber-dim)}
-.lane.on{border-color:var(--amber);color:var(--amber);background:rgba(255,176,0,.09)}
+.lane.on{border-color:var(--amber);color:var(--amber);background:color-mix(in srgb, var(--amber) 9%, transparent)}
 .lane b{font-weight:700;opacity:.7;margin-left:5px}
 .dirchoices{max-height:150px;overflow-y:auto;border:1px solid var(--line);margin-top:5px}
 .dirrow .meta{opacity:.55;margin-left:8px;font-size:10px}
@@ -2335,8 +3651,8 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 #guinote{font-size:10px;color:#ffb27d;margin-top:4px}
 #guinote:empty{display:none}
 .dirrow{padding:5px 9px;font-size:12px;color:var(--text-dim);cursor:pointer;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid rgba(255,176,0,.06)}
-.dirrow:hover{background:rgba(255,176,0,.07);color:var(--amber-dim)}
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid color-mix(in srgb, var(--amber) 6%, transparent)}
+.dirrow:hover{background:color-mix(in srgb, var(--amber) 7%, transparent);color:var(--amber-dim)}
 .dirrow.on{background:var(--amber);color:var(--on-accent);font-weight:700}
 .dirrow .ai{opacity:.75;margin-left:6px}
 /* orphans view + machine facet */
@@ -2345,6 +3661,101 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .hosttag{font-size:9px;color:var(--text-dim);border:1px solid var(--line);
   border-radius:8px;padding:1px 6px;margin-left:6px;white-space:nowrap;flex-shrink:0}
 .tile.orph header{gap:6px}
+.tile.chat{cursor:pointer}
+.tile.chat.open{border-color:var(--amber);box-shadow:0 0 14px color-mix(in srgb, var(--amber) 20%, transparent)}
+.tile.chat header{gap:6px;flex-wrap:wrap}
+.tile.chat .tool{font-size:10px;letter-spacing:1px;text-transform:uppercase;padding:1px 6px;border:1px solid var(--line);border-radius:3px;color:var(--text-dim)}
+.tile.chat .tool.claude{border-color:color-mix(in srgb, #d97757 50%, var(--line));color:#d97757}
+.tile.chat .tool.grok{border-color:color-mix(in srgb, var(--amber) 50%, var(--line));color:var(--amber)}
+.tile.chat .st-live{color:var(--ok,#3dba6e);font-size:10px;letter-spacing:1px;text-transform:uppercase}
+.tile.chat .st-recent{color:var(--amber);font-size:10px;letter-spacing:1px;text-transform:uppercase}
+.tile.chat .st-stale{color:var(--stale);font-size:10px;letter-spacing:1px;text-transform:uppercase}
+.tile.chat .st-resumed{color:var(--ok,#3dba6e);font-size:10px;letter-spacing:1px;text-transform:uppercase}
+.tile.chat .gm{font-size:9px;letter-spacing:1px;color:var(--ok,#3dba6e);border:1px solid color-mix(in srgb, var(--ok,#3dba6e) 40%, var(--line));padding:0 4px;border-radius:2px}
+.tile.chat .sum{font-size:12px;color:var(--text);padding:4px 10px 6px;line-height:1.45;max-height:3.2em;overflow:hidden}
+.tile.chat .cwd{font-size:10px;color:var(--text-dim);padding:0 10px 4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Linear issue keys → clickable (AIC-284, EID-1112, GMW-950, …) */
+a.linlink{color:var(--amber);text-decoration:none;border-bottom:1px dotted color-mix(in srgb,var(--amber) 55%,transparent);font-weight:600}
+a.linlink:hover{color:var(--amber);border-bottom-style:solid;filter:brightness(1.08)}
+.tile.chat .sum a.linlink,.tile.chat .nm a.linlink,.tile.chat .peek a.linlink{font-weight:600}
+.bubble a.linlink,.rail a.linlink,.fev a.linlink{font-weight:600}
+/* Chat bubble after a task id — pursue that Linear issue */
+.linwrap{display:inline;white-space:nowrap}
+button.linchat{
+  display:inline-flex;align-items:center;justify-content:center;
+  margin:0 1px 0 3px;padding:0 4px;min-width:1.35em;height:1.35em;
+  border:1px solid color-mix(in srgb, var(--amber) 45%, var(--line));
+  border-radius:999px;background:color-mix(in srgb, var(--amber) 12%, transparent);
+  color:var(--amber);font-size:11px;line-height:1;cursor:pointer;
+  vertical-align:middle;font-family:inherit;
+}
+button.linchat:hover{background:color-mix(in srgb, var(--amber) 28%, transparent);border-color:var(--amber)}
+button.linchat:disabled{opacity:.55;cursor:default}
+.tile.chat .meta{font-size:10px;color:var(--text-dim);padding:0 10px 8px;display:flex;gap:10px;flex-wrap:wrap}
+.tile.chat .resume{font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;padding:0 10px 8px;color:var(--amber);word-break:break-all;opacity:.85}
+.tile.chat .peek{margin:0 10px 10px;padding:8px;background:color-mix(in srgb, var(--bg) 70%, #000);border:1px solid var(--line);border-radius:4px;max-height:180px;overflow:auto;font-size:11px;line-height:1.4}
+.tile.chat .peek .turn{margin-bottom:6px}
+.tile.chat .peek .role{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim);margin-bottom:2px}
+.tile.chat .peek .role.user{color:var(--amber)}
+.tile.chat .actions{display:flex;gap:6px;padding:0 10px 10px;flex-wrap:wrap}
+.tile.chat .actions .act{font-size:10px}
+#chbar{display:flex;flex-direction:column;gap:8px;padding:10px 14px 6px;border-bottom:1px solid var(--line)}
+#chbar .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#chbar .hchip{cursor:pointer}
+#chbar .hint{font-size:11px;color:var(--text-dim);margin-left:auto}
+#chbar #chq{flex:1;min-width:140px;max-width:280px;background:var(--panel);border:1px solid var(--line);color:var(--text);padding:5px 8px;font-size:12px;border-radius:4px;font-family:inherit}
+#chbar #chq:focus{outline:none;border-color:var(--amber-dim)}
+#chbar .stat{font-size:11px;color:var(--text-dim);letter-spacing:.3px}
+#chbar .stat b{color:var(--amber);font-weight:600}
+/* ---- CALENDAR (Google-like week/month for cron message jobs) ---- */
+#calroot{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden}
+#calbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line)}
+#calbar .act{font-size:11px}
+#calbar h2{margin:0;font-size:15px;font-weight:600;letter-spacing:.3px;flex:1;min-width:140px}
+#calbody{display:flex;flex:1;min-height:0;overflow:hidden}
+#calseries{width:240px;flex:none;border-right:1px solid var(--line);overflow:auto;padding:10px 8px;background:var(--bg-raise)}
+#calseries h3{margin:0 0 8px;font-size:10px;letter-spacing:1px;color:var(--text-dim);text-transform:uppercase}
+.calser{display:flex;align-items:flex-start;gap:8px;padding:8px;border-radius:6px;cursor:pointer;font-size:12px;margin-bottom:4px}
+.calser:hover{background:var(--bg-card)}
+.calser .dot{width:10px;height:10px;border-radius:3px;flex:none;margin-top:3px}
+.calser .calser-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.calser .calser-title{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.calser .calser-when{font-size:10px;line-height:1.3;color:var(--text-dim);white-space:normal}
+.calser .calser-cron{font-size:9px;color:var(--text-dim);opacity:.55;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.calser.off{opacity:.45}
+.cal-skel{border-radius:4px;background:linear-gradient(90deg,var(--bg-card) 0%,var(--line) 50%,var(--bg-card) 100%);background-size:200% 100%;animation:calshimmer 1.1s ease-in-out infinite}
+@keyframes calshimmer{0%{background-position:100% 0}100%{background-position:-100% 0}}
+.cal-skel-ser{height:42px;margin-bottom:6px}
+.cal-skel-cell{height:14px;margin:4px 2px;opacity:.55}
+#calmain{flex:1;min-width:0;overflow:auto;padding:8px}
+#calweek{display:grid;grid-template-columns:56px repeat(7,1fr);gap:1px;background:var(--line);border:1px solid var(--line);min-height:520px}
+#calweek .hd{background:var(--bg-raise);padding:8px 4px;text-align:center;font-size:11px;font-weight:600;letter-spacing:.4px}
+#calweek .hd.today{color:var(--amber)}
+#calweek .gutter{background:var(--bg-raise);font-size:10px;color:var(--text-dim);text-align:right;padding:2px 6px;font-variant-numeric:tabular-nums}
+#calweek .cell{background:var(--bg);position:relative;min-height:64px;padding:2px}
+#calweek .cell.today{background:rgba(255,176,0,.06)}
+#calmonth{display:grid;grid-template-columns:repeat(7,1fr);gap:1px;background:var(--line);border:1px solid var(--line)}
+#calmonth .mhd{background:var(--bg-raise);padding:8px;text-align:center;font-size:11px;font-weight:600}
+#calmonth .mcell{background:var(--bg);min-height:96px;padding:4px 6px;vertical-align:top}
+#calmonth .mcell.out{opacity:.4}
+#calmonth .mcell.today{outline:1px solid var(--amber);outline-offset:-1px}
+#calmonth .mdn{font-size:11px;font-weight:700;margin-bottom:4px;color:var(--text-dim)}
+.calev{display:block;font-size:10px;line-height:1.25;padding:2px 5px;margin:0 0 2px;border-radius:3px;color:#0e0e0e;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-left:3px solid rgba(0,0,0,.25)}
+.calev:hover{filter:brightness(1.08)}
+#caldrawer{position:fixed;top:0;right:0;width:min(380px,100vw);height:100%;background:var(--bg-raise);border-left:1px solid var(--line);z-index:80;display:none;flex-direction:column;box-shadow:-8px 0 24px rgba(0,0,0,.25)}
+#caldrawer.open{display:flex}
+#caldrawer .dh{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+#caldrawer .dh b{flex:1;font-size:14px}
+#caldrawer .db{flex:1;overflow:auto;padding:14px;display:flex;flex-direction:column;gap:10px;font-size:12px}
+#caldrawer label{display:flex;flex-direction:column;gap:4px;color:var(--text-dim);font-size:10px;letter-spacing:.6px;text-transform:uppercase}
+#caldrawer input,#caldrawer textarea,#caldrawer select{background:var(--bg);border:1px solid var(--line);color:var(--text);padding:8px;border-radius:4px;font:inherit;font-size:12px;text-transform:none;letter-spacing:0}
+#caldrawer textarea{min-height:100px;resize:vertical}
+#caldrawer .df{display:flex;flex-wrap:wrap;gap:8px;padding:12px 14px;border-top:1px solid var(--line)}
+#caldrawer .df .act.danger{border-color:#c0392b;color:#c0392b}
+@media(max-width:760px){
+  #calseries{display:none}
+  #calweek{grid-template-columns:40px repeat(7,minmax(48px,1fr));min-height:400px}
+}
 .oattach{margin-left:auto;flex-shrink:0}
 .owhy{font-size:9px;color:var(--text-dim);padding:4px 10px 8px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -2363,27 +3774,153 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 #newfoot{padding:12px 16px;border-top:1px solid var(--line);display:flex;justify-content:flex-end}
 #newcreate{font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:5px 28px;
   background:var(--amber);border:none;color:var(--on-accent);cursor:pointer;font-weight:700}
-#newcreate:hover{box-shadow:0 0 18px rgba(255,176,0,.5)}
+#newcreate:hover{box-shadow:0 0 18px color-mix(in srgb, var(--amber) 50%, transparent)}
 #newcreate:disabled{opacity:.5;cursor:default;box-shadow:none}
-#modaliterm{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 11px;margin-left:10px}
+#modaliterm{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 10px;margin-left:6px}
 #modaliterm:hover{color:var(--amber);border-color:var(--amber-dim)}
 #modaliterm:disabled{opacity:.6;cursor:default}
-#modalscreen{
-  flex:1;overflow-y:auto;font:12.5px/1.45 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
-  white-space:pre-wrap;word-break:break-word;padding:14px 16px;background:var(--bg-card);
+/* Body: left head column + right Tasks/Chat/Context drawer (target UX)
+   Spacing scale (normalized): --ms1=4 --ms2=8 --ms3=12 --ms4=16 --ms5=20 */
+#modalpanel{
+  --ms1:4px;--ms2:8px;--ms3:12px;--ms4:16px;--ms5:20px;
 }
-/* live classifier strip (emux judge) */
-#modaljudge{display:none;align-items:center;gap:12px;padding:8px 16px;flex:none;
-  border-bottom:1px solid var(--line);background:var(--bg-raise);font:11px "IBM Plex Mono",monospace}
-#modaljudge.on{display:flex}
-#modaljudge .jstate{font-weight:700;letter-spacing:1px;text-transform:uppercase;font-size:12px;white-space:nowrap}
-#modaljudge .jconf{color:var(--text-dim);font-size:10px;white-space:nowrap}
-#modaljudge .jsum{color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#modaljudge .jflag{border:1px solid #7a3a1a;color:#ff9f43;padding:0 5px;font-size:10px;
-  text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
+#modalbody{
+  flex:1 1 0;min-height:160px;min-width:0;display:flex;flex-direction:row;
+  overflow:hidden;border-top:1px solid var(--line);gap:0;
+}
+#modalmain{flex:1 1 0;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden;gap:0}
+#modalshell{
+  flex:1 1 0;min-height:120px;min-width:0;position:relative;
+  overflow:hidden;background:var(--bg-card);
+}
+#modalscreen.empty-placeholder{
+  display:flex;align-items:center;justify-content:center;
+  color:var(--text-dim);font-style:italic;font-size:13px;
+  white-space:normal;text-align:center;padding:var(--ms4);
+}
+#modaldrawer{
+  flex:0 0 320px;width:320px;max-width:42vw;min-width:0;
+  display:flex;flex-direction:column;
+  border-left:1px solid var(--line);background:var(--bg-raise);
+  overflow:hidden;
+}
+#modaldrawer.collapsed{display:none}
+#drawertabs{display:flex;align-items:center;gap:2px;padding:var(--ms2) var(--ms2) 0;border-bottom:1px solid var(--line);flex:0 0 auto}
+#drawertabs .dtab{
+  background:transparent;border:none;border-bottom:2px solid transparent;
+  color:var(--text-dim);font:11px/1 inherit;letter-spacing:.6px;text-transform:uppercase;
+  padding:var(--ms2) var(--ms3);cursor:pointer;
+}
+#drawertabs .dtab.on{color:var(--amber);border-bottom-color:var(--amber);font-weight:700}
+#drawertabs .dtab .dtbadge{
+  display:inline-block;min-width:14px;padding:0 4px;margin-left:3px;border-radius:8px;
+  background:color-mix(in srgb, var(--amber) 25%, transparent);color:var(--amber);font-size:9px;font-weight:700;
+}
+#drawertabs .dtab.score{margin-left:auto;opacity:.85}
+#modaltasks-hide{background:transparent;border:1px solid var(--line);color:var(--text-dim);font-size:12px;cursor:pointer;padding:1px 7px;margin-left:4px}
+#modaltasks-hide:hover{color:var(--amber);border-color:var(--amber-dim)}
+.dpane{display:none;flex:1 1 0;min-height:0;flex-direction:column;overflow:hidden}
+.dpane.on{display:flex}
+.dsubh{display:flex;align-items:center;gap:8px;padding:8px 10px 4px;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim)}
+.dsubh .act{margin-left:auto;font-size:14px;padding:0 8px}
+#modaltasklist{flex:1 1 0;min-height:0;overflow:auto;padding:6px 10px 10px}
+#modaltasklist .mtempty{font-size:11px;color:var(--text-dim);line-height:1.45;padding:8px 4px}
+/* Task rows: key · title · pursue / Linear (EID-1142) */
+#modaltasklist .mtask{
+  display:flex;align-items:center;gap:10px;padding:9px 11px;margin-bottom:6px;
+  border:1px solid var(--line);border-radius:8px;background:var(--bg-card);
+  color:var(--text);font-size:12px;min-height:40px;
+}
+#modaltasklist .mtask:hover{border-color:var(--amber-dim);background:color-mix(in srgb, var(--amber) 8%, var(--bg-card))}
+#modaltasklist .mtask.active{border-color:var(--amber);box-shadow:inset 3px 0 0 var(--amber);background:color-mix(in srgb, var(--amber) 10%, var(--bg-card))}
+#modaltasklist .mtbody{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+#modaltasklist .mtkey{font-weight:700;color:var(--amber);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px;text-decoration:none;font-size:12.5px}
+#modaltasklist .mtkey:hover{text-decoration:underline;text-underline-offset:2px}
+#modaltasklist .mttitle{font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#modaltasklist .mtpip{width:8px;height:8px;border-radius:50%;background:var(--live);flex:0 0 auto;box-shadow:0 0 0 2px color-mix(in srgb,var(--live) 25%,transparent)}
+#modaltasklist .mtask:not(.active) .mtpip{display:none}
+#modaltasklist .mtacts{display:flex;gap:6px;margin-left:auto;align-items:center;flex:0 0 auto}
+#modaltasklist .mtchat{
+  border:1px solid var(--amber-dim);background:transparent;color:var(--amber);
+  font-size:10px;padding:3px 8px;border-radius:5px;cursor:pointer;font-family:inherit;letter-spacing:.2px;
+}
+#modaltasklist .mtchat:hover{background:color-mix(in srgb, var(--amber) 18%, transparent)}
+#modaltasklist .mtgo{color:var(--text-dim);font-size:11px;text-decoration:none;padding:2px 4px}
+#modaltasklist .mtgo:hover{color:var(--amber)}
+#drawerauth{flex:0 0 auto;padding:8px 10px 12px;border-top:1px solid var(--line)}
+#drawerauth select,#modalauth{
+  width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);
+  border-radius:4px;padding:7px 8px;font:11px/1.3 inherit;
+}
+#modalauth{width:auto;max-width:140px;flex:0 0 auto}
+#drawerchatlist{flex:0 0 auto;max-height:28%;overflow:auto;padding:0 8px 6px;border-bottom:1px solid var(--line)}
+#drawerchatlist .scthread{
+  display:flex;align-items:center;gap:6px;padding:6px 8px;margin-bottom:3px;
+  border-radius:5px;border:1px solid transparent;cursor:pointer;font-size:11px;color:var(--text);
+}
+#drawerchatlist .scthread:hover{background:var(--bg-card)}
+#drawerchatlist .scthread.on{border-color:var(--amber-dim);background:color-mix(in srgb, var(--amber) 10%, var(--bg-card))}
+#drawerchatactive{flex:1 1 0;min-height:0;overflow:hidden;display:flex;flex-direction:column}
+#drawerchatactive .tchatpanel{border:none;border-radius:0;box-shadow:none;max-height:none;width:100%;flex:1;min-height:0}
+#drawercontext,#drawerscore{flex:1 1 0;overflow:auto;padding:10px;font-size:12px;line-height:1.45;color:var(--text)}
+#drawercontext .crow{display:flex;gap:8px;padding:4px 0;border-bottom:1px solid color-mix(in srgb, var(--line) 60%, transparent)}
+#drawercontext .ck{flex:0 0 88px;color:var(--text-dim);font-size:10px;letter-spacing:.5px;text-transform:uppercase}
+#drawercontext .cv{flex:1;min-width:0;word-break:break-word;font-family:ui-monospace,Menlo,monospace;font-size:11px}
+#drawerscore .scorenum{font-family:"VT323",monospace;font-size:42px;color:var(--amber);line-height:1}
+#drawerscore .scorebar{height:8px;background:var(--line);border-radius:4px;margin:8px 0 14px;overflow:hidden}
+#drawerscore .scorebar>i{display:block;height:100%;background:var(--amber)}
+#drawerscore .scrow{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid color-mix(in srgb, var(--line) 50%, transparent);font-size:11px}
+#drawerscore .scok{color:#3dba6e;font-weight:700;width:16px}
+#drawerscore .scno{color:var(--text-dim);width:16px}
+#drawerscore .scpts{margin-left:auto;color:var(--text-dim);font-variant-numeric:tabular-nums}
+#modalrow{display:flex;gap:8px;padding:8px 12px;border-top:1px solid var(--line);background:var(--bg-card);align-items:center;flex:0 0 auto}
+#modalrow #modalinput{flex:1;min-width:0}
+#modalqueue{background:transparent;border:1px solid var(--amber-dim);color:var(--amber);padding:7px 12px;font:11px inherit;cursor:pointer;border-radius:4px;letter-spacing:.4px}
+#modalqueue:hover{background:color-mix(in srgb, var(--amber) 12%, transparent)}
+#modalsend{background:var(--amber);color:var(--on-accent);border:none;padding:7px 14px;font:12px inherit;font-weight:700;cursor:pointer;border-radius:4px;letter-spacing:.3px}
+#modalsend:hover{filter:brightness(1.06)}
+#modaltasksbtn{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:11px;cursor:pointer;padding:2px 8px;margin-left:6px;letter-spacing:.4px}
+#modaltasksbtn:hover,#modaltasksbtn.on{color:var(--amber);border-color:var(--amber-dim)}
+#modaltasksbtn .mtbadge{display:none;margin-left:4px;font-size:9px;padding:0 5px;border-radius:8px;background:var(--amber);color:var(--on-accent);font-weight:700}
+#modaltasksbtn .mtbadge.on{display:inline}
+#tchatstack{/* float only extra side chats — primary lives in Chat tab */ z-index:215}
+@media(max-width:900px){
+  #modaldrawer{flex-basis:260px;width:260px}
+}
+@media(max-width:720px){
+  #modaldrawer{position:absolute;right:0;top:0;bottom:0;z-index:20;width:min(300px,90vw);max-width:none;
+    box-shadow:-8px 0 24px rgba(0,0,0,.35)}
+  #modalbody{position:relative}
+}
+#modalscreen{
+  position:absolute;inset:0;
+  overflow-x:auto;overflow-y:scroll; /* always show vertical rail */
+  overscroll-behavior:contain;
+  -webkit-overflow-scrolling:touch;
+  touch-action:pan-x pan-y;
+  font:12.5px/1.45 "IBM Plex Mono",ui-monospace,monospace;color:var(--text);
+  white-space:pre-wrap;word-break:break-word;padding:8px 12px 36px;background:var(--bg-card);
+  outline:none;
+}
+#modalscreen:focus{box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--amber) 35%, transparent)}
+#modaljump{
+  display:none;position:absolute;left:50%;transform:translateX(-50%);
+  bottom:12px;z-index:12;padding:5px 14px;border-radius:14px;
+  background:var(--amber);color:var(--on-accent);border:none;
+  font:11px/1 "IBM Plex Mono",ui-monospace,monospace;letter-spacing:.6px;
+  cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.35);
+}
+#modaljump.on{display:block}
+#modaljump:hover{filter:brightness(1.08)}
+/* judge strip kept for DOM score but always hidden (merged into #modalbanner) */
+#modaljudge{display:none!important;align-items:center;gap:10px;padding:0;flex:0 0 auto;height:0;overflow:hidden;border:0}
 .s-running{color:#8fd88f}.s-done_idle{color:#8a8a72}.s-error{color:#ff5f56}
 .s-thrashing{color:#ff9f43}.s-stuck{color:#ffb000}.s-waiting_human{color:#38d9ff}
 .s-waiting_external{color:#7a8fd8}.s-planning{color:#d0b24a}.s-editing{color:#d0b24a}.s-dead{color:#666}
+#modalbanner .bstate.s-running{color:#8fd88f}
+#modalbanner .bstate.s-waiting_human{color:#38d9ff}
+#modalbanner .bstate.s-error,#modalbanner .bstate.s-stuck{color:#ff5f56}
+#modalbanner .bstate.s-thrashing{color:#ff9f43}
 /* thinking indicator — movement + a live timer while the agent is generating */
 #modalthink{display:none;align-items:center;gap:7px;margin-left:14px;font-size:11px;
   color:var(--live);letter-spacing:.5px}
@@ -2401,17 +3938,33 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
   background:var(--bg-card);border:1px dashed var(--amber-faint);border-radius:6px;color:var(--text-dim)}
 #modalpending .plabel{color:var(--amber-dim);font-size:9px;letter-spacing:1.5px;text-transform:uppercase;margin-right:7px}
 #modalpending .ptext{color:var(--text)}
+#modalclips{display:none;flex-wrap:wrap;gap:8px;padding:0 16px 8px;align-items:center}
+#modalclips.on{display:flex}
+#modalclips .clip{
+  display:flex;align-items:center;gap:8px;padding:4px 8px 4px 4px;
+  border:1px solid var(--line);border-radius:6px;background:var(--bg-card);
+  font-size:11px;color:var(--text-dim);max-width:100%;
+}
+#modalclips .clip img{width:40px;height:40px;object-fit:cover;border-radius:4px;background:#000}
+#modalclips .clip .cp{font-family:ui-monospace,Menlo,monospace;font-size:10px;color:var(--amber);
+  max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#modalclips .clip .rm{border:0;background:transparent;color:var(--text-dim);cursor:pointer;font-size:14px;padding:0 4px}
+#modalclips .clip .rm:hover{color:var(--stale)}
+#modalclips .cliphint{font-size:10px;color:var(--text-dim);letter-spacing:.3px}
 /* the gist — reader's-digest + suggested replies, so you know what to do */
-#modaldigest{display:none}
-#modaldigest.on{display:block;padding:11px 16px;background:var(--bg-raise);
+#modaldigest{display:none;flex:0 0 auto;max-height:22vh;overflow:hidden}
+#modaldigest.on{display:block;padding:var(--ms2,8px) var(--ms4,16px);background:var(--bg-raise);
+  max-height:18vh;overflow-y:auto; /* never starve #modalshell of height */
   border-bottom:1px solid var(--amber-faint)}
 #modaldigest .dghead{display:flex;align-items:center;font-size:10px;letter-spacing:2px;
-  text-transform:uppercase;color:var(--amber-dim);margin-bottom:5px}
+  text-transform:uppercase;color:var(--amber-dim);margin-bottom:4px;gap:8px}
+#modaldigest .dghead .dgspin{display:none;font-size:10px;color:var(--text-dim);letter-spacing:.4px;text-transform:none;font-style:italic}
+#modaldigest.loading .dghead .dgspin{display:inline}
 #dgrefresh{margin-left:auto;background:transparent;border:none;color:var(--text-dim);
-  font-size:13px;cursor:pointer}
+  font-size:13px;cursor:pointer;padding:2px 6px}
 #dgrefresh:hover{color:var(--amber)}
 #modaldigest .dgtext{font-size:13px;line-height:1.5;color:var(--text)}
-#modaldigest.loading .dgtext{color:var(--text-dim);font-style:italic}
+#modaldigest.loading .dgtext.placeholder{color:var(--text-dim);font-style:italic}
 #modaldigest .dgsugg{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
 #modaldigest .dgsugg:empty{display:none}
 .sgg{background:var(--amber);border:1.5px solid var(--amber);color:var(--on-accent);font-weight:650;
@@ -2422,8 +3975,8 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .sgg:disabled{opacity:.45;cursor:default;box-shadow:none}
 /* clickable answer bubbles — overlay the chat when the agent shows a menu */
 #modalopts{display:none}
-#modalopts.on{display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px 2px;
-  border-top:1px solid var(--amber-faint);background:var(--bg-raise)}
+#modalopts.on{display:flex;flex-wrap:wrap;gap:6px;padding:6px 10px 2px;
+  border-top:1px solid var(--amber-faint);background:var(--bg-raise);flex:0 0 auto}
 #modalopts .ohint{flex-basis:100%;font-size:10px;letter-spacing:1px;text-transform:uppercase;
   color:var(--amber-dim);margin-bottom:2px}
 .obub{background:var(--amber);border:1.5px solid var(--amber);color:var(--on-accent);font-weight:650;
@@ -2435,14 +3988,19 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .obub.sel{box-shadow:0 0 0 3px var(--bg),0 0 0 5px var(--amber)}
 .obub:disabled{opacity:.45;cursor:default;box-shadow:none}
 .obub:disabled{opacity:.5;cursor:default}
-#modalchips{display:flex;gap:8px;padding:10px 16px 0}
-#modalrow{display:flex;gap:10px;padding:10px 16px 14px}
-#modalinput{flex:1;background:var(--bg-card);border:1px solid var(--line);color:var(--text);
-  font:14px "IBM Plex Mono",monospace;padding:11px 14px;outline:none;caret-color:var(--amber)}
-#modalinput:focus{border-color:var(--amber-dim);box-shadow:0 0 12px rgba(255,176,0,.1)}
-#modalsend{font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:0 24px;
+#modalchips{display:flex;gap:var(--ms2,8px);padding:var(--ms2,8px) var(--ms3,12px) 0;flex:0 0 auto}
+#modalclips{padding:0 var(--ms3,12px) var(--ms1,4px)}
+#modalpending.on{margin:0 var(--ms3,12px) var(--ms1,4px);padding:var(--ms2,8px)}
+#modalrow{display:flex;gap:var(--ms2,8px);padding:var(--ms2,8px) var(--ms3,12px) var(--ms3,12px);flex:0 0 auto;align-items:center}
+#modalinput{flex:1;min-width:0;background:var(--bg-card);border:1px solid var(--line);color:var(--text);
+  font:14px "IBM Plex Mono",monospace;padding:var(--ms2,8px) var(--ms3,12px);outline:none;caret-color:var(--amber);border-radius:6px}
+#modalinput:focus{border-color:var(--amber-dim);box-shadow:0 0 12px color-mix(in srgb, var(--amber) 10%, transparent)}
+#modalauth{max-width:150px;border-radius:6px;padding:var(--ms2,8px)}
+#modalqueue,#modalsend{border-radius:6px;padding:var(--ms2,8px) var(--ms3,12px)}
+#modalscreen{padding:var(--ms2,8px) var(--ms3,12px) var(--ms5,20px)}
+#modalsend{font-family:"VT323",monospace;font-size:20px;letter-spacing:2px;padding:0 20px;
   background:var(--amber);color:var(--on-accent);border:none;cursor:pointer}
-#modalsend:hover{box-shadow:0 0 18px rgba(255,176,0,.5)}
+#modalsend:hover{box-shadow:0 0 18px color-mix(in srgb, var(--amber) 50%, transparent)}
 ::-webkit-scrollbar{width:8px}
 ::-webkit-scrollbar-thumb{background:var(--amber-faint)}
 ::-webkit-scrollbar-track{background:transparent}
@@ -2515,27 +4073,51 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 #nimtest{background:var(--bg-card);color:var(--text);border:1px solid var(--amber)}
 #nimtestout.ok,#setsaveout.ok{color:#2ea043;font-size:12px}
 #nimtestout.err,#setsaveout.err{color:#e05545;font-size:12px}
-/* --- floating per-terminal chat: choices as chips + type-your-own, NCDMV-style --- */
-#tchat{position:fixed;right:26px;bottom:26px;z-index:60;width:340px;max-width:90vw}
-#tchat.collapsed #tchatpanel{display:none}
-#tchat:not(.collapsed) #tchatlauncher{display:none}
-#tchatlauncher{width:54px;height:54px;border-radius:50%;background:var(--amber);color:var(--on-accent);
-  border:none;font-size:23px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4);position:relative}
-#tchatbadge{position:absolute;top:-3px;right:-3px;background:#c0392b;color:#fff;font-size:11px;
+/* --- multi side-chats: floats are EXTRA only; default reply lives in Chat tab --- */
+#tchatstack{
+  position:fixed;right:14px;bottom:14px;z-index:220;
+  display:none;flex-direction:row-reverse;align-items:flex-end;gap:10px;
+  max-width:calc(100vw - 28px);overflow-x:auto;overflow-y:visible;
+  padding:4px;pointer-events:none;
+}
+#modal.open #tchatstack{display:flex}
+#tchatstack .tchat{
+  pointer-events:auto;width:320px;max-width:min(320px,88vw);flex:0 0 auto;
+  position:relative;
+}
+#tchatstack .tchat.collapsed{width:auto}
+#tchatstack .tchat.collapsed .tchatpanel{display:none}
+#tchatstack .tchat:not(.collapsed) .tchatlauncher{display:none}
+#tchatstack .tchatlauncher{width:48px;height:48px;border-radius:50%;background:var(--amber);color:var(--on-accent);
+  border:none;font-size:18px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4);position:relative}
+#tchatstack .tchatbadge{position:absolute;top:-3px;right:-3px;background:#c0392b;color:#fff;font-size:11px;
   min-width:19px;height:19px;border-radius:10px;display:none;align-items:center;justify-content:center;
   padding:0 4px;font-weight:800;box-shadow:0 1px 4px rgba(0,0,0,.35)}
-#tchatpanel{background:var(--bg-raise);border:1px solid var(--amber);border-radius:14px;overflow:hidden;
-  box-shadow:0 12px 44px rgba(0,0,0,.5);display:flex;flex-direction:column;max-height:64vh}
-#tchathead{background:var(--amber);color:var(--on-accent);padding:9px 13px;font-size:13px;font-weight:650;
-  display:flex;justify-content:space-between;align-items:center}
-#tchathead b{font-weight:800}
-#tchatmin{background:transparent;border:none;color:var(--on-accent);font-size:15px;cursor:pointer}
-#tchatlog{padding:9px 11px 0;display:flex;flex-direction:column;gap:6px;overflow:auto;max-height:26vh}
-#tchatlog:empty{display:none}
+/* Dismiss on collapsed FAB — was impossible before (✕ only minimized) */
+#tchatstack .tchatx{
+  position:absolute;top:-6px;left:-6px;z-index:2;
+  width:20px;height:20px;border-radius:50%;border:1px solid var(--line);
+  background:var(--bg-raise);color:var(--text-dim);font-size:11px;line-height:1;
+  cursor:pointer;display:none;align-items:center;justify-content:center;padding:0;
+  box-shadow:0 1px 4px rgba(0,0,0,.25);pointer-events:auto;
+}
+#tchatstack .tchat.collapsed .tchatx{display:flex}
+#tchatstack .tchatx:hover{background:var(--stale);color:#fff;border-color:var(--stale)}
+#tchatstack .tchatpanel{background:var(--bg-raise);border:1px solid var(--amber);border-radius:14px;overflow:hidden;
+  box-shadow:0 12px 44px rgba(0,0,0,.5);display:flex;flex-direction:column;max-height:64vh;width:320px;max-width:min(320px,88vw)}
+#tchatstack .tchathead{background:var(--amber);color:var(--on-accent);padding:8px 10px;font-size:12px;font-weight:650;
+  display:flex;justify-content:space-between;align-items:center;gap:6px}
+#tchatstack .tchathead .th-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tchatstack .tchathead b{font-weight:800}
+#tchatstack .tchathead .th-acts{display:flex;gap:2px;flex:0 0 auto}
+#tchatstack .tchathead button{background:transparent;border:none;color:var(--on-accent);font-size:14px;cursor:pointer;padding:0 5px;opacity:.9}
+#tchatstack .tchathead button:hover{opacity:1}
+#tchatstack .tchatlog{padding:9px 11px 0;display:flex;flex-direction:column;gap:6px;overflow:auto;max-height:22vh}
+#tchatstack .tchatlog:empty{display:none}
 .tcmsg{max-width:86%;padding:6px 10px;border-radius:11px;font-size:12px;line-height:1.35;white-space:pre-wrap;word-break:break-word}
 .tcmsg.bot{align-self:flex-start;background:var(--bg-card);color:var(--text-dim);border:1px solid var(--line)}
 .tcmsg.you{align-self:flex-end;background:var(--amber);color:var(--on-accent);font-weight:600}
-#tchatchips{padding:11px;display:flex;flex-direction:column;gap:7px;overflow:auto}
+#tchatstack .tchatchips{padding:11px;display:flex;flex-direction:column;gap:7px;overflow:auto;max-height:18vh}
 .tc-opt,.tc-sug{border:none;border-radius:12px;padding:9px 13px;font-family:inherit;font-size:12.5px;
   font-weight:600;cursor:pointer;text-align:left;box-shadow:0 2px 5px rgba(0,0,0,.18);transition:filter .12s;
   display:flex;align-items:center;gap:8px}
@@ -2549,11 +4131,22 @@ pre.gonecache{color:var(--text-dim);font-style:italic;opacity:.85;white-space:pr
 .tc-opt:disabled,.tc-sug:disabled{opacity:.5;cursor:default}
 .tc-opt.sel{box-shadow:0 0 0 2px var(--bg-raise),0 0 0 4px var(--amber)}
 .tc-empty{color:var(--text-dim);font-size:12px;font-style:italic;padding:4px 2px}
-#tchatrow{display:flex;gap:6px;padding:10px 11px;border-top:1px solid var(--line);background:var(--bg-card)}
-#tchatinput{flex:1;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:9px;
-  padding:8px 11px;font-family:inherit;font-size:13px}
-#tchatsend{background:var(--amber);color:var(--on-accent);border:none;border-radius:9px;width:40px;
-  font-size:15px;cursor:pointer}
+#tchatstack .tchatrow{display:flex;gap:6px;padding:10px 11px;border-top:1px solid var(--line);background:var(--bg-card);align-items:center}
+#tchatstack .tchatinput{flex:1;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:9px;
+  padding:8px 11px;font-family:inherit;font-size:13px;min-width:0}
+#tchatstack .tchatsend{background:var(--amber);color:var(--on-accent);border:none;border-radius:9px;width:40px;
+  font-size:15px;cursor:pointer;flex:0 0 auto}
+#tchatstack .tchatfoot{display:flex;gap:6px;padding:0 11px 10px;background:var(--bg-card);flex-wrap:wrap}
+#tchatstack .tchatfoot .act{font-size:10px}
+#tchat-addfab{
+  pointer-events:auto;width:44px;height:44px;border-radius:50%;
+  background:var(--bg-raise);color:var(--amber);border:1px solid var(--amber);
+  font-size:22px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.35);
+  flex:0 0 auto;align-self:flex-end;margin-bottom:4px;
+}
+#tchat-addfab:hover{filter:brightness(1.08)}
+/* When no extra floats, hide the whole stack (Chat tab owns reply) */
+#tchatstack.idle{display:none!important}
 .happrove:disabled,.hdeny:disabled{opacity:.4;cursor:default}
 
 /* ── macOS-only controls (iTerm2 driven by AppleScript) — hidden anywhere the
@@ -2603,11 +4196,15 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
   </div>
 </div>
 <aside id="side">
-  <div id="brand"><h1>EMUX</h1><small>control room</small></div>
+  <div id="brand">
+    <div class="brand-top">__LOGO_HTML__<span id="rolechip" class="rolechip" hidden></span></div>
+    <small id="brandtag">__TAGLINE__</small>
+    <div id="managed" hidden></div>
+  </div>
   <input id="filter" placeholder="filter sessions…" autocomplete="off" spellcheck="false">
   <div id="tagbar"></div>
   <div id="sessions"></div>
-  <footer id="footer">daemon · v__VERSION__</footer>
+  <footer id="footer">__PRODUCT_LINE__ · v__VERSION__</footer>
 </aside>
 <main id="main">
   <div id="topbar">
@@ -2615,11 +4212,12 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
     <span id="title">grid</span>
     <span id="status">connecting…</span>
     <button id="attachbtn" class="act" style="display:none">⧉ copy attach</button>
-    <a id="docsbtn" class="act" href="/docs" title="Emux documentation and help">◇ DOCS</a>
+    <a id="docsbtn" class="act" href="__PUBLIC_PATH__/docs" title="documentation">◇ DOCS</a>
     <button id="newbtn" class="act">+ NEW SESSION</button>
     <button id="feedbtn" class="act" title="live fleet activity">◫ FEED</button>
     <button id="hbtn" class="act" title="Hancock approvals" onclick="openHancock()">⧉ HANCOCK<span id="hbadge" style="display:none">0</span></button>
     <button id="refreshbtn" class="act">↻ refresh</button>
+    <button id="themebtn" class="act" type="button" title="toggle light/dark">☾ dark</button>
     <button id="setbtn" class="act" title="model routing settings" onclick="openSettings()">⚙ SETTINGS</button>
     <div id="tabs">
       <button class="tab" data-mode="grid">GRID</button>
@@ -2627,12 +4225,14 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
       <button class="tab" data-mode="activity">ACTIVITY</button>
       <button class="tab" data-mode="flow">FLOW</button>
       <button class="tab" data-mode="orphans">ORPHANS</button>
+      <button class="tab" data-mode="chats">CHATS</button>
+      <button class="tab" data-mode="calendar">CALENDAR</button>
     </div>
   </div>
   <div id="happrovals" style="display:none"><div id="htabs"></div><div id="hdetail"></div></div>
   <div id="htoast"></div>
   <div id="views"></div>
-  <div id="chat"></div>
+  <div id="head"></div>
   <button id="jump">↓ jump to bottom</button>
   <div id="composer" style="display:none">
     <div id="chips">
@@ -2658,44 +4258,91 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
   <div id="modalback"></div>
   <div id="modalpanel">
     <div id="modalhead">
-      <span class="dot live"></span>
-      <span class="nm" id="modalname"></span>
-      <span class="ag" id="modalagent"></span>
+      <span class="dot live" id="modaldot"></span>
+      <div id="modalidents">
+        <div class="nmrow"><span class="nm" id="modalname"></span><span class="ag" id="modalagent"></span></div>
+        <div class="issuerow" id="modalissue" hidden></div>
+      </div>
       <span id="modalthink"><span class="tdots"><i></i><i></i><i></i></span>thinking <b>0s</b></span>
       <span class="st" id="modalstatus">live</span>
       <button id="modalswitch" title="fail this session over to another Claude account (exits + relaunches + resumes)" onclick="switchPlan()">⇄ switch account</button>
-      <button id="modaliterm" class="maconly" title="open this session in a new iTerm2 window (attached tmux)">⧉ iTerm2</button>
+      <button id="modaliterm" class="maconly" title="open a head on this session in iTerm2 (emux head / tmux attach)">⧉ OPEN HEAD</button>
+      <button id="modalpop" type="button" title="open this session as its own browser tab">↗ tab</button>
+      <button id="modaltasksbtn" type="button" title="Toggle work drawer" onclick="toggleModalTasks()">☰ DRAWER<span class="mtbadge" id="modaltaskbadge">0</span></button>
       <button id="modalclose">✕ close</button>
     </div>
-    <div id="modaljudge"></div>
+    <div id="modalbanner" class="off" aria-live="polite"></div>
+    <div id="modaljudge" aria-hidden="true"></div>
     <div id="modaldigest">
-      <div class="dghead"><span>◆ the gist</span><button id="dgrefresh" title="re-read">↻</button></div>
+      <div class="dghead"><span>◆ the gist</span><span class="dgspin">reading…</span><button id="dgrefresh" title="re-read">↻</button></div>
       <div class="dgtext"></div>
       <div class="dgsugg"></div>
     </div>
-    <div id="modalscreen"></div>
-    <div id="tchat" class="collapsed">
-      <button id="tchatlauncher" onclick="tchatToggle()">💬<span id="tchatbadge"></span></button>
-      <div id="tchatpanel">
-        <div id="tchathead"><span>💬 reply to <b id="tchatsess"></b></span><button id="tchatmin" onclick="tchatToggle()" title="minimize">▾</button></div>
-        <div id="tchatlog"></div>
-        <div id="tchatchips"></div>
-        <div id="tchatrow"><input id="tchatinput" placeholder="choose one, or type your reply…" autocomplete="off" spellcheck="false"><button id="tchatsend" onclick="tchatSend()">➤</button></div>
+    <div id="modalbody">
+      <div id="modalmain">
+        <div id="modalshell">
+          <div id="modalscreen" tabindex="0" role="log" aria-label="session head"></div>
+          <button type="button" id="modaljump" title="jump to live bottom">↓ live</button>
+        </div>
+        <div id="modalopts"></div>
+        <div id="modalchips">
+          <button class="chip" data-keys="C-c">^C</button>
+          <button class="chip" data-keys="Escape">ESC</button>
+          <button class="chip" data-keys="Enter">⏎</button>
+          <button class="chip" data-keys="PageUp" title="scroll terminal up (tmux copy-mode)">PgUp</button>
+          <button class="chip" data-keys="PageDown" title="scroll terminal down">PgDn</button>
+          <button class="chip" data-keys="Up">↑</button>
+          <button class="chip" data-keys="Tab">TAB</button>
+        </div>
+        <div id="modalpending"></div>
+        <div id="modalclips" title="images pasted in this box land on the fleet host"></div>
+        <div id="modalrow">
+          <input id="modalinput" placeholder="Type a command or message… (Enter sends)" autocomplete="off" spellcheck="false">
+          <select id="modalauth" title="Authorization mode for this seat" aria-label="Authorization mode">
+            <option value="always">Always approve</option>
+            <option value="ask">Ask each gate</option>
+            <option value="readonly">Observe only</option>
+          </select>
+          <button type="button" id="modalqueue" title="Queue when safe (send when idle)">Queue</button>
+          <button type="button" id="modalsend" title="Send now into the PTY">Send Now</button>
+        </div>
       </div>
+      <aside id="modaldrawer" aria-label="Work drawer">
+        <div id="drawertabs" role="tablist">
+          <button type="button" class="dtab on" data-tab="tasks" role="tab">Tasks</button>
+          <button type="button" class="dtab" data-tab="chat" role="tab">Chat <span class="dtbadge" id="drawerchatbadge">0</span></button>
+          <button type="button" class="dtab" data-tab="context" role="tab">Context</button>
+          <button type="button" class="dtab score" data-tab="score" role="tab" title="Target UX score">UX</button>
+          <button type="button" id="modaltasks-hide" title="hide drawer" onclick="toggleModalTasks(false)">›</button>
+        </div>
+        <div id="drawerpane-tasks" class="dpane on" role="tabpanel">
+          <div class="dsubh">Linear tasks <span class="mtcount" id="modaltaskcount">0</span></div>
+          <div id="modaltasklist"></div>
+          <div id="drawerauth">
+            <div class="dsubh">Authorization mode</div>
+            <select id="drawerauthsel" aria-label="Authorization mode">
+              <option value="always">Always approve — proceed autonomously when gates allow</option>
+              <option value="ask">Ask each gate — Hancock / human for trust gates</option>
+              <option value="readonly">Observe only — do not inject keys</option>
+            </select>
+          </div>
+        </div>
+        <div id="drawerpane-chat" class="dpane" role="tabpanel">
+          <div class="dsubh">Side chats <button type="button" class="act" id="drawersideadd" title="New side chat">+</button></div>
+          <div id="drawerchatlist"></div>
+          <div id="drawerchatactive"></div>
+        </div>
+        <div id="drawerpane-context" class="dpane" role="tabpanel">
+          <div id="drawercontext"></div>
+        </div>
+        <div id="drawerpane-score" class="dpane" role="tabpanel">
+          <div class="dsubh">Target UX score</div>
+          <div id="drawerscore"></div>
+        </div>
+      </aside>
     </div>
-    <div id="modalopts"></div>
-    <div id="modalchips">
-      <button class="chip" data-keys="C-c">^C</button>
-      <button class="chip" data-keys="Escape">ESC</button>
-      <button class="chip" data-keys="Enter">⏎</button>
-      <button class="chip" data-keys="Up">↑</button>
-      <button class="chip" data-keys="Tab">TAB</button>
-    </div>
-    <div id="modalpending"></div>
-    <div id="modalrow">
-      <input id="modalinput" placeholder="prompt / steer this session… (Enter sends)" autocomplete="off" spellcheck="false">
-      <button id="modalsend">SEND</button>
-    </div>
+    <!-- Float stack kept as overflow for many open side chats -->
+    <div id="tchatstack" aria-label="floating side chats"></div>
   </div>
 </div>
 
@@ -2782,7 +4429,7 @@ function lastSummary(s){return s.summary||(metaCache[s.name]&&metaCache[s.name].
 function goneAge(s){const m=metaCache[s.name];if(!m)return"";const sec=Math.round((Date.now()-m.ts)/1000);return sec<60?sec+"s":Math.round(sec/60)+"m";}
 let activeCompany=localStorage.getItem("emux_company")||"";   // restore the skin you were in
 let flowSig=null, flowPre={}, flowBox={};   // flow view: rebuild only on topology change, else update panes in place
-const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW",orphans:"ORPHANS"};
+const BASE_TAB={grid:"GRID",groups:"GROUPS",activity:"ACTIVITY",flow:"FLOW",orphans:"ORPHANS",chats:"CHATS",calendar:"CALENDAR"};
 
 // ---- deep links: the view, filters, and open session live in the URL, so any
 // state is bookmarkable/shareable and survives reload/back-forward. ----
@@ -2795,30 +4442,59 @@ function syncURL(){
   if(activeTag)p.set("tag",activeTag);
   if(filterStr)p.set("q",filterStr);
   if(modalSession)p.set("session",modalSession.name);
+  if(mode==="chats"){
+    if(CH.status&&CH.status!=="stale,recent")p.set("ch_status",CH.status);
+    if(CH.tool)p.set("ch_tool",CH.tool);
+    if(CH.match&&CH.match!=="greenmark")p.set("ch_match",CH.match);
+    if(CH.q)p.set("ch_q",CH.q);
+    if(CH.sort&&CH.sort!=="priority")p.set("ch_sort",CH.sort);
+  }
+  if(soloMode)p.set("solo","1");
   const h=p.toString();
   if((location.hash.slice(1))!==h)
     history.replaceState(null,"",h?("#"+h):location.pathname+location.search);
 }
+let soloMode=false;
 function applyURL(){
   urlBooting=true;
   const p=new URLSearchParams(location.hash.slice(1));
+  soloMode=p.get("solo")==="1";
+  document.body.classList.toggle("solo-session",soloMode);
   activeCompany=p.get("company")||"";
   activeTag=p.get("tag")||"";
   filterStr=(p.get("q")||"").toLowerCase();
   const f=$("#filter");if(f)f.value=p.get("q")||"";
   skinForCompany();
-  setMode(p.get("view")||localStorage.getItem("emux_view")||"grid");
+  // solo tabs still need a grid load for session metadata; default view stays grid
+  // view=chat is a legacy alias for live head mode (see docs/vocabulary.md)
+  setMode(soloMode?"grid":(function(v){return (v==="chat")?"head":v;})(p.get("view")||localStorage.getItem("emux_view")||"grid"));
   renderTagbar();renderSidebar();
   urlBooting=false;
   // deep-link to an open session modal — once the grid is loaded
   const sess=p.get("session");
   if(sess){const open=()=>{const s=grid.find(x=>x.name===sess);
-    if(s)openModal(s);else if(!grid.length)setTimeout(open,300);};open();}
+    if(s)openModal(s);else if(!grid.length)setTimeout(open,400);
+    else if(soloMode)setTimeout(open,800);};open();}
   else if(!modalSession){/* leave modal closed */}
+}
+function popOutSessionTab(){
+  if(!modalSession)return;
+  const p=new URLSearchParams();
+  p.set("session",modalSession.name);
+  p.set("solo","1");
+  const url=location.pathname+location.search+"#"+p.toString();
+  window.open(url,"_blank","noopener,noreferrer");
 }
 window.addEventListener("hashchange",()=>{if(!urlBooting)applyURL();});
 
-async function api(path,opts){const r=await fetch(path,opts);return r.json();}
+// PUBLIC_PATH is injected by the daemon when published under a reverse-proxy
+// path prefix (e.g. /gmux). Empty string keeps loopback root behavior.
+const PUBLIC_PATH="__PUBLIC_PATH__";
+async function api(path,opts){
+  const r=await fetch(PUBLIC_PATH+path,opts||{});
+  if(!r.ok&&r.status===0) throw new Error("unreachable");
+  try{return await r.json();}catch(e){return {ok:false,error:"bad_json"};}
+}
 
 function ageLabel(a){
   if(a===null||a===undefined)return "—";
@@ -2866,54 +4542,189 @@ function components(){
 // shown: the filter, but CONNECTION-AWARE. If any terminal in a group matches,
 // the WHOLE group shows — even members that aren't in the filtered set — so a
 // manager and everything it manages stay together on screen.
+//
+// Manager products default to QUIET scope: only standing health / manager-tagged
+// sessions — not the whole laptop + rentamac fleet (that noise belongs in worker rooms).
+let managerFleet=false;  // false = quiet (default for role=manager); restored after SKIN_ID
+function isManagerQuiet(){
+  return PRODUCT_INFO.role==="manager" && !managerFleet;
+}
+function isManagerScoped(s){
+  const name=(s.name||"").toLowerCase();
+  const sess=(s.session||"").toLowerCase();
+  const tags=(s.tags||[]).map(t=>String(t).toLowerCase());
+  const desc=(s.description||"").toLowerCase();
+  const hc=PRODUCT_INFO.health_chat||{};
+  const vp=PRODUCT_INFO.vp||{};
+  if(hc.name&&name===String(hc.name).toLowerCase())return true;
+  if(hc.session&&(name===String(hc.session).toLowerCase()||sess===String(hc.session).toLowerCase()))return true;
+  if(vp.name&&name===String(vp.name).toLowerCase())return true;
+  if(vp.session&&(name===String(vp.session).toLowerCase()||sess===String(vp.session).toLowerCase()))return true;
+  if(name.includes("directrux"))return true;
+  if(tags.some(t=>t==="manager"||t==="directrux"||t==="health"||t==="vp"))return true;
+  if(desc.includes("managed_planes")||desc.includes("directrux manager")||desc.includes("directrux vp"))return true;
+  return false;
+}
+function setManagerFleet(on){
+  managerFleet=!!on;
+  try{localStorage.setItem("emux_manager_fleet_"+SKIN_ID,managerFleet?"1":"0");}catch(e){}
+  activeTag="";activeCompany="";activeHost="";
+  renderTagbar();renderSidebar();if(mode!=="head")render();syncURL();
+}
 function shown(){
-  if(!(filterStr||activeTag||activeCompany||activeHost))return grid.slice();
-  const comp=components(),hot=new Set();
-  grid.forEach(s=>{if(baseMatch(s))hot.add(comp[s.name]);});
-  return grid.filter(s=>baseMatch(s)||hot.has(comp[s.name]));
+  let pool=grid.slice();
+  if(isManagerQuiet())pool=pool.filter(isManagerScoped);
+  if(!(filterStr||activeTag||activeCompany||activeHost))return pool;
+  // connection-aware within the (possibly quiet) pool only
+  const parent={};pool.forEach(s=>parent[s.name]=s.name);
+  const find=x=>{while(parent[x]!==x){parent[x]=parent[parent[x]];x=parent[x];}return x;};
+  const uni=(a,b)=>{if(parent[a]!==undefined&&parent[b]!==undefined)parent[find(a)]=find(b);};
+  const byKey={};pool.forEach(s=>{byKey[s.name]=s.name;if(!(s.session in byKey))byKey[s.session]=s.name;});
+  pool.forEach(s=>(s.manages||[]).forEach(t=>{const tn=byKey[t];if(tn)uni(s.name,tn);}));
+  const comp={};pool.forEach(s=>comp[s.name]=find(s.name));
+  const hot=new Set();
+  pool.forEach(s=>{if(baseMatch(s))hot.add(comp[s.name]);});
+  return pool.filter(s=>baseMatch(s)||hot.has(comp[s.name]));
 }
 
-// ---- SKINS: the whole UI recolors to what you're working on ----
-// default = Eidos light; the Eidos pill = Eidos dark; the Greenmark pill = the
-// Greenmark Waste forest-green brand. Each theme just remaps the 12 CSS vars.
+// ---- Brand + light/dark mode ----
+// Source of truth for product skins is server-stamped <style id="skin-theme">
+// from skin.py (dynamic). JS must NOT hardcode brand hex and stomp it.
+//
+// Product skins (gmux / reevux / amux / directrux / any non-emux):
+//   - company pills FILTER only — never recolor the room
+//   - light/dark only flips data-theme; CSS vars come from skin-theme
+// Bare emux: company pills may still rebrand via THEMES fallback packs.
+const SKIN_ID="__SKIN_ID__";
+const DEFAULT_MODE="__DEFAULT_THEME__";
+const PRODUCT_SKIN=SKIN_ID!=="emux" && SKIN_ID!=="";
+const BRAND_DEFAULT=SKIN_ID==="gmux"?"greenmark"
+  :(SKIN_ID==="reevux"?"reeves"
+  :(SKIN_ID==="amux"?"aic"
+  :(SKIN_ID==="directrux"?"directrux"
+  :"eidos")));
+const MODE_KEY="emux_mode_"+SKIN_ID;
+const BRAND_KEY="emux_brand_"+SKIN_ID;
+try{managerFleet=localStorage.getItem("emux_manager_fleet_"+SKIN_ID)==="1";}catch(e){}
+// Vars that applyTheme may set/clear. Keep in sync with skin.Palette.css_block.
+const THEME_VARS=["--bg","--bg-raise","--bg-card","--amber","--amber-dim","--amber-faint",
+  "--text","--text-dim","--live","--stale","--line","--user","--on-accent",
+  "--on","--ink","--dim","--card","--pill"];
+// Bare-emux company rebrand packs only (product skins ignore these).
 const THEMES={
-  "eidos-light":{"--bg":"#f0ebe4","--bg-raise":"#e9e3db","--bg-card":"#e4ded6",
-    "--amber":"#8e6129","--amber-dim":"#a9853f","--amber-faint":"#d8cdba",
-    "--text":"#1e1a17","--text-dim":"#6b6159","--live":"#4a6a3a","--stale":"#ab5036",
-    "--line":"#cabfae","--user":"#8e6129","--on-accent":"#f5efe6"},
-  "eidos-dark":{"--bg":"#15110f","--bg-raise":"#1a1613","--bg-card":"#1e1a17",
-    "--amber":"#c4935a","--amber-dim":"#9a6d35","--amber-faint":"#3a2f22",
-    "--text":"#dcd5cb","--text-dim":"#8b8179","--live":"#7a8c72","--stale":"#c4694f",
-    "--line":"#332a20","--user":"#d4a870","--on-accent":"#1a1207"},
-  // Greenmark Waste — its actual brand: forest-green ink (#2d4a3e) on warm cream,
-  // gold as the secondary pop. Light, per the brand's own palette.json.
-  "greenmark":{"--bg":"#f5f0e8","--bg-raise":"#efe8da","--bg-card":"#e8e0d0",
-    "--amber":"#2d4a3e","--amber-dim":"#3d6b56","--amber-faint":"#d7e0d3",
-    "--text":"#1f2937","--text-dim":"#6b7280","--live":"#3d6b56","--stale":"#b3261e",
-    "--line":"#d3ccbb","--user":"#2d4a3e","--on-accent":"#f5f0e8"},
-  // Reeves — the PERSONAL context. A cool slate/navy skin, deliberately unlike the
-  // Eidos amber and Greenmark green, so switching to Reeves signals "personal mode".
-  "reeves":{"--bg":"#eef1f6","--bg-raise":"#e6ebf2","--bg-card":"#dee4ee",
-    "--amber":"#3b5ba5","--amber-dim":"#5a76bd","--amber-faint":"#ccd6e8",
-    "--text":"#182030","--text-dim":"#5c6678","--live":"#3d7a5a","--stale":"#b3503a",
-    "--line":"#c5cddd","--user":"#3b5ba5","--on-accent":"#f4f7fc"},
+  eidos:{
+    light:{"--bg":"#f0ebe4","--bg-raise":"#e9e3db","--bg-card":"#e4ded6",
+      "--amber":"#8e6129","--amber-dim":"#a9853f","--amber-faint":"#d8cdba",
+      "--text":"#1e1a17","--text-dim":"#6b6159","--live":"#4a6a3a","--stale":"#ab5036",
+      "--line":"#cabfae","--user":"#8e6129","--on-accent":"#f5efe6"},
+    dark:{"--bg":"#15110f","--bg-raise":"#1a1613","--bg-card":"#1e1a17",
+      "--amber":"#c4935a","--amber-dim":"#9a6d35","--amber-faint":"#3a2f22",
+      "--text":"#dcd5cb","--text-dim":"#8b8179","--live":"#7a8c72","--stale":"#c4694f",
+      "--line":"#332a20","--user":"#d4a870","--on-accent":"#1a1207"},
+  },
+  greenmark:{
+    light:{"--bg":"#f4f7f4","--bg-raise":"#e8f0ea","--bg-card":"#ffffff",
+      "--amber":"#1b7a4e","--amber-dim":"#2d6a4f","--amber-faint":"#d4edda",
+      "--text":"#14261c","--text-dim":"#4d6356","--live":"#1a7a45","--stale":"#a67c2d",
+      "--line":"#c5d6cb","--user":"#203C31","--on-accent":"#f4f7f4"},
+    dark:{"--bg":"#0c1611","--bg-raise":"#132019","--bg-card":"#1a2a21",
+      "--amber":"#5fbf8f","--amber-dim":"#3d9a6e","--amber-faint":"#1e3d30",
+      "--text":"#e8f0ea","--text-dim":"#8aa396","--live":"#5fbf8f","--stale":"#c9a227",
+      "--line":"#2a4034","--user":"#5fbf8f","--on-accent":"#0c1611"},
+  },
+  reeves:{
+    light:{"--bg":"#eef1f6","--bg-raise":"#e6ebf2","--bg-card":"#dee4ee",
+      "--amber":"#3b5ba5","--amber-dim":"#5a76bd","--amber-faint":"#ccd6e8",
+      "--text":"#182030","--text-dim":"#5c6678","--live":"#3d7a5a","--stale":"#b3503a",
+      "--line":"#c5cddd","--user":"#3b5ba5","--on-accent":"#f4f7fc"},
+    dark:{"--bg":"#0e1218","--bg-raise":"#151b24","--bg-card":"#1b2330",
+      "--amber":"#7aa2ff","--amber-dim":"#5a76bd","--amber-faint":"#243044",
+      "--text":"#e8eef8","--text-dim":"#8b96ab","--live":"#5fbf8f","--stale":"#e07050",
+      "--line":"#2a3444","--user":"#7aa2ff","--on-accent":"#0e1218"},
+  },
+  aic:{
+    light:{"--bg":"#f3f5fa","--bg-raise":"#e8ecf5","--bg-card":"#ffffff",
+      "--amber":"#143ca2","--amber-dim":"#16438a","--amber-faint":"#d4dcf0",
+      "--text":"#151c36","--text-dim":"#5a6580","--live":"#1a7a45","--stale":"#a64b32",
+      "--line":"#c5cde0","--user":"#143ca2","--on-accent":"#ffffff"},
+    dark:{"--bg":"#151c36","--bg-raise":"#182148","--bg-card":"#1c2747",
+      "--amber":"#6b8fd4","--amber-dim":"#4a6fbf","--amber-faint":"#243056",
+      "--text":"#f0f3fa","--text-dim":"#9aa6c0","--live":"#5fbf8f","--stale":"#e07050",
+      "--line":"#2a3558","--user":"#e8eefc","--on-accent":"#151c36"},
+  },
 };
-// company key → skin. Anything unmapped falls back to the default light Eidos.
-const CO_THEME={"":"eidos-light","eidos":"eidos-dark","greenmark":"greenmark","reeves":"reeves"};
-function applyTheme(name){
-  const t=THEMES[name]||THEMES["eidos-light"];
-  const r=document.documentElement;
-  for(const k in t) r.style.setProperty(k,t[k]);
-  r.dataset.theme=name;
-  localStorage.setItem("emux_theme",name);
+const CO_BRAND={"":BRAND_DEFAULT,"eidos":"eidos","greenmark":"greenmark","reeves":"reeves","aic":"aic"};
+let uiMode=(DEFAULT_MODE==="dark")?"dark":"light";
+let uiBrand=BRAND_DEFAULT;
+function clearInlineThemeVars(r){
+  for(const k of THEME_VARS) r.style.removeProperty(k);
 }
-function skinForCompany(){applyTheme(CO_THEME[activeCompany]||"eidos-light");}
+function applyTheme(){
+  const r=document.documentElement;
+  r.setAttribute("data-theme",uiMode);
+  r.dataset.brand=uiBrand;
+  r.dataset.skin=SKIN_ID;
+  if(PRODUCT_SKIN){
+    // Dynamic: let <style id="skin-theme"> (from skin.py) own the colors.
+    // Clear any prior inline stomps (eidos/etc.) so CSS wins.
+    clearInlineThemeVars(r);
+  } else {
+    // Bare emux only: company pill may rebrand via hardcoded THEMES packs.
+    const pack=THEMES[uiBrand]||THEMES[BRAND_DEFAULT]||THEMES.eidos;
+    const t=pack[uiMode]||pack.light;
+    for(const k in t) r.style.setProperty(k,t[k]);
+    r.style.setProperty("--on",t["--amber"]);
+    r.style.setProperty("--ink",t["--text"]);
+    r.style.setProperty("--dim",t["--text-dim"]);
+    r.style.setProperty("--card",t["--bg-card"]);
+    r.style.setProperty("--pill",t["--amber-faint"]);
+  }
+  try{localStorage.setItem(MODE_KEY,uiMode);localStorage.setItem(BRAND_KEY,uiBrand);}catch(e){}
+  const b=document.getElementById("themebtn");
+  if(b){b.textContent=uiMode==="dark"?"☀ light":"☾ dark";b.title="switch to "+(uiMode==="dark"?"light":"dark")+" mode";}
+}
+function toggleMode(){uiMode=uiMode==="dark"?"light":"dark";applyTheme();}
+function skinForCompany(){
+  // Product skins: company is a filter only — chrome stays the active skin.
+  if(PRODUCT_SKIN){ uiBrand=BRAND_DEFAULT; }
+  else { uiBrand=CO_BRAND[activeCompany]||BRAND_DEFAULT; }
+  applyTheme();
+}
+(function(){
+  try{
+    const m=localStorage.getItem(MODE_KEY);
+    if(m==="light"||m==="dark") uiMode=m;
+    else if(DEFAULT_MODE==="dark"||DEFAULT_MODE==="light") uiMode=DEFAULT_MODE;
+    else if(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches) uiMode="dark";
+    if(!PRODUCT_SKIN){
+      const b=localStorage.getItem(BRAND_KEY);
+      if(b&&THEMES[b]) uiBrand=b;
+    } else {
+      uiBrand=BRAND_DEFAULT;
+    }
+  }catch(e){}
+  applyTheme();
+})();
 
 function applyFilters(){localStorage.setItem("emux_company",activeCompany);
-  skinForCompany();renderTagbar();renderSidebar();if(mode!=="chat")render();syncURL();}
+  skinForCompany();renderTagbar();renderSidebar();if(mode!=="head")render();syncURL();}
 
 function renderTagbar(){
   const box=$("#tagbar");if(!box)return;
+  // Manager quiet: one line, not 40 company/tag chips.
+  if(PRODUCT_INFO.role==="manager"&&!managerFleet){
+    const n=grid.length;
+    const scoped=grid.filter(isManagerScoped).length;
+    box.innerHTML='<span class="tagchip on" title="manager default">manager scope · '
+      +scoped+' shown</span>'
+      +'<span class="tagchip" id="fleetnoise" title="Show every session on this host (noisy)">show full fleet · '
+      +n+'…</span>';
+    const b=$("#fleetnoise");if(b)b.onclick=()=>setManagerFleet(true);
+    return;
+  }
+  if(PRODUCT_INFO.role==="manager"&&managerFleet){
+    // prepend hide chip; fall through to normal chips on full grid
+  }
   // companies (colored, from cwd) then tags — both filter the whole view
   const comp=new Map();   // key -> {label,color,n}
   grid.forEach(s=>{const c=s.company||{};if(c.company){
@@ -2923,8 +4734,12 @@ function renderTagbar(){
   // machines are a facet too — every session runs SOMEWHERE
   const hosts=new Map();
   grid.forEach(s=>{const h=s.host||"local";hosts.set(h,(hosts.get(h)||0)+1);});
-  if(!comp.size&&!counts.size&&!activeTag&&!activeCompany&&!activeHost){box.innerHTML="";return;}
+  if(!comp.size&&!counts.size&&!activeTag&&!activeCompany&&!activeHost
+      &&!(PRODUCT_INFO.role==="manager"&&managerFleet)){box.innerHTML="";return;}
   let html="";
+  if(PRODUCT_INFO.role==="manager"&&managerFleet){
+    html+='<span class="tagchip on" id="fleetquiet" title="Back to manager-only sessions">✕ hide fleet noise</span>';
+  }
   if(activeTag||activeCompany||activeHost)html+='<span class="tagchip clr" data-clear="1">✕ all</span>';
   if(hosts.size>1||activeHost)[...hosts.keys()].sort().forEach(h=>{
     html+='<span class="tagchip hostchip'+(h===activeHost?" on":"")+'" data-host="'+esc(h)+'">⌨ '+esc(h)
@@ -2941,6 +4756,7 @@ function renderTagbar(){
       +'<span class="cnt">'+counts.get(t)+'</span></span>';
   });
   box.innerHTML=html;
+  const fq=$("#fleetquiet");if(fq)fq.onclick=()=>setManagerFleet(false);
   box.querySelectorAll("[data-clear]").forEach(el=>el.onclick=()=>{activeTag="";activeCompany="";activeHost="";applyFilters();});
   box.querySelectorAll(".hostchip").forEach(el=>el.onclick=()=>{
     activeHost=el.dataset.host===activeHost?"":el.dataset.host;applyFilters();});
@@ -2951,17 +4767,18 @@ function renderTagbar(){
 }
 
 function setMode(m){
-  if(m!=="chat"&&!BASE_TAB[m])m="grid";   // a renamed/removed view saved in localStorage → blank screen
-  mode=m;current=(m==="chat")?current:null;
-  if(m!=="chat")localStorage.setItem("emux_view",m);   // remember last view (#6)
-  $("#chat").style.display=(m==="chat")?"flex":"none";
-  $("#views").style.display=(m==="chat")?"none":"";
-  $("#composer").style.display=(m==="chat")?"":"none";
-  $("#attachbtn").style.display=(m==="chat")?"":"none";
+  if(m==="chat")m="head";  // legacy alias for live head
+  if(m!=="head"&&!BASE_TAB[m])m="grid";   // a renamed/removed view saved in localStorage → blank screen
+  mode=m;current=(m==="head")?current:null;
+  if(m!=="head")localStorage.setItem("emux_view",m);   // remember last view (#6)
+  $("#head").style.display=(m==="head")?"flex":"none";
+  $("#views").style.display=(m==="head")?"none":"";
+  $("#composer").style.display=(m==="head")?"":"none";
+  $("#attachbtn").style.display=(m==="head")?"":"none";
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.mode===m));
   document.querySelectorAll(".card").forEach(el=>el.classList.toggle("active",!!(current&&el.dataset.name===current.name)));
   clearInterval(chatTimer);chatTimer=null;
-  if(m!=="chat"){$("#title").textContent=m;$("#views").innerHTML="";flowSig=null;render();}
+  if(m!=="head"){$("#title").textContent=m;$("#views").innerHTML="";flowSig=null;render();}
   syncURL();
 }
 document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setMode(t.dataset.mode));
@@ -2969,12 +4786,152 @@ document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setMode(t.dataset.mod
 function updateChrome(){         // title, footer, tab counts (#1 #3 #4)
   const liveN=grid.filter(s=>s.live).length;
   const actN=grid.filter(s=>s.live&&hot(s)).length;
-  if(!flashOn)document.title="emux · "+liveN+" live";
-  $("#footer").textContent="daemon · v__VERSION__ · "+grid.length+" sessions";
+  const isMgr=PRODUCT_INFO.role==="manager";
+  if(!flashOn){
+    document.title=isMgr
+      ?("__PRODUCT__ · manager · "+liveN+" live")
+      :("__PRODUCT__ · "+liveN+" live");
+  }
+  let foot="__PRODUCT_LINE__ · v__VERSION__ · "+grid.length+" sessions";
+  if(isMgr){
+    const n=(PRODUCT_INFO.managed_planes||[]).length;
+    const scoped=grid.filter(isManagerScoped).filter(s=>s.live).length;
+    foot="__PRODUCT__ · manager · v__VERSION__ · "+n+" plane"+(n===1?"":"s")
+      +(isManagerQuiet()
+        ?(" · quiet · "+scoped+" scoped live")
+        :(" · full fleet · "+liveN+" live"));
+  }
+  $("#footer").textContent=foot;
   document.querySelectorAll(".tab").forEach(t=>{
     const m=t.dataset.mode;
-    t.textContent=(m==="activity"&&actN)?BASE_TAB[m]+" · "+actN:BASE_TAB[m];
+    if(m==="activity"&&actN)t.textContent=BASE_TAB[m]+" · "+actN;
+    else if(m==="chats"&&CH.counts&&(CH.counts.stale||0)>0)
+      t.textContent=BASE_TAB[m]+" · "+CH.counts.stale;
+    else t.textContent=BASE_TAB[m];
   });
+}
+
+// ---- Product role chrome (manager vs worker) — driven by /api/product + /api/managed
+// Permanent seats (vp/health/engine) must reflect LIVE inventory truth, not only
+// product.json intent. "Always" is the policy; grid liveness is the fact.
+const PRODUCT_INFO={role:null,managed_planes:[],health:{},loaded:false};
+function permanentSeatStatus(name){
+  // Match registered name or tmux session name against current grid poll.
+  const n=(name||"").trim();
+  if(!n) return {cls:"deg", txt:"unconfigured"};
+  const s=(typeof grid!=="undefined"&&grid||[]).find(x=>x&&(x.name===n||x.session===n));
+  if(!s) return {cls:"down", txt:"DOWN · missing — ensure should restart ≤60s"};
+  if(s.live) return {cls:"up", txt:"UP · live · tmux attach -t "+n};
+  return {cls:"down", txt:"DOWN · session gone — permanent seat broken"};
+}
+function renderProductChrome(){
+  const chip=$("#rolechip"), tag=$("#brandtag"), box=$("#managed");
+  if(!chip||!box)return;
+  if(PRODUCT_INFO.role==="manager"){
+    chip.hidden=false;
+    chip.textContent="MANAGER";
+    chip.className="rolechip manager";
+    const planes=PRODUCT_INFO.managed_planes||[];
+    const ids=planes.map(p=>p.id);
+    if(tag) tag.textContent=ids.length
+      ?("manages "+ids.join(" · "))
+      :"manager · no planes in product.json";
+    box.hidden=false;
+    const hc=PRODUCT_INFO.health_chat||{};
+    const vp=PRODUCT_INFO.vp||{};
+    const eng=PRODUCT_INFO.engine_seat||{};
+    const hname=hc.name||hc.session||"directrux-health";
+    const vname=vp.name||vp.session||"directrux-vp";
+    const ename=eng.name||eng.session||"";
+    const vst=permanentSeatStatus(vname);
+    const hst=permanentSeatStatus(hname);
+    const est=ename?permanentSeatStatus(ename):null;
+    // If any permanent seat is DOWN, manager chrome must scream — not look "always fine".
+    let html='<div class="mhd">Permanent seats <span class="dim">(intent from product.json · truth from live inventory)</span></div>'
+      +'<div class="mplane" data-seat="'+esc(vname)+'">'
+      +'<span class="mid">'+esc(vname)+'</span>'
+      +'<span class="mlane">vp seat</span>'
+      +'<span class="mstat '+vst.cls+'">'+esc(vst.txt)+'</span>'
+      +'</div>'
+      +'<div class="mplane" data-seat="'+esc(hname)+'">'
+      +'<span class="mid">'+esc(hname)+'</span>'
+      +'<span class="mlane">health</span>'
+      +'<span class="mstat '+hst.cls+'">'+esc(hst.txt)+'</span>'
+      +'<a class="mopen" href="__PUBLIC_PATH__/health.html" target="_blank" rel="noopener">/health →</a>'
+      +'<a class="mopen" href="__PUBLIC_PATH__/ai.html" target="_blank" rel="noopener">/ai →</a>'
+      +'</div>';
+    if(ename){
+      html+='<div class="mplane" data-seat="'+esc(ename)+'">'
+        +'<span class="mid">'+esc(ename)+'</span>'
+        +'<span class="mlane">engine</span>'
+        +'<span class="mstat '+est.cls+'">'+esc(est.txt)+'</span>'
+        +'</div>';
+    }
+    if(vst.cls==="down"||hst.cls==="down"||(est&&est.cls==="down")){
+      html+='<div class="mplane"><span class="mid">!</span>'
+        +'<span class="mstat down">permanent seat DOWN is a product failure — run ensure-vp / ensure-health-chat / ensure-engine</span></div>';
+    }
+    html+='<div class="mhd">Managed planes</div>';
+    if(!planes.length){
+      html+='<div class="mplane"><span class="mid">—</span>'
+        +'<span class="mstat down">empty allowlist · edit product.json</span></div>';
+    }else{
+      planes.forEach(p=>{
+        const h=PRODUCT_INFO.health[p.id]||{};
+        const ok=!!h.ok, deg=!!h.degraded;
+        let stCls="down", stTxt="unreachable";
+        if(ok&&!deg){stCls="up";stTxt="up"+(h.live_sessions!=null?(" · "+h.live_sessions+" live"):"");}
+        else if(ok&&deg){stCls="deg";stTxt="degraded"+(h.error?(" · "+h.error):"");}
+        else if(h.error){stTxt=String(h.error).slice(0,48);}
+        else if(!PRODUCT_INFO.health[p.id]){stCls="deg";stTxt="probing…";}
+        const room=p.room||h.room||"";
+        html+='<div class="mplane" data-plane="'+esc(p.id)+'">'
+          +'<span class="mid">'+esc(p.id)+'</span>'
+          +'<span class="mlane">'+esc(p.lane||"?")+'</span>'
+          +'<span class="mstat '+stCls+'">'+esc(stTxt)+'</span>'
+          +(room?('<a class="mopen" href="'+esc(room)+'" target="_blank" rel="noopener">open worker room →</a>'):'')
+          +'</div>';
+      });
+    }
+    box.innerHTML=html;
+  }else if(PRODUCT_INFO.role==="worker"){
+    chip.hidden=false;
+    const lane=(PRODUCT_INFO.chats_match&&PRODUCT_INFO.chats_match!=="all")
+      ?PRODUCT_INFO.chats_match:"";
+    chip.textContent=lane?("WORKER · "+lane):"WORKER";
+    chip.className="rolechip worker";
+    box.hidden=true;box.innerHTML="";
+  }else{
+    chip.hidden=true;box.hidden=true;box.innerHTML="";
+  }
+  updateChrome();
+}
+async function loadProductChrome(){
+  try{
+    const r=await api("/api/product");
+    if(!r||!r.ok)return;
+    PRODUCT_INFO.role=r.role||null;
+    PRODUCT_INFO.managed_planes=r.managed_planes||[];
+    PRODUCT_INFO.chats_match=r.chats_match||"";
+    PRODUCT_INFO.health_chat=r.health_chat||null;
+    PRODUCT_INFO.vp=r.vp||null;
+    PRODUCT_INFO.engine_seat=r.engine_seat||null;
+    PRODUCT_INFO.loaded=true;
+    renderProductChrome();
+    // Apply quiet manager scope once role is known (avoid full-fleet flash sticking).
+    renderTagbar();renderSidebar();if(mode!=="head")render();
+    if(PRODUCT_INFO.role==="manager") await loadManagedHealth();
+  }catch(_){}
+}
+async function loadManagedHealth(){
+  if(PRODUCT_INFO.role!=="manager")return;
+  try{
+    const r=await api("/api/managed");
+    if(!r||!r.ok)return;
+    PRODUCT_INFO.health={};
+    (r.planes||[]).forEach(p=>{if(p&&p.id)PRODUCT_INFO.health[p.id]=p;});
+    renderProductChrome();
+  }catch(_){}
 }
 
 async function poll(){
@@ -2985,7 +4942,9 @@ async function poll(){
     grid=r.sessions;cacheMeta();updateCostBanner();
     $("#status").textContent=grid.filter(s=>s.live).length+" live · polling";$("#status").className="";
     updateChrome();renderTagbar();renderSidebar();
-    if(mode!=="chat")render();
+    // Permanent seats in manager chrome must track grid truth every poll.
+    if(PRODUCT_INFO.role==="manager") renderProductChrome();
+    if(mode!=="head")render();
   }catch(e){$("#status").textContent="daemon unreachable";$("#status").className="err";}
 }
 
@@ -3028,7 +4987,7 @@ function renderSidebar(){
   document.querySelectorAll(".tagjump").forEach(el=>el.onclick=ev=>{   // click a card's tag → filter to it
     ev.stopPropagation();const tag=el.dataset.tag;
     activeTag=tag===activeTag?"":tag;
-    renderTagbar();renderSidebar();if(mode!=="chat")render();
+    renderTagbar();renderSidebar();if(mode!=="head")render();
   });
 }
 
@@ -3114,9 +5073,10 @@ function railHTML(s){
   const sum=s.summary||(s.live?"…":"gone");
   const i=sum.indexOf(" — ");
   const verb=i>0?sum.slice(0,i):sum, rest=i>0?sum.slice(i+3):"";
-  return '<div class="rail st-'+(s.state||"idle")+'"><span class="rv">'+esc(verb)+'</span>'
-    +(rest?' <span class="rt">'+esc(rest)+'</span>':'')
-    +'<div class="rfull"><b>'+esc(verb)+'</b>'+(rest?' — '+esc(rest):'')+'</div></div>';
+  // linkifyLinear already escapes; keep Linear keys clickable in the rail
+  return '<div class="rail st-'+(s.state||"idle")+'"><span class="rv">'+linkifyLinear(verb)+'</span>'
+    +(rest?' <span class="rt">'+linkifyLinear(rest)+'</span>':'')
+    +'<div class="rfull"><b>'+linkifyLinear(verb)+'</b>'+(rest?' — '+linkifyLinear(rest):'')+'</div></div>';
 }
 
 function makeTile(s){
@@ -3145,7 +5105,8 @@ function makeTile(s){
   }
   const rail=document.createElement("div");rail.className="railwrap";rail.innerHTML=railHTML(s);
   t.appendChild(h);t.appendChild(rail.firstChild);t.appendChild(p);
-  t.onclick=()=>openModal(s);
+  bindLinlinks(t);
+  t.onclick=e=>{if(e.target.closest("a.linlink"))return;openModal(s);};
   return t;
 }
 
@@ -3370,12 +5331,12 @@ async function mvPickHost(h){
   if(gen===MV.gen)renderOrphans();
 }
 async function mvAdopt(s,btn){
-  btn.disabled=true;btn.textContent="ATTACHING…";
+  btn.disabled=true;btn.textContent="OPENING HEAD…";
   const r=await api("/api/adopt",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({session:s,host:MV.host,name:s,
                          description:"orphan adopted from "+MV.host,
                          tags:["adopted",MV.host]})});
-  if(!r.ok){btn.disabled=false;btn.textContent="⇤ ATTACH";
+  if(!r.ok){btn.disabled=false;btn.textContent="⇤ OPEN HEAD";
     $("#mverr").textContent=r.error||"adopt failed";return;}
   MV.rows=MV.rows.filter(x=>x.name!==s);    // no longer an orphan
   renderOrphans();refresh();                // grid/sidebar pick it up
@@ -3387,7 +5348,7 @@ function orphanTile(s){
     +'<span class="nm">'+esc(s.name)+(s.attached?'<span class="att">●</span>':"")+'</span>'
     +'<span class="hosttag">⌨ '+esc(MV.host)+'</span>'
     +'<span class="age t-old">'+ago(s.age_sec)+'</span>';
-  const b=document.createElement("button");b.className="act oattach";b.textContent="⇤ ATTACH";
+  const b=document.createElement("button");b.className="act oattach";b.textContent="⇤ OPEN HEAD";
   b.onclick=e=>{e.stopPropagation();mvAdopt(s.name,b);};
   h.appendChild(b);
   const p=document.createElement("pre");
@@ -3421,18 +5382,642 @@ async function openOrphans(){
   renderOrphans();
 }
 
+// ---- CHATS view: Claude Code + Grok Build transcripts on disk that are not
+// live in a process. ORPHANS = unknown tmux; CHATS = dropped agent missions.
+// Resume is copy-paste (spawn is a different path — do not auto-launch).
+// Click a tile to peek last turns from the transcript.
+const CH={rows:[],loading:false,gen:0,status:"stale,recent",match:"",tool:"",
+  q:"",sort:"priority",counts:{},tools_counts:{},scan_ms:0,matched:0,openKey:"",peeks:{},
+  source:"",store_rows:null,did_sync:false};
+function chatAge(h){
+  if(h==null)return "—";
+  if(h<1)return Math.round(h*60)+"m";
+  if(h<48)return Math.round(h)+"h";
+  return Math.round(h/24)+"d";
+}
+function chatKey(c){return (c.tool||"")+"|"+(c.session_id||"");}
+async function copyResume(text,btn){
+  try{await navigator.clipboard.writeText(text||"");btn.textContent="✓ COPIED";
+    setTimeout(()=>btn.textContent="⧉ COPY",1200);}
+  catch(_){btn.textContent="select + copy";}
+}
+async function resumeChatInFleet(c,btn){
+  if(!c||c.status==="live")return;
+  const prev=btn.textContent;btn.disabled=true;btn.textContent="RESUMING…";
+  const errEl=$("#mverr");
+  try{
+    const r=await api("/api/chats/resume",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({tool:c.tool,session_id:c.session_id,cwd:c.cwd,title:c.title,
+                           greenmark:!!c.greenmark,gui:false})});
+    if(!r.ok){
+      btn.disabled=false;btn.textContent=prev;
+      if(errEl)errEl.textContent=(r.error||"resume failed")+(r.hint?(" — "+r.hint):"");
+      return;
+    }
+    btn.textContent="✓ IN FLEET · "+(r.name||"");
+    if(errEl)errEl.textContent="resumed as “"+(r.name||"?")+"” · "+(r.command||"")
+      +(r.partial?" · (spawn ok, agent may need a nudge)":"");
+    // refresh grid so the new session shows; jump to GRID so you can steer it
+    try{await poll();}catch(_){}
+    setTimeout(()=>{
+      setMode("grid");
+      const s=grid.find(x=>x.name===r.name||x.session===r.session);
+      if(s)openModal(s);
+    },400);
+  }catch(e){
+    btn.disabled=false;btn.textContent=prev;
+    if(errEl)errEl.textContent="daemon unreachable";
+  }
+}
+async function toggleChatPeek(c,tile){
+  const key=chatKey(c);
+  if(CH.openKey===key){CH.openKey="";renderChats();return;}
+  CH.openKey=key;renderChats();
+  if(CH.peeks[key])return;
+  try{
+    const r=await api("/api/chats/peek?tool="+encodeURIComponent(c.tool)
+      +"&session_id="+encodeURIComponent(c.session_id)+"&turns=8");
+    CH.peeks[key]=r;
+  }catch(e){CH.peeks[key]={ok:false,error:"unreachable"};}
+  if(CH.openKey===key)renderChats();
+}
+function chatTile(c){
+  const t=document.createElement("div");
+  const key=chatKey(c);
+  const open=CH.openKey===key;
+  t.className="tile chat"+(open?" open":"");
+  const st=c.status||"stale";
+  const h=document.createElement("header");
+  h.innerHTML='<span class="tool '+esc(c.tool||"")+'">'+esc(c.tool||"?")+'</span>'
+    +(c.greenmark?'<span class="gm">GM</span>':"")
+    +'<span class="nm" title="'+esc(c.session_id||"")+'">'+linkifyLinear(c.title||c.session_id||"")+'</span>'
+    +'<span class="st-'+esc(st)+'">'+esc(st)+'</span>'
+    +'<span class="age t-old">'+chatAge(c.age_hours)+'</span>';
+  const sum=document.createElement("div");sum.className="sum";
+  sum.innerHTML=linkifyLinear(c.summary||c.title||"(no summary)");
+  const cwd=document.createElement("div");cwd.className="cwd";cwd.title=c.cwd||"";
+  cwd.textContent=c.cwd||"";
+  const meta=document.createElement("div");meta.className="meta";
+  const bits=[];
+  if(c.messages!=null)bits.push(c.messages+" lines");
+  if(c.model)bits.push(String(c.model).split("/").pop());
+  if(c.branch)bits.push("⎇ "+c.branch);
+  if(c.mtime_iso)bits.push(c.mtime_iso.slice(0,10));
+  if(c.priority!=null)bits.push("prio "+c.priority);
+  if(c.fleet_name)bits.push("fleet "+c.fleet_name);
+  if(c.on_disk===false)bits.push("off-disk");
+  if(c.source)bits.push(c.source);
+  // Surface linked Linear issue from registry/resume metadata when present
+  if(c.linear&&c.linear.issue) bits.push(c.linear.issue);
+  meta.innerHTML=linkifyLinear(bits.join(" · "));
+  const res=document.createElement("div");res.className="resume";res.textContent=c.resume||"";
+  const acts=document.createElement("div");acts.className="actions";
+  const bFleet=document.createElement("button");bFleet.className="act oattach";
+  if(c.status==="resumed"&&c.fleet_name){
+    bFleet.textContent="↗ OPEN "+c.fleet_name;
+    bFleet.title="already resumed into fleet as "+c.fleet_name;
+    bFleet.onclick=e=>{e.stopPropagation();
+      setMode("grid");const s=grid.find(x=>x.name===c.fleet_name);if(s)openModal(s);
+      else{const err=$("#mverr");if(err)err.textContent="fleet session “"+c.fleet_name+"” not live — try RESUME again or check GRID";}};
+  }else if(c.status==="live"){
+    bFleet.textContent="● LIVE";bFleet.disabled=true;
+    bFleet.title="process still holds this chat — attach/boss, do not double-resume";
+  }else{
+    bFleet.textContent="⇤ RESUME IN FLEET";
+    bFleet.title="spawn tmux + register in fleet with "+(c.tool==="claude"?"claude --resume":"grok --resume");
+    bFleet.onclick=e=>{e.stopPropagation();resumeChatInFleet(c,bFleet);};
+  }
+  const bCopy=document.createElement("button");bCopy.className="act";bCopy.textContent="⧉ COPY";
+  bCopy.onclick=e=>{e.stopPropagation();copyResume(c.resume,bCopy);};
+  const bPeek=document.createElement("button");bPeek.className="act";
+  bPeek.textContent=open?"▾ CLOSE":"▸ PEEK";
+  bPeek.onclick=e=>{e.stopPropagation();toggleChatPeek(c,t);};
+  acts.appendChild(bFleet);acts.appendChild(bCopy);acts.appendChild(bPeek);
+  t.appendChild(h);t.appendChild(sum);t.appendChild(cwd);t.appendChild(meta);
+  t.appendChild(res);t.appendChild(acts);
+  if(open){
+    const peek=document.createElement("div");peek.className="peek";
+    const cached=CH.peeks[key];
+    if(!cached)peek.innerHTML='<div class="role">loading last turns…</div>';
+    else if(!cached.ok)peek.innerHTML='<div class="role">peek failed</div><div>'
+      +esc(cached.error||"error")+'</div>';
+    else if(!(cached.turns||[]).length)peek.innerHTML='<div class="role">no turns found in tail</div>';
+    else (cached.turns||[]).forEach(tr=>{
+      const d=document.createElement("div");d.className="turn";
+      d.innerHTML='<div class="role '+esc(tr.role||"")+'">'+esc(tr.role||"?")+'</div>'
+        +'<div class="body">'+linkifyLinear(tr.text||"")+'</div>';
+      peek.appendChild(d);
+    });
+    t.appendChild(peek);
+  }
+  bindLinlinks(t);
+  t.onclick=e=>{if(e.target.closest("button,a.linlink"))return;toggleChatPeek(c,t);};
+  return t;
+}
+function chChip(label,on,attrs){
+  return '<span class="hchip'+(on?" on":"")+'" '+attrs+'>'+esc(label)+'</span>';
+}
+function renderChats(){
+  const v=$("#views");
+  if(mode!=="chats")return;
+  const cnt=CH.counts||{};
+  const tc=CH.tools_counts||{};
+  const sts=[
+    ["stale,recent","needs attention"],
+    ["stale","stale"+(cnt.stale!=null?" · "+cnt.stale:"")],
+    ["recent","recent"+(cnt.recent!=null?" · "+cnt.recent:"")],
+    ["live","live"+(cnt.live!=null?" · "+cnt.live:"")],
+    ["resumed","resumed"+(cnt.resumed!=null?" · "+cnt.resumed:"")],
+    ["all","all"+(cnt.total!=null?" · "+cnt.total:"")],
+  ];
+  const tools=[
+    ["","both tools"],
+    ["claude","claude"+(tc.claude!=null?" · "+tc.claude:"")],
+    ["grok","grok"+(tc.grok!=null?" · "+tc.grok:"")],
+  ];
+  // Match chips follow active product skin (dynamic). Default is lane-tight.
+  const skinMatch=SKIN_ID==="gmux"?"greenmark"
+    :(SKIN_ID==="reevux"?"personal"
+    :(SKIN_ID==="amux"?"aic"
+    :(SKIN_ID==="directrux"?"directrux":"all")));
+  const matches=SKIN_ID==="directrux"
+    ?[["directrux","directrux only"],["all","all paths (unsafe)"]]
+    :(SKIN_ID==="gmux"
+      ?[["greenmark","greenmark"],["all","all paths"]]
+      :(SKIN_ID==="reevux"
+        ?[["personal","personal"],["all","all paths"]]
+        :(SKIN_ID==="amux"
+          ?[["aic","aic"],["all","all paths"]]
+          :[["all","all paths"],["aic","aic"],["personal","personal"],["greenmark","greenmark"],["directrux","directrux"]])));
+  const sorts=[["priority","by urgency"],["mtime","by recency"]];
+  const activeMatch=CH.match||skinMatch;
+  v.innerHTML='<div id="chbar">'
+    +'<div class="row" id="chstrow">'+sts.map(([k,l])=>chChip(l,CH.status===k,'data-st="'+k+'"')).join("")
+    +'<span class="hint">disk → fleet: RESUME IN FLEET spawns tmux · click tile to peek</span></div>'
+    +'<div class="row" id="chtoolrow">'+tools.map(([k,l])=>chChip(l,CH.tool===k,'data-tool="'+k+'"')).join("")
+    +matches.map(([k,l])=>chChip(l,activeMatch===k,'data-match="'+k+'"')).join("")
+    +sorts.map(([k,l])=>chChip(l,CH.sort===k,'data-sort="'+k+'"')).join("")
+    +'</div>'
+    +'<div class="row">'
+    +'<input id="chq" type="search" placeholder="search title · cwd · id…" value="'+esc(CH.q)+'">'
+    +'<button class="act" id="chrefresh" type="button" title="force re-index disk into chats.db">↻ re-index</button>'
+    +'<span class="stat">'+(CH.loading?"loading…":
+      ('showing <b>'+CH.rows.length+'</b>'
+       +(CH.matched&&CH.matched!==CH.rows.length?(' of '+CH.matched):'')
+       +(CH.scan_ms?(' · '+CH.scan_ms+'ms'):'')
+       +(CH.source?(' · '+CH.source):'')
+       +(CH.store_rows!=null?(' · db '+CH.store_rows):'')
+       +(CH.did_sync?' · synced':'')
+       +(cnt.stale!=null?(' · <b>'+cnt.stale+'</b> stale'):'')
+       +(cnt.resumed?(' · '+cnt.resumed+' resumed'):'')))+'</span>'
+    +'</div></div><div id="mverr"></div>';
+  v.querySelectorAll("#chstrow .hchip").forEach(el=>el.onclick=()=>{CH.status=el.dataset.st;syncChatURL();loadChats(false);});
+  v.querySelectorAll("#chtoolrow .hchip[data-tool]").forEach(el=>el.onclick=()=>{CH.tool=el.dataset.tool||"";syncChatURL();loadChats(false);});
+  v.querySelectorAll("#chtoolrow .hchip[data-match]").forEach(el=>el.onclick=()=>{CH.match=el.dataset.match||"";syncChatURL();loadChats(false);});
+  v.querySelectorAll("#chtoolrow .hchip[data-sort]").forEach(el=>el.onclick=()=>{CH.sort=el.dataset.sort||"priority";syncChatURL();loadChats(false);});
+  const chq=$("#chq");
+  if(chq){let tmo=null;chq.oninput=()=>{clearTimeout(tmo);tmo=setTimeout(()=>{CH.q=chq.value.trim();syncChatURL();loadChats(false);},280);};
+    chq.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();CH.q=chq.value.trim();syncChatURL();loadChats(false);}};}
+  const chrf=$("#chrefresh");if(chrf)chrf.onclick=()=>{CH.peeks={};loadChats(true);};
+  if(CH.loading&&!CH.rows.length){v.insertAdjacentHTML("beforeend",
+    '<div id="empty"><div class="glyph">💬</div><div>scanning Claude + Grok stores…</div></div>');return;}
+  if(!CH.loading&&!CH.rows.length){v.insertAdjacentHTML("beforeend",
+    '<div id="empty"><div class="glyph">💬</div><div>no matching chats for this skin'
+    +(activeMatch?(' · match=<b>'+esc(activeMatch)+'</b>'):'')
+    +'<br><span style="font-size:12px">'
+    +(SKIN_ID==="directrux"
+      ?'Directrux only shows meta/directrux work — not the whole machine. “all paths” is opt-in and unsafe.'
+      :'try another match chip or clear search')
+    +'</span></div></div>');return;}
+  const g=document.createElement("div");g.className="tilegrid";
+  CH.rows.forEach(c=>g.appendChild(chatTile(c)));
+  v.appendChild(g);
+}
+function syncChatURL(){
+  // fold chat filters into the hash when in chats view
+  if(mode!=="chats")return;
+  syncURL();
+}
+async function loadChats(forceRefresh){
+  CH.loading=true;const gen=++CH.gen;renderChats();
+  let q="/api/chats?limit=80&recent_hours=24&sort="+encodeURIComponent(CH.sort||"priority");
+  if(CH.status&&CH.status!=="all")q+="&status="+encodeURIComponent(CH.status);
+  // empty match → server defaults per skin (directrux → directrux only, not all)
+  if(CH.match)q+="&match="+encodeURIComponent(CH.match);
+  if(CH.tool)q+="&tools="+encodeURIComponent(CH.tool);
+  if(CH.q)q+="&q="+encodeURIComponent(CH.q);
+  if(forceRefresh)q+="&refresh=1";
+  try{
+    const r=await api(q);
+    if(gen!==CH.gen)return;
+    CH.rows=r.ok?(r.chats||[]):[];
+    CH.counts=r.counts||{};
+    CH.tools_counts=r.tools_counts||{};
+    CH.scan_ms=r.scan_ms||0;
+    CH.matched=r.matched||CH.rows.length;
+    CH.source=r.source||"";
+    CH.store_rows=r.store_rows;
+    CH.did_sync=!!r.did_sync;
+    if(r.ok&&r.match&&!CH.match)CH.match=r.match;  // surface server default (gmux→greenmark)
+    if(!r.ok){const err=$("#mverr");if(err)err.textContent=r.error||"scan failed";}
+  }catch(e){
+    if(gen!==CH.gen)return;
+    CH.rows=[];
+    const err=$("#mverr");if(err)err.textContent="daemon unreachable";
+  }
+  CH.loading=false;renderChats();updateChrome();
+}
+async function openChats(){
+  // restore filters from URL hash if present
+  const p=new URLSearchParams(location.hash.slice(1));
+  if(p.get("ch_status"))CH.status=p.get("ch_status");
+  if(p.get("ch_tool")!=null)CH.tool=p.get("ch_tool")||"";
+  if(p.get("ch_match"))CH.match=p.get("ch_match");
+  if(p.get("ch_q"))CH.q=p.get("ch_q");
+  if(p.get("ch_sort"))CH.sort=p.get("ch_sort");
+  renderChats();
+  loadChats();
+}
+
+
+// ---- CALENDAR: Google-like week/month for cron message jobs ----
+const CAL={view:"week",anchor:new Date(), jobs:[], events:[], loading:false, gen:0, hidden:{}, selected:null};
+const CAL_COLORS=["#7eb8da","#f0b429","#6bcb77","#e07a5f","#9b8cff","#4ecdc4","#ff8fab","#c9a227"];
+function calColor(id){let h=0;const s=String(id||"");for(let i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))>>>0;return CAL_COLORS[h%CAL_COLORS.length];}
+// Plain-English schedule (mirrors emux.schedule.humanize_cron) — sidebar speaks this, not raw cron.
+const CAL_TZ_ABBREV={
+  "America/Chicago":"CT","America/New_York":"ET","America/Denver":"MT",
+  "America/Los_Angeles":"PT","America/Phoenix":"MST","UTC":"UTC","Etc/UTC":"UTC"
+};
+function calTzLabel(tz){
+  const name=(tz||"").trim()||"America/Chicago";
+  if(CAL_TZ_ABBREV[name]) return CAL_TZ_ABBREV[name];
+  if(name.includes("/")) return name.split("/").pop().replace(/_/g," ");
+  return name;
+}
+function calClockPhrase(minute, hour){
+  if(hour.startsWith("*/") && /^\d+$/.test(minute)){
+    const n=parseInt(hour.slice(2),10); if(!n) return null;
+    const base="every "+n+" hour"+(n===1?"":"s");
+    const m=parseInt(minute,10);
+    return m===0?base:(base+" at :"+String(m).padStart(2,"0"));
+  }
+  if(minute.startsWith("*/") && hour==="*"){
+    const n=parseInt(minute.slice(2),10); if(!n) return null;
+    return n===1?"every minute":("every "+n+" minutes");
+  }
+  if(hour==="*" && /^\d+$/.test(minute)){
+    const m=parseInt(minute,10);
+    return m===0?"every hour":("every hour at :"+String(m).padStart(2,"0"));
+  }
+  if(/^\d+$/.test(minute) && /^\d+$/.test(hour)){
+    const h=parseInt(hour,10), m=parseInt(minute,10);
+    if(h<0||h>23||m<0||m>59) return null;
+    const suffix=h<12?"AM":"PM";
+    let h12=h%12; if(h12===0) h12=12;
+    return m===0?(h12+":00 "+suffix):(h12+":"+String(m).padStart(2,"0")+" "+suffix);
+  }
+  return null;
+}
+function calDowPhrase(dow){
+  if(dow==="*"||dow==="?") return "every day";
+  if(dow==="1-5"||dow==="1,2,3,4,5") return "weekdays";
+  if(dow==="0,6"||dow==="6,0") return "weekends";
+  const names={0:"Sunday",1:"Monday",2:"Tuesday",3:"Wednesday",4:"Thursday",5:"Friday",6:"Saturday",7:"Sunday"};
+  const toks=[];
+  for(const piece of dow.split(",")){
+    const p=piece.trim(); if(!p) continue;
+    if(p.includes("-")){
+      const [a,b]=p.split("-").map(x=>parseInt(x,10));
+      if(Number.isNaN(a)||Number.isNaN(b)||a>b) return null;
+      for(let i=a;i<=b;i++) toks.push(String(i));
+    }else if(/^\d+$/.test(p)) toks.push(p);
+    else return null;
+  }
+  if(!toks.length) return null;
+  const uniq=[...new Set(toks.map(t=>t==="7"?"0":t))];
+  const label=t=>names[t]||t;
+  if(uniq.length===1) return label(uniq[0])+"s";
+  if(uniq.length===2) return label(uniq[0])+"s and "+label(uniq[1])+"s";
+  return uniq.slice(0,-1).map(t=>label(t)+"s").join(", ")+", and "+label(uniq[uniq.length-1])+"s";
+}
+function humanizeCron(expr, timezone){
+  const raw=(expr||"").trim();
+  if(!raw) return "no schedule";
+  const parts=raw.split(/\s+/);
+  if(parts.length!==5) return raw;
+  const [minute,hour,dom,month,dow]=parts;
+  const tz=calTzLabel(timezone);
+  let dayPart=null;
+  if((dom==="*"||dom==="?") && month==="*") dayPart=calDowPhrase(dow);
+  else if(dom!=="*" && dom!=="?" && (dow==="*"||dow==="?")){
+    dayPart=/^\d+$/.test(dom)?("on the "+parseInt(dom,10)+" of each month"):("on day "+dom+" each month");
+  }else if(dom!=="*" && dom!=="?" && dow!=="*" && dow!=="?"){
+    dayPart=(calDowPhrase(dow)||("DOW "+dow))+" or day "+dom;
+  }else dayPart=(dow==="*"||dow==="?")?"every day":calDowPhrase(dow);
+  const clock=calClockPhrase(minute, hour);
+  if(!clock) return raw+" ("+tz+")";
+  if(clock.startsWith("every")){
+    if(!dayPart||dayPart==="every day") return clock.charAt(0).toUpperCase()+clock.slice(1)+" ("+tz+")";
+    return clock.charAt(0).toUpperCase()+clock.slice(1)+" on "+dayPart+" ("+tz+")";
+  }
+  if(!dayPart||dayPart==="every day") return "Every day at "+clock+" "+tz;
+  if(dayPart==="weekdays") return "Weekdays at "+clock+" "+tz;
+  if(dayPart==="weekends") return "Weekends at "+clock+" "+tz;
+  return dayPart.charAt(0).toUpperCase()+dayPart.slice(1)+" at "+clock+" "+tz;
+}
+function calWhen(job){
+  if(job&&job.when) return job.when;
+  return humanizeCron(job&&job.cron, job&&job.timezone);
+}
+function calStartOfWeek(d){const x=new Date(d);const day=(x.getDay()+6)%7;x.setHours(0,0,0,0);x.setDate(x.getDate()-day);return x;}
+function calStartOfMonth(d){const x=new Date(d.getFullYear(),d.getMonth(),1);x.setHours(0,0,0,0);return x;}
+function calAddDays(d,n){const x=new Date(d);x.setDate(x.getDate()+n);return x;}
+function calIso(d){return new Date(d).toISOString();}
+function calRange(){
+  if(CAL.view==="month"){
+    const start=calStartOfWeek(calStartOfMonth(CAL.anchor));
+    return {start, end:calAddDays(start,42)};
+  }
+  const start=calStartOfWeek(CAL.anchor);
+  return {start, end:calAddDays(start,7)};
+}
+function calTitle(){
+  if(CAL.view==="month")return CAL.anchor.toLocaleString(undefined,{month:"long",year:"numeric"});
+  const {start,end}=calRange();
+  const e=calAddDays(end,-1);
+  const a=start.toLocaleDateString(undefined,{month:"short",day:"numeric"});
+  const b=e.toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"});
+  return a+" – "+b;
+}
+function openCalendar(){
+  const v=$("#views"); if(!v)return;
+  v.innerHTML='<div id="calroot">'
+    +'<div id="calbar">'
+    +'<button class="act" id="calprev" type="button">‹</button>'
+    +'<button class="act" id="caltoday" type="button">Today</button>'
+    +'<button class="act" id="calnext" type="button">›</button>'
+    +'<h2 id="caltitle"></h2>'
+    +'<button class="act" id="calweekbtn" type="button">Week</button>'
+    +'<button class="act" id="calmonthbtn" type="button">Month</button>'
+    +'<button class="act" id="calnew" type="button">+ New</button>'
+    +'<button class="act" id="calref" type="button">↻</button>'
+    +'</div>'
+    +'<div id="calbody"><aside id="calseries"><h3>Series</h3><div id="calserlist"></div></aside><div id="calmain"></div></div>'
+    +'</div>'
+    +'<div id="caldrawer"><div class="dh"><b id="caldt">Event</b><button class="act" id="caldx" type="button">✕</button></div>'
+    +'<div class="db" id="caldb"></div><div class="df" id="caldf"></div></div>';
+  $("#calprev").onclick=()=>{CAL.anchor=calAddDays(CAL.anchor,CAL.view==="month"?-28:-7);loadCalendar();};
+  $("#calnext").onclick=()=>{CAL.anchor=calAddDays(CAL.anchor,CAL.view==="month"?28:7);loadCalendar();};
+  $("#caltoday").onclick=()=>{CAL.anchor=new Date();loadCalendar();};
+  $("#calweekbtn").onclick=()=>{CAL.view="week";loadCalendar();};
+  $("#calmonthbtn").onclick=()=>{CAL.view="month";loadCalendar();};
+  $("#calnew").onclick=()=>calOpenDrawer(null,true);
+  $("#calref").onclick=()=>loadCalendar();
+  $("#caldx").onclick=()=>calCloseDrawer();
+  loadCalendar();
+}
+async function loadCalendar(){
+  // Skeleton / stale-while-revalidate: paint chrome immediately (CHATS/ORPHANS pattern).
+  // Prior jobs stay visible while the range fetch runs — never blank the rail on nav.
+  CAL.loading=true;
+  const gen=++CAL.gen;
+  renderCalendar();
+  const {start,end}=calRange();
+  const q="/api/schedule?from="+encodeURIComponent(calIso(start))+"&to="+encodeURIComponent(calIso(end));
+  try{
+    const r=await api(q);
+    if(gen!==CAL.gen) return; // superseded by a newer nav/refresh
+    if(r&&r.ok){CAL.jobs=r.jobs||[];CAL.events=r.events||[];}
+  }catch(e){
+    if(gen!==CAL.gen) return;
+    if(!CAL.jobs.length){CAL.jobs=[];CAL.events=[];}
+  }
+  if(gen!==CAL.gen) return;
+  CAL.loading=false;
+  renderCalendar();
+}
+function calVisibleEvents(){
+  return (CAL.events||[]).filter(ev=>!CAL.hidden[ev.job_id]);
+}
+function calSkeletonSeries(){
+  return [0,1,2,3,4,5].map(()=>'<div class="cal-skel cal-skel-ser"></div>').join("");
+}
+function calSkeletonMain(){
+  // Lightweight grid placeholder — matches week columns so layout does not jump.
+  let html='<div id="calweek"><div class="hd"></div>';
+  for(let i=0;i<7;i++) html+='<div class="hd"><div class="cal-skel" style="height:12px;margin:4px auto;width:70%"></div></div>';
+  html+='<div class="gutter">all</div>';
+  for(let i=0;i<7;i++){
+    html+='<div class="cell">';
+    for(let j=0;j<3;j++) html+='<div class="cal-skel cal-skel-cell"></div>';
+    html+='</div>';
+  }
+  html+='</div>';
+  return html;
+}
+function renderCalendar(){
+  const title=$("#caltitle"), main=$("#calmain"), ser=$("#calserlist");
+  if(!main)return;
+  if(title)title.textContent=calTitle()+(CAL.loading?" …":"");
+  const wbtn=$("#calweekbtn"), mbtn=$("#calmonthbtn");
+  if(wbtn)wbtn.classList.toggle("on",CAL.view==="week");
+  if(mbtn)mbtn.classList.toggle("on",CAL.view==="month");
+  // series checklist — title + plain-English when (cron de-emphasized)
+  if(ser){
+    if(CAL.loading&&!CAL.jobs.length){
+      ser.innerHTML=calSkeletonSeries();
+    }else if(!CAL.jobs.length){
+      ser.innerHTML='<div style="font-size:12px;color:var(--text-dim);padding:8px">No series yet. Click <b>+ New</b>.</div>';
+    }else{
+      ser.innerHTML=CAL.jobs.map(j=>{
+        const c=calColor(j.id), off=!!CAL.hidden[j.id]||!j.enabled;
+        const when=calWhen(j);
+        return '<div class="calser'+(off?" off":"")+'" data-id="'+esc(j.id)+'" title="'+esc((j.title||j.id)+" — "+when+(j.cron?" · "+j.cron:""))+'">'
+          +'<span class="dot" style="background:'+c+'"></span>'
+          +'<div class="calser-body">'
+          +'<div class="calser-title">'+esc(j.title||j.id)+(j.enabled?"":' <span style="font-size:9px;opacity:.7;font-weight:400">off</span>')+'</div>'
+          +'<div class="calser-when">'+esc(when)+'</div>'
+          +'<div class="calser-cron">'+esc(j.cron||"")+'</div>'
+          +'</div></div>';
+      }).join("");
+      ser.querySelectorAll(".calser").forEach(el=>el.onclick=()=>{
+        const id=el.dataset.id; CAL.hidden[id]=!CAL.hidden[id]; renderCalendar();
+      });
+    }
+  }
+  // Main grid: skeleton only on cold load; keep prior events while refreshing a new range.
+  if(CAL.loading&&!CAL.jobs.length&&!CAL.events.length){
+    main.innerHTML=calSkeletonMain();
+    return;
+  }
+  if(CAL.view==="month") renderCalMonth(main);
+  else renderCalWeek(main);
+}
+function renderCalWeek(main){
+  const {start}=calRange();
+  const hours=[7,8,9,10,11,12,13,14,15,16,17,18];
+  const days=[...Array(7)].map((_,i)=>calAddDays(start,i));
+  const today=new Date(); today.setHours(0,0,0,0);
+  let html='<div id="calweek"><div class="hd"></div>';
+  days.forEach(d=>{
+    const isT=d.getTime()===today.getTime();
+    html+='<div class="hd'+(isT?" today":"")+'">'+d.toLocaleDateString(undefined,{weekday:"short",month:"numeric",day:"numeric"})+'</div>';
+  });
+  html+='<div class="gutter">all</div>';
+  days.forEach(d=>{
+    const isT=d.getTime()===today.getTime();
+    const dayEv=calVisibleEvents().filter(ev=>{
+      const s=new Date(ev.start); return s.toDateString()===d.toDateString();
+    });
+    html+='<div class="cell'+(isT?" today":"")+'" data-day="'+d.toISOString()+'">';
+    dayEv.forEach(ev=>{
+      const s=new Date(ev.start);
+      const t=s.toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"});
+      html+='<div class="calev" data-eid="'+esc(ev.id)+'" style="background:'+calColor(ev.job_id)+'" title="'+esc(ev.title+" · "+(ev.when||calWhen(ev)))+'">'
+        +esc(t+" "+ev.title)+'</div>';
+    });
+    html+='</div>';
+  });
+  hours.forEach(h=>{
+    html+='<div class="gutter">'+((h%12)||12)+(h<12?"a":"p")+'</div>';
+    days.forEach(d=>{
+      const isT=d.getTime()===today.getTime();
+      html+='<div class="cell'+(isT?" today":"")+'" style="min-height:28px"></div>';
+    });
+  });
+  html+='</div>';
+  main.innerHTML=html;
+  main.querySelectorAll(".calev").forEach(el=>el.onclick=e=>{e.stopPropagation();
+    const ev=CAL.events.find(x=>x.id===el.dataset.eid); if(ev) calOpenDrawer(ev,false);});
+}
+function renderCalMonth(main){
+  const {start}=calRange();
+  const today=new Date(); today.setHours(0,0,0,0);
+  const mon=CAL.anchor.getMonth();
+  let html='<div id="calmonth">';
+  ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].forEach(n=>html+='<div class="mhd">'+n+'</div>');
+  for(let i=0;i<42;i++){
+    const d=calAddDays(start,i);
+    const isT=d.getTime()===today.getTime();
+    const out=d.getMonth()!==mon;
+    const dayEv=calVisibleEvents().filter(ev=>new Date(ev.start).toDateString()===d.toDateString());
+    html+='<div class="mcell'+(out?" out":"")+(isT?" today":"")+'"><div class="mdn">'+d.getDate()+'</div>';
+    dayEv.slice(0,4).forEach(ev=>{
+      html+='<div class="calev" data-eid="'+esc(ev.id)+'" style="background:'+calColor(ev.job_id)+'" title="'+esc(ev.when||calWhen(ev))+'">'
+        +esc(ev.title)+'</div>';
+    });
+    if(dayEv.length>4) html+='<div style="font-size:10px;color:var(--text-dim)">+'+ (dayEv.length-4)+' more</div>';
+    html+='</div>';
+  }
+  html+='</div>';
+  main.innerHTML=html;
+  main.querySelectorAll(".calev").forEach(el=>el.onclick=e=>{e.stopPropagation();
+    const ev=CAL.events.find(x=>x.id===el.dataset.eid); if(ev) calOpenDrawer(ev,false);});
+}
+function calCloseDrawer(){const d=$("#caldrawer"); if(d)d.classList.remove("open"); CAL.selected=null;}
+function calOpenDrawer(ev, isNew){
+  const d=$("#caldrawer"), db=$("#caldb"), df=$("#caldf"), dh=$("#caldt");
+  if(!d||!db||!df)return;
+  d.classList.add("open");
+  const job=ev?CAL.jobs.find(j=>j.id===ev.job_id):null;
+  // Desk default: weekdays only (no Sat/Sun fires). Cron DOW 1-5 = Mon–Fri.
+  const model=isNew?{id:"",title:"",cron:"0 7 * * 1-5",target:"",message:"",timezone:"America/Chicago",enabled:true}
+    :{id:job?.id||ev.job_id, title:job?.title||ev.title, cron:job?.cron||ev.cron, target:job?.target||ev.target,
+      message:job?.message||ev.message||"", timezone:job?.timezone||ev.timezone||"America/Chicago",
+      enabled:job?!!job.enabled:true};
+  CAL.selected=model;
+  if(dh) dh.textContent=isNew?"New scheduled message":(model.title||model.id);
+  db.innerHTML=
+    '<label>Title<input id="cf_title" value="'+esc(model.title||"")+'"></label>'
+    +'<label>Job id<input id="cf_id" value="'+esc(model.id||"")+'" '+(isNew?"":"readonly")+' placeholder="auto if blank"></label>'
+    +'<div id="cf_when" style="font-size:13px;font-weight:600;color:var(--amber);padding:8px 10px;background:var(--bg);border:1px solid var(--line);border-radius:4px"></div>'
+    +'<label>Cron (advanced)<input id="cf_cron" value="'+esc(model.cron||"")+'" placeholder="0 7 * * 1-5"></label>'
+    +'<div style="font-size:11px;color:var(--text-dim);margin-top:-6px">Sidebar speaks the amber line above — not the cron. Desk default is <b>weekdays</b>.</div>'
+    +'<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:2px">'
+    +[["0 7 * * 1-5","Weekdays 7am"],["0 9 * * 1-5","Weekdays 9am"],["0 7 * * *","Daily 7am (7 days)"],["0 8 * * 1","Mondays 8am"],["0 */6 * * 1-5","Every 6h weekdays"]]
+      .map(([c,l])=>'<button type="button" class="act cf_preset" data-c="'+c+'">'+l+'</button>').join("")
+    +'</div>'
+    +'<label>Timezone<input id="cf_tz" value="'+esc(model.timezone||"America/Chicago")+'"></label>'
+    +'<label>Target session (registry name)<input id="cf_target" value="'+esc(model.target||"")+'" placeholder="northstar-iran-daily"></label>'
+    +'<label>Message<textarea id="cf_msg">'+esc(model.message||"")+'</textarea></label>'
+    +'<label style="flex-direction:row;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--text)">'
+    +'<input type="checkbox" id="cf_en" '+(model.enabled?"checked":"")+'> Enabled</label>'
+    +(ev&&ev.start?'<div style="color:var(--text-dim);font-size:11px">Occurrence: '+esc(new Date(ev.start).toLocaleString())+'</div>':'');
+  const syncWhen=()=>{
+    const el=$("#cf_when"); if(!el) return;
+    el.textContent=humanizeCron(($("#cf_cron")||{}).value, ($("#cf_tz")||{}).value);
+  };
+  db.querySelectorAll(".cf_preset").forEach(b=>b.onclick=()=>{$("#cf_cron").value=b.dataset.c; syncWhen();});
+  const cronIn=$("#cf_cron"), tzIn=$("#cf_tz");
+  if(cronIn) cronIn.addEventListener("input", syncWhen);
+  if(tzIn) tzIn.addEventListener("input", syncWhen);
+  syncWhen();
+  df.innerHTML=
+    '<button class="act" id="cf_save" type="button">'+(isNew?"Create":"Save")+'</button>'
+    +(isNew?"":'<button class="act" id="cf_run" type="button">Run now</button>')
+    +(isNew?"":'<button class="act danger" id="cf_del" type="button">Delete series</button>')
+    +'<button class="act" id="cf_cancel" type="button">Close</button>';
+  $("#cf_cancel").onclick=()=>calCloseDrawer();
+  $("#cf_save").onclick=async()=>{
+    const body={
+      id:($("#cf_id").value||"").trim()||undefined,
+      title:($("#cf_title").value||"").trim(),
+      cron:($("#cf_cron").value||"").trim(),
+      timezone:($("#cf_tz").value||"America/Chicago").trim(),
+      target:($("#cf_target").value||"").trim(),
+      message:($("#cf_msg").value||""),
+      enabled:!!$("#cf_en").checked,
+    };
+    if(!body.cron||!body.target||!body.message){alert("cron, target, and message are required");return;}
+    let r;
+    if(isNew) r=await api("/api/schedule",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    else r=await api("/api/schedule/update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:model.id,...body})});
+    if(!r||!r.ok){alert((r&&r.error)||"save failed");return;}
+    calCloseDrawer(); loadCalendar();
+  };
+  const runB=$("#cf_run"); if(runB) runB.onclick=async()=>{
+    const r=await api("/api/schedule/run",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:model.id})});
+    alert(r&&r.ok?("Fired → "+(r.target||model.target)):("Fire failed: "+((r&&r.error)||"unknown")));
+    loadCalendar();
+  };
+  const delB=$("#cf_del"); if(delB) delB.onclick=async()=>{
+    if(!confirm("Delete series "+model.id+"?"))return;
+    await api("/api/schedule/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:model.id})});
+    calCloseDrawer(); loadCalendar();
+  };
+}
+
 function render(){
   if(mode==="grid")renderGrid();
   else if(mode==="groups")renderGroups();
   else if(mode==="activity")renderActivity();
   else if(mode==="flow")renderFlow();
-  // orphans is manual: the 2s poll must not rebuild it mid-click — enter once,
-  // then only host picks / adopts redraw it
+  // orphans/chats/calendar are manual: the 2s poll must not rebuild them mid-click
   else if(mode==="orphans"){if(!document.getElementById("mvhosts"))openOrphans();}
+  else if(mode==="chats"){if(!document.getElementById("chbar"))openChats();}
+  else if(mode==="calendar"){if(!document.getElementById("calroot"))openCalendar();}
+  // Manager quiet + empty grid: show a calm empty state (not 40 offline tiles).
+  if(isManagerQuiet()&&mode==="grid"){
+    const v=$("#views");
+    if(v&&!shown().filter(s=>s.live).length&&!v.querySelector(".mgr-empty")){
+      // renderGrid may have filled tiles; if zero live scoped, reinforce empty message
+      if(!shown().length){
+        v.innerHTML='<div class="mgr-empty" style="padding:2rem;max-width:36rem;color:var(--text-dim);font-size:13px;line-height:1.5">'
+          +'<div style="color:var(--amber);font-weight:700;letter-spacing:1px;margin-bottom:8px">MANAGER SCOPE</div>'
+          +'Primary surface is the <b>managed planes</b> strip (left). '
+          +'Local session list is quiet on purpose — only standing health / manager-tagged work. '
+          +'Worker fleets live in <b>amux / gmux / reevux</b> rooms. '
+          +'<br><br><span class="tagchip" style="cursor:pointer" onclick="setManagerFleet(true)">show full fleet…</span>'
+          +' · <a href="__PUBLIC_PATH__/ai.html" style="color:var(--amber)">diagnosis /ai</a>'
+          +'</div>';
+      }
+    }
+  }
 }
 
-function pinned(){const c=$("#chat");return c.scrollHeight-c.scrollTop-c.clientHeight<60;}
-function scrollBottom(){const c=$("#chat");c.scrollTop=c.scrollHeight;$("#jump").style.display="none";}
+function pinned(){const c=$("#head");return c.scrollHeight-c.scrollTop-c.clientHeight<60;}
+function scrollBottom(){const c=$("#head");c.scrollTop=c.scrollHeight;$("#jump").style.display="none";}
 function clockNow(){const d=new Date();return d.toTimeString().slice(0,5);}  // HH:MM (#10)
 
 function addBubble(cls,who,text){
@@ -3442,8 +6027,9 @@ function addBubble(cls,who,text){
     w.textContent=(cls==="user")?who+" · "+clockNow():who;   // timestamp user bubbles (#10)
     b.appendChild(w);
   }
-  const t=document.createElement("div");t.textContent=text;b.appendChild(t);
-  const c=$("#chat");
+  const t=document.createElement("div");t.innerHTML=linkifyLinear(text);b.appendChild(t);
+  bindLinlinks(b);
+  const c=$("#head");
   if(screenEl&&screenEl.parentElement===c){c.insertBefore(b,screenEl);}else{c.appendChild(b);}
   scrollBottom();
 }
@@ -3461,7 +6047,7 @@ async function refreshScreen(){
         s.dataset.last=r.content;
         s.textContent=r.content.replace(/\s+$/,"")+"\n";
         const cur=document.createElement("span");cur.className="cursorblock";s.appendChild(cur);
-        if(document.hidden){flashOn=true;document.title="● emux — "+current.name;}  // title flash (#20)
+        if(document.hidden){flashOn=true;document.title="● __PRODUCT__ — "+current.name;}  // title flash (#20)
         if(wasPinned)scrollBottom();else $("#jump").style.display="block";          // jump pill (#11)
       }
     }else{
@@ -3471,18 +6057,18 @@ async function refreshScreen(){
   }catch(e){$("#status").textContent="daemon unreachable";$("#status").className="err";}
 }
 
-function openChat(sess){
+function openHead(sess){
   current=sess;
-  setMode("chat");
-  $("#title").textContent=sess.name;
+  setMode("head");
+  $("#title").textContent="HEAD · "+sess.name;
   $("#status").textContent="connecting…";$("#status").className="";
-  const c=$("#chat");c.innerHTML="";screenEl=null;
+  const c=$("#head");c.innerHTML="";screenEl=null;
   screenEl=document.createElement("div");screenEl.id="screen-bubble";screenEl.className="bubble";
   screenEl.innerHTML='<div class="who"></div><div id="screen"></div>';
-  screenEl.querySelector(".who").textContent=sess.name+" · live screen (updates in place)";
+  screenEl.querySelector(".who").textContent=sess.name+" · live head (updates in place)";
   c.appendChild(screenEl);
   applyWrap();
-  addBubble("sys",null,"monitoring tmux session “"+sess.session+"”"+(sess.description?" — "+sess.description:""));
+  addBubble("sys",null,"head on session “"+sess.session+"”"+(sess.description?" — "+sess.description:"")+" — type to drive");
   document.querySelectorAll(".card").forEach(el2=>el2.classList.toggle("active",el2.dataset.name===sess.name));
   refreshScreen();chatTimer=setInterval(refreshScreen,1500);
   $("#input").focus();
@@ -3533,98 +6119,445 @@ $("#attachbtn").onclick=()=>{
 $("#refreshbtn").onclick=()=>{poll();if(current)refreshScreen();};
 // jump to bottom pill (#11)
 $("#jump").onclick=scrollBottom;
-$("#chat").addEventListener("scroll",()=>{if(pinned())$("#jump").style.display="none";});
+$("#head").addEventListener("scroll",()=>{if(pinned())$("#jump").style.display="none";});
 // sidebar filter (#7)
-$("#filter").addEventListener("input",e=>{filterStr=e.target.value.toLowerCase();renderSidebar();if(mode!=="chat")render();syncURL();});
+$("#filter").addEventListener("input",e=>{filterStr=e.target.value.toLowerCase();renderSidebar();if(mode!=="head")render();syncURL();});
 // ---------- zoom-in steer modal ----------
 let modalSession=null, modalTimer=null;
 let digestErr=false, digestRetries=0;   // The Gist: recover from a failed summarize when the pane changes, capped at 10
+function modalScreenPinned(sc){
+  if(!sc)return true;
+  // 80px tolerance: live panes jitter; don't yank the user for a few pixels
+  return sc.scrollHeight-sc.scrollTop-sc.clientHeight<80;
+}
+function updateModalJump(){
+  const sc=$("#modalscreen"), j=$("#modaljump");
+  if(!sc||!j)return;
+  const show=modalSession&&!modalScreenPinned(sc)&&sc.scrollHeight>sc.clientHeight+40;
+  j.classList.toggle("on",!!show);
+}
+function modalScrollBottom(){
+  const sc=$("#modalscreen");if(!sc)return;
+  sc.scrollTop=sc.scrollHeight;updateModalJump();
+}
+// Rolling book of pane snapshots so HTML can scroll even when a single capture
+// is only one screen (Claude alt-screen has history_size=0).
+let modalBook=[];          // oldest → newest unique captures
+let modalScrollMode="app"; // "app" | "tmux" from last capture
+let modalHistoryText="";   // durable chat transcript (disk) — makes HTML scroll real
+const MODAL_BOOK_MAX=40;
+function modalRenderBook(sc,atBottom,keepTop){
+  if(sc) sc.classList.remove("empty-placeholder");
+  const sep="\n\n─── earlier view ───\n\n";
+  const live=modalBook.length?modalBook.join(sep):"";
+  let body="";
+  if(modalHistoryText){
+    body+="══ conversation history (scroll up) ══\n\n"+modalHistoryText.trim()+"\n\n";
+    body+="══ live pane ══\n\n";
+  }
+  body+=live+"\n";
+  sc.textContent=body.replace(/\s+$/,"")+"\n";
+  const cur=document.createElement("span");cur.className="cursorblock";sc.appendChild(cur);
+  if(atBottom)sc.scrollTop=sc.scrollHeight;
+  else sc.scrollTop=keepTop;
+}
+async function loadModalHistory(s){
+  // Pull durable transcript so the modal is always HTML-scrollable even when
+  // the agent is full-screen with zero tmux history.
+  modalHistoryText="";
+  try{
+    const name=String(s.name||s.session||"");
+    const tags=(s.tags||[]).map(t=>String(t));
+    let tool=tags.some(t=>/^grok$/i.test(t)||/^gsid:/i.test(t))?"grok":"claude";
+    if(/grok/i.test(name))tool="grok";
+    let sid="";
+    for(const t of tags){
+      if(/^csid:/i.test(t)||/^gsid:/i.test(t)){sid=t.split(":").slice(1).join(":");break;}
+    }
+    // Full UUID in name/path
+    if(!sid){
+      const um=name.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+      if(um)sid=um[0];
+    }
+    // chat-claude-4149632f / chat-grok-… short prefix → search store
+    let q=name;
+    const sm=name.match(/chat-(?:claude|grok)-([0-9a-f]{6,})/i);
+    if(sm)q=sm[1];
+    if(!sid){
+      // Try a few queries — store match is substring on title/cwd/id
+      for(const qq of [q, sm?sm[1]:null, name.slice(0,24)].filter(Boolean)){
+        const list=await api("/api/chats?match=all&limit=20&tools="+tool+","+(tool==="claude"?"grok":"claude")
+          +"&q="+encodeURIComponent(qq));
+        const rows=(list&&list.chats)||[];
+        if(!rows.length)continue;
+        const hit=rows.find(c=>c.fleet_name===name)
+          ||rows.find(c=>c.session_id&&name.includes(String(c.session_id).slice(0,8)))
+          ||rows.find(c=>String(c.session_id||"").startsWith(qq))
+          ||rows[0];
+        if(hit&&hit.session_id){
+          sid=hit.session_id;
+          if(hit.tool)tool=hit.tool;
+          break;
+        }
+      }
+    }
+    if(!sid)return;
+    const peek=await api("/api/chats/peek?tool="+encodeURIComponent(tool)
+      +"&session_id="+encodeURIComponent(sid)+"&turns=16");
+    if(!peek||!peek.ok)return;
+    const turns=peek.turns||[];
+    const lines=[];
+    for(const t of turns){
+      const role=(t.role||"?").toString().toUpperCase();
+      const text=(t.text||"").toString().trim();
+      if(!text)continue;
+      lines.push(role+":\n"+text.slice(0,4000));
+    }
+    if(lines.length){
+      modalHistoryText=lines.join("\n\n");
+      // Bust live cache so next render includes history header
+      const sc=$("#modalscreen");if(sc)sc.dataset.last="";
+    }
+  }catch(e){/* history is best-effort */}
+}
 function openModal(s){
   document.body.classList.remove("nav-open");   // mobile: dismiss the session drawer
   modalSession=s;
-  digestErr=false;digestRetries=0;
+  digestErr=false;digestRetries=0;digestHasBody=false;
+  try{if(digestInflight) digestInflight.abort();}catch(_){}
+  digestInflight=null;
+  modalBook=[];modalScrollMode="app";modalHistoryText="";
+  modalOpenedAt=Date.now();
+  activeSideChatId="reply";
+  modalTaskKeyCache=[]; // EID-1141: fresh scan per open
   $("#modalname").textContent=s.name;
   $("#modalagent").innerHTML=agentHTML(s);
   $("#modalstatus").textContent="connecting…";$("#modalstatus").style.color="";
-  const sc=$("#modalscreen");sc.textContent="";sc.dataset.last="";
-  $("#modaldigest").className="";$("#modaldigest .dgtext").textContent="";$("#modaldigest .dgsugg").innerHTML="";
-  setPending("");$("#modalthink").className="";
-  tOpts=[];tSugg=[];tchatCollapsed=false;tLoggedDigest="";$("#tchatlog").innerHTML="";
+  $("#modalstatus").className="st";
+  const iss=$("#modalissue"); if(iss){iss.hidden=true;iss.innerHTML="";}
+  const ban=$("#modalbanner"); if(ban){ban.className="off";ban.textContent="";}
+  const sc=$("#modalscreen");
+  sc.textContent="connecting to pane…";
+  sc.classList.add("empty-placeholder");
+  sc.dataset.last="";sc.dataset.userPinned="0";
+  modalCaptureDeep=false;
+  $("#modaldigest").className="on loading";
+  const dgt0=$("#modaldigest .dgtext"); if(dgt0){dgt0.className="dgtext placeholder";dgt0.textContent="";}
+  const spin0=$("#modaldigest .dgspin"); if(spin0) spin0.textContent="reading…";
+  $("#modaldigest .dgsugg").innerHTML="";
+  setPending("");$("#modalthink").className="";clearModalClips();
+  tOpts=[];tSugg=[];tLoggedDigest="";
+  sideChats=[];sideChatSeq=0;
+  // Default reply lives in Chat tab — do not float a sticky 💬 bubble on open
   switchArmed=null;$("#modalswitch").textContent="⇄ switch account";$("#modalswitch").className="";
   $("#modalswitch").classList.toggle("hot",!!s.cost);   // highlight when this session is throttled
-  $("#tchatsess").textContent=s.name;$("#tchat").className="collapsed";renderTChat();
+  try{modalAuthMode=localStorage.getItem("emux_modal_auth")||"always";}catch(_){modalAuthMode="always";}
+  const auth=$("#modalauth"), dauth=$("#drawerauthsel");
+  if(auth) auth.value=modalAuthMode;
+  if(dauth) dauth.value=modalAuthMode;
+  try{modalTasksOpen=localStorage.getItem("emux_modal_tasks")!=="0";}catch(_){modalTasksOpen=true;}
+  toggleModalTasks(modalTasksOpen);
+  try{drawerTab=localStorage.getItem("emux_drawer_tab")||"tasks";}catch(_){drawerTab="tasks";}
+  setDrawerTab(drawerTab);
+  renderModalTasks();
+  ensureReplySideChat();
+  renderSideChats();
+  renderDrawerChat();
+  renderDrawerContext();
+  renderDrawerScore();
   $("#modal").classList.add("open");
-  modalRefresh();clearInterval(modalTimer);modalTimer=setInterval(modalRefresh,1200);
-  loadDigest();                                  // the gist + suggested replies, up front
-  syncURL();                                      // deep-link the open session
+  updateModalJump();
+  // First paint: shallow capture wins the race; deepen after first live frame
+  modalRefresh({shallow:true});
+  clearInterval(modalTimer);modalTimer=setInterval(()=>modalRefresh(),1200);
+  loadModalHistory(s).then(()=>{
+    if(!modalSession)return;
+    if(modalHistoryText){
+      const sc2=$("#modalscreen");
+      if(sc2){
+        sc2.dataset.last="";
+        modalRenderBook(sc2,true,0);
+        updateModalJump();
+        const st=$("#modalstatus");
+        if(st&&!(st.textContent||"").includes("history")){
+          st.textContent=(st.textContent||"live")+" · +history";
+        }
+      }
+    }
+    renderModalTasks();
+    updateModalIssueHeader();
+    renderDrawerScore();
+  });
+  // Let capture claim a connection first; gist is secondary chrome
+  setTimeout(()=>{if(modalSession&&modalSession.name===s.name) loadDigest();},350);
+  syncURL();
   setTimeout(()=>$("#modalinput").focus(),40);
+  // EID-1141: re-scan Tasks after open even if capture is slow / stable
+  [400,1200,2800].forEach(ms=>setTimeout(()=>{
+    if(modalSession&&modalSession.name===s.name) renderModalTasks();
+  },ms));
 }
 function closeModal(){
   $("#modal").classList.remove("open");
-  clearInterval(modalTimer);modalTimer=null;modalSession=null;
-  syncURL();                                      // drop the session from the URL
+  const j=$("#modaljump");if(j)j.classList.remove("on");
+  clearInterval(modalTimer);modalTimer=null;modalSession=null;clearModalClips();
+  modalBook=[];modalHistoryText="";modalOpenedAt=0;modalTaskKeyCache=[];
+  sideChats=[];sideChatSeq=0;
+  const stack=$("#tchatstack");if(stack)stack.innerHTML="";
+  syncURL();
 }
-async function modalRefresh(){
+let modalCaptureDeep=false; // after first live frame, deepen scrollback
+async function modalRefresh(opts){
   if(!modalSession)return;
-  const sc=$("#modalscreen");const atBottom=sc.scrollHeight-sc.scrollTop-sc.clientHeight<60;
+  const sc=$("#modalscreen");
+  // Honor explicit scroll-up: once user leaves the bottom, stay there across
+  // live captures until they jump back (or scroll to bottom themselves).
+  const userPinned=sc.dataset.userPinned==="1";
+  const atBottom=!userPinned&&modalScreenPinned(sc);
+  const keepTop=sc.scrollTop;
+  // First paint: shallow lines (fast). Deepen only after we have content.
+  const wantShallow=!!(opts&&opts.shallow)||!modalCaptureDeep;
+  const lines=wantShallow?400:2000;
   try{
-    const r=await api("/api/capture?session="+encodeURIComponent(modalSession.session)+"&lines=400");
+    const r=await api("/api/capture?session="+encodeURIComponent(modalSession.session)+"&lines="+lines);
     if(r.ok){
-      $("#modalstatus").textContent="live";$("#modalstatus").style.color="";
-      if(sc.dataset.last!==r.content){
-        sc.dataset.last=r.content;sc.textContent=r.content.replace(/\s+$/,"")+"\n";
-        const cur=document.createElement("span");cur.className="cursorblock";sc.appendChild(cur);
-        if(atBottom)sc.scrollTop=sc.scrollHeight;
+      modalScrollMode=r.scroll_mode|| (r.history_size>0?"tmux":"app");
+      const hist=typeof r.history_size==="number"?r.history_size:null;
+      const modeTag=modalScrollMode==="tmux"?" · tmux history":" · in-app scroll";
+      $("#modalstatus").textContent="live"+(hist!=null?" · hist "+hist:"")+modeTag;
+      $("#modalstatus").style.color="";
+      $("#modalstatus").className="st live";
+      const raw=(r.content||"").replace(/\s+$/,"");
+      if(sc.dataset.last!==raw){
+        sc.dataset.last=raw;
+        sc.classList.remove("empty-placeholder");
+        // Accumulate unique snapshots → real HTML scroll depth over time
+        if(raw&&(modalBook.length===0||modalBook[modalBook.length-1]!==raw)){
+          modalBook.push(raw);
+          if(modalBook.length>MODAL_BOOK_MAX)modalBook=modalBook.slice(-MODAL_BOOK_MAX);
+        }
+        modalRenderBook(sc,atBottom,keepTop);
         // The Gist failed but the web changed — ok to try to recover, capped at 10
         if(digestErr&&digestRetries<10){digestRetries++;loadDigest();}
+      }else if(raw){
+        sc.classList.remove("empty-placeholder");
       }
+      // After first successful live frame, deepen history on subsequent polls
+      if(raw&&!modalCaptureDeep){
+        modalCaptureDeep=true;
+        // one immediate deep refresh for tmux scrollback (no-op on alt-screen)
+        setTimeout(()=>{if(modalSession) modalRefresh({shallow:false});},200);
+      }
+      // EID-1141: always re-scan Tasks (not only on content delta)
+      renderModalTasks();
       renderOptions(r.options);   // a menu on screen → clickable bubbles
       updateThinking(r.thinking); // movement + timer while it generates
       // pending send has landed once the pane echoes it → clear the holding bubble
       if(pendingText&&r.content&&r.content.indexOf(pendingText.trim().slice(0,40))>=0)setPending("");
-    }else{$("#modalstatus").textContent=r.error||"error";$("#modalstatus").style.color="var(--stale)";}
-  }catch(e){$("#modalstatus").textContent="unreachable";$("#modalstatus").style.color="var(--stale)";}
+    }else{
+      $("#modalstatus").textContent=r.error||"capture failed";
+      $("#modalstatus").style.color="var(--stale)";
+      if(sc&&!sc.dataset.last){
+        sc.classList.add("empty-placeholder");
+        sc.textContent="could not capture pane — "+(r.error||"error");
+      }
+    }
+  }catch(e){
+    $("#modalstatus").textContent="unreachable";
+    $("#modalstatus").style.color="var(--stale)";
+    if(sc&&!sc.dataset.last){
+      sc.classList.add("empty-placeholder");
+      sc.textContent="daemon unreachable — retrying…";
+    }
+  }
+  updateModalJump();
   modalJudge();
 }
 // the gist: a reader's-digest of the session + clickable suggested replies, so
 // you don't have to read a wall of text and invent a response.
-async function loadDigest(){
+// EID-1142: never wipe a good digest while re-reading; timeout so "reading…" can't stick forever.
+let digestInflight=null;   // AbortController for the active load
+let digestHasBody=false;   // true once we have real text in .dgtext
+async function loadDigest(opts){
   if(!modalSession)return;
-  const el=$("#modaldigest");el.className="on loading";
-  $("#modaldigest .dgtext").textContent="reading the session…";
-  $("#modaldigest .dgsugg").innerHTML="";
+  const force=!!(opts&&opts.force);
+  // Dedup concurrent loads for the same session (open + refresh race)
+  if(digestInflight&&!force) return;
+  if(digestInflight&&force){try{digestInflight.abort();}catch(_){}}
+  const el=$("#modaldigest");
+  const dgt=$("#modaldigest .dgtext");
+  const spin=$("#modaldigest .dgspin");
+  el.className="on loading";
+  if(spin) spin.textContent=force?"re-reading…":"reading…";
+  // Only show placeholder if we have nothing useful yet
+  if(dgt&&!digestHasBody){
+    dgt.className="dgtext placeholder";
+    dgt.textContent="reading the session…";
+  }
   const sess=modalSession.session;
-  const r=await api("/api/reply",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({session:sess})});
+  const ctrl=typeof AbortController!=="undefined"?new AbortController():null;
+  digestInflight=ctrl;
+  // Client timeout: fail the chrome fast; don't leave "reading…" forever
+  let timedOut=false;
+  const to=setTimeout(()=>{timedOut=true;try{ctrl&&ctrl.abort();}catch(_){}},18000);
+  let r=null;
+  try{
+    r=await api("/api/reply",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({session:sess,force:force}),signal:ctrl?ctrl.signal:undefined});
+  }catch(e){
+    r={ok:false,error:timedOut?"timeout":((e&&e.name==="AbortError")?"aborted":"unreachable")};
+  }finally{
+    clearTimeout(to);
+    if(digestInflight===ctrl) digestInflight=null;
+  }
   if(!modalSession||modalSession.session!==sess)return;   // modal changed while thinking
   el.className="on";
-  if(!r.ok){
-    digestErr=true;   // stuck — modalRefresh will retry (≤10x) when the pane content next changes
-    const more=digestRetries<10?" · will retry when the session moves":"";
-    $("#modaldigest .dgtext").textContent="(couldn't summarize — "+(r.error||"")+")"+more;return;}
+  if(!r||!r.ok){
+    digestErr=true;   // stuck — retry on pane change OR timed retry below
+    const err=(r&&r.error)||"error";
+    // Keep prior good body; only overwrite placeholder / previous error
+    if(!digestHasBody&&dgt){
+      const more=digestRetries<10?" · will retry shortly":"";
+      dgt.className="dgtext placeholder";
+      dgt.textContent="(couldn't summarize — "+err+")"+more;
+    }
+    // Time-based retry even if pane is stable (was the stuck-on-reading root cause)
+    if(digestRetries<10){
+      digestRetries++;
+      setTimeout(()=>{if(modalSession&&modalSession.session===sess&&digestErr) loadDigest();},4000+digestRetries*1500);
+    }
+    return;
+  }
   digestErr=false;digestRetries=0;   // recovered
-  $("#modaldigest .dgtext").textContent=r.digest||"(nothing notable)";
+  if(dgt){
+    dgt.className="dgtext";
+    dgt.innerHTML=linkifyLinear(r.digest||"(nothing notable)");
+    bindLinlinks(dgt);
+    digestHasBody=!!(r.digest&&String(r.digest).trim());
+  }
+  renderModalTasks(); // gist often names the Linear issue
   if(r.digest&&r.digest!==tLoggedDigest){tchatLog("bot",r.digest);tLoggedDigest=r.digest;}  // the gist opens the chat
   setSuggestions(r.suggestions||[]);   // gist replies become chips (with confidence pies)
 }
-// turn an on-screen numbered menu into clickable bubbles that answer it for you.
-// The choices for a terminal live in a floating chat LOCAL to that terminal:
-// on-screen menu options + the gist's suggested replies become quick chips, and
-// there's a box to type your own — choose one, or chat. (NCDMV-style.)
-let tOpts=[], tSugg=[], tchatCollapsed=false, tLoggedDigest="";
-// a green pie/wedge filled to the confidence %, shown on each suggested reply so you
-// can see at a glance how strong emux thinks that choice is.
+// Side chats: many floating panels per open session.
+// - kind "reply": default "reply to <session>" with menu chips + gist suggestions
+// - kind "task"/"topic": chat about a Linear issue or freeform topic (as many as you want)
+// Messages inject into the parent head with a topic prefix (unless you spawn a fresh Claude seat).
+let tOpts=[], tSugg=[], tLoggedDigest="";
+let sideChats=[]; // {id, kind, title, topic, collapsed, messages:[{who,text}], seatName?}
+let sideChatSeq=0;
 function pieHTML(pct){const p=Math.round(pct);
   return '<span class="cpie" title="'+p+'% confidence" style="background:conic-gradient(#2ea043 '+p+'%,rgba(127,127,127,.26) 0)"></span>'
     +'<span class="cpct">'+p+'%</span>';}
-function tchatLog(who,text){const log=$("#tchatlog");if(!log||!text)return;
-  const b=document.createElement("div");b.className="tcmsg "+who;b.textContent=text;
-  log.appendChild(b);log.scrollTop=log.scrollHeight;}
-function renderOptions(opts){ tOpts=opts||[]; renderTChat(); }   // a menu on screen → chips
-function setSuggestions(sugg){ tSugg=sugg||[]; renderTChat(); }  // gist replies → chips
+function ensureReplySideChat(){
+  if(!modalSession) return null;
+  let sc=sideChats.find(c=>c.kind==="reply");
+  if(!sc){
+    // float:false → reply lives in Chat tab only (no sticky bottom-right bubble)
+    sc={id:"reply",kind:"reply",title:"reply to "+modalSession.name,topic:null,collapsed:true,float:false,messages:[]};
+    sideChats.unshift(sc);
+  }else{
+    sc.title="reply to "+modalSession.name;
+    if(sc.float==null) sc.float=false;
+  }
+  return sc;
+}
+function openSideChat(opts){
+  // opts: {kind, title, topic, seed?, focus?}
+  if(!modalSession) return null;
+  const kind=opts.kind||"topic";
+  const topic=(opts.topic||"").trim()||null;
+  // Reuse open panel for same task/topic
+  if(topic){
+    const existing=sideChats.find(c=>c.topic===topic);
+    if(existing){
+      existing.collapsed=false;
+      if(existing.kind!=="reply") existing.float=true;
+      activeSideChatId=existing.id;
+      renderSideChats();
+      renderDrawerChat();
+      if(modalTasksOpen) setDrawerTab("chat");
+      focusSideChat(existing.id);
+      return existing;
+    }
+  }
+  if(kind==="reply"){
+    const sc=ensureReplySideChat();
+    sc.collapsed=false;
+    activeSideChatId=sc.id;
+    renderSideChats();
+    renderDrawerChat();
+    focusSideChat(sc.id);
+    return sc;
+  }
+  const id="sc-"+(++sideChatSeq);
+  const title=opts.title||(topic?("about "+topic):("side chat "+sideChatSeq));
+  // Extra chats float (user can ✕ to close for real). Reply never floats.
+  const sc={id,kind,title,topic,collapsed:false,float:true,messages:[],seatName:null};
+  if(opts.seed) sc.messages.push({who:"bot",text:opts.seed});
+  else if(topic&&isLinearIssueKey(topic)){
+    sc.messages.push({who:"bot",text:
+      "Side chat about Linear "+topic+".\n"
+      +linearIssueUrl(topic)+"\n\n"
+      +"Messages you type are sent into the parent head ("+(modalSession.name||"?")
+      +") tagged with this issue. Use “Fresh Claude” for a dedicated seat."});
+  }else if(topic){
+    sc.messages.push({who:"bot",text:"Side chat about “"+topic+"”. Messages go to the parent head with this topic tag."});
+  }
+  sideChats.push(sc);
+  activeSideChatId=sc.id;
+  renderSideChats();
+  renderDrawerChat();
+  if(modalTasksOpen) setDrawerTab("chat");
+  focusSideChat(id);
+  return sc;
+}
+function closeSideChat(id){
+  // Reply: never destroy (drawer needs it) — just hide the float completely
+  if(id==="reply"){
+    const sc=sideChats.find(c=>c.id==="reply");
+    if(sc){sc.collapsed=true;sc.float=false;renderSideChats();renderDrawerChat();}
+    return;
+  }
+  // Extra side chats: real close — remove entirely (not stuck as a FAB)
+  sideChats=sideChats.filter(c=>c.id!==id);
+  if(activeSideChatId===id) activeSideChatId="reply";
+  renderSideChats();
+  renderDrawerChat();
+}
+function focusSideChat(id){
+  const el=document.querySelector('.tchat[data-id="'+id+'"] .tchatinput');
+  if(el) setTimeout(()=>el.focus(),40);
+}
+function sideChatById(id){return sideChats.find(c=>c.id===id);}
+function tchatLog(who,text,chatId){
+  // Back-compat: log into reply sidechat (or explicit id)
+  const sc=sideChatById(chatId||"reply")||ensureReplySideChat();
+  if(!sc||!text) return;
+  sc.messages.push({who,text:String(text)});
+  // live-append if panel is mounted
+  const log=document.querySelector('.tchat[data-id="'+sc.id+'"] .tchatlog');
+  if(log){
+    const b=document.createElement("div");b.className="tcmsg "+who;
+    b.innerHTML=linkifyLinear(text);bindLinlinks(b);
+    log.appendChild(b);log.style.display="";log.scrollTop=log.scrollHeight;
+  }else renderSideChats();
+}
+function renderOptions(opts){
+  tOpts=opts||[];
+  ensureReplySideChat();
+  // Do NOT force-open a floating reply bubble — drawer Chat tab owns reply chips
+  renderSideChats();
+  if(drawerTab==="chat") renderDrawerChat();
+}
+function setSuggestions(sugg){
+  tSugg=sugg||[];
+  ensureReplySideChat();
+  // Suggestions land in drawer chips; never re-spawn the sticky 💬 FAB
+  renderSideChats();
+  if(drawerTab==="chat") renderDrawerChat();
+}
 async function sendOption(target){
-  // walk the ❯ cursor to the target then confirm — works for any cursor menu
-  // (Claude/Codex), no reliance on digit-select.
   const cur=((tOpts.find(o=>o.selected))||tOpts[0]||{n:target}).n;
   const send=k=>api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({session:modalSession.session,keys:k,literal:false,enter:false})});
@@ -3633,67 +6566,429 @@ async function sendOption(target){
   await send("Enter");
   setTimeout(()=>{modalRefresh();loadDigest();},600);
 }
-function renderTChat(){
-  const chips=$("#tchatchips"); if(!chips)return;
-  const parts=[];
-  tOpts.forEach(o=>parts.push('<button class="tc-opt'+(o.selected?" sel":"")+'" data-n="'+o.n+'"><b>'+o.n+'</b> '+esc(o.label)+'</button>'));
-  tSugg.forEach((s,i)=>{
-    const c=Math.max(0,Math.min(100,s.confidence==null?50:s.confidence));
-    parts.push('<button class="tc-sug" data-i="'+i+'">'+pieHTML(c)+'<span class="tc-txt">'+esc(s.text||"")+'</span></button>');
+function composeSidePayload(sc, text){
+  if(!sc||sc.kind==="reply"||!sc.topic) return text;
+  if(isLinearIssueKey(sc.topic))
+    return "[side chat · Linear "+sc.topic+"] "+text;
+  return "[side chat · "+sc.topic+"] "+text;
+}
+function renderSideChats(){
+  const stack=$("#tchatstack"); if(!stack) return;
+  if(!modalSession){stack.innerHTML="";stack.className="";return;}
+  ensureReplySideChat();
+  // Only float EXTRA chats the operator opted into (float!==false). Reply is drawer-only.
+  const floating=sideChats.filter(sc=>sc.kind!=="reply"&&sc.float!==false);
+  if(!floating.length){
+    stack.innerHTML="";
+    stack.className="idle";
+    if(drawerTab==="chat") renderDrawerChat();
+    const chatBadge=$("#drawerchatbadge");
+    if(chatBadge) chatBadge.textContent=String(sideChats.length);
+    return;
+  }
+  stack.className="";
+  let html="";
+  // FAB: add another freeform side chat (only when floats already exist)
+  html+='<button type="button" id="tchat-addfab" title="New side chat about anything">+</button>';
+  floating.forEach(sc=>{
+    const isReply=sc.kind==="reply";
+    html+='<div class="tchat'+(sc.collapsed?" collapsed":"")+'" data-id="'+esc(sc.id)+'">';
+    // Dismiss even when collapsed (fixes: cannot close bottom-right chat)
+    html+='<button type="button" class="tchatx" data-act="close" title="Close">✕</button>';
+    // collapsed = floating bubble
+    html+='<button type="button" class="tchatlauncher" data-act="expand" title="'+esc(sc.title)+'">'
+      +(isReply?"💬":"◎")
+      +'<span class="tchatbadge" style="display:none">0</span></button>';
+    html+='<div class="tchatpanel">';
+    html+='<div class="tchathead"><span class="th-title">'+(isReply?'💬 reply to <b>'+esc(modalSession.name)+'</b>':'◎ '+esc(sc.title))+'</span>'
+      +'<span class="th-acts">'
+      +(sc.topic&&isLinearIssueKey(sc.topic)?'<button type="button" data-act="linear" title="Open in Linear">↗</button>':"")
+      +'<button type="button" data-act="min" title="minimize">▾</button>'
+      +'<button type="button" data-act="close" title="close side chat">✕</button>'
+      +'</span></div>';
+    html+='<div class="tchatlog">';
+    (sc.messages||[]).forEach(m=>{
+      html+='<div class="tcmsg '+esc(m.who||"bot")+'">'+linkifyLinear(m.text||"")+'</div>';
+    });
+    html+='</div>';
+    if(isReply){
+      html+='<div class="tchatchips"></div>';
+    }
+    html+='<div class="tchatrow">'
+      +'<input class="tchatinput" placeholder="'+(isReply?"choose one, or type your reply…":"message about "+esc(sc.topic||"this")+"…")+'" autocomplete="off" spellcheck="false">'
+      +'<button type="button" class="tchatsend" data-act="send">➤</button></div>';
+    if(!isReply){
+      html+='<div class="tchatfoot">'
+        +'<button type="button" class="act" data-act="fresh" title="Spawn a dedicated Claude Code seat for this topic">⧉ Fresh Claude</button>'
+        +(sc.seatName?'<button type="button" class="act" data-act="openseat" title="Open the seat">↗ '+esc(sc.seatName)+'</button>':"")
+        +'</div>';
+    }
+    html+='</div></div>';
   });
-  chips.innerHTML=parts.join("")||'<div class="tc-empty">no suggestions right now — type your reply below</div>';
-  const n=tOpts.length+tSugg.length;
-  const badge=$("#tchatbadge");badge.textContent=n||"";badge.style.display=n?"inline-block":"none";
-  chips.querySelectorAll(".tc-opt").forEach(b=>b.onclick=()=>{
-    chips.querySelectorAll("button").forEach(x=>x.disabled=true);sendOption(+b.dataset.n);});
-  chips.querySelectorAll(".tc-sug").forEach(b=>b.onclick=()=>{
-    const t=(tSugg[+b.dataset.i]||{}).text||"";if(!t)return;
-    setPending(t);tchatLog("you",t);modalKeys(t,true,true);
-    tSugg=[];renderTChat();setTimeout(()=>{modalRefresh();loadDigest();},1500);});
-  // when a real choice lands, float the chat open (unless the user minimized it)
-  if(n&&!tchatCollapsed)$("#tchat").className="";
+  stack.innerHTML=html;
+  // reply chips
+  const replyEl=stack.querySelector('.tchat[data-id="reply"] .tchatchips');
+  if(replyEl){
+    const parts=[];
+    tOpts.forEach(o=>parts.push('<button class="tc-opt'+(o.selected?" sel":"")+'" data-n="'+o.n+'"><b>'+o.n+'</b> '+esc(o.label)+'</button>'));
+    tSugg.forEach((s,i)=>{
+      const c=Math.max(0,Math.min(100,s.confidence==null?50:s.confidence));
+      parts.push('<button class="tc-sug" data-i="'+i+'">'+pieHTML(c)+'<span class="tc-txt">'+esc(s.text||"")+'</span></button>');
+    });
+    replyEl.innerHTML=parts.join("")||'<div class="tc-empty">no suggestions right now — type below, or + for another side chat</div>';
+    replyEl.querySelectorAll(".tc-opt").forEach(b=>b.onclick=()=>{
+      replyEl.querySelectorAll("button").forEach(x=>x.disabled=true);sendOption(+b.dataset.n);});
+    replyEl.querySelectorAll(".tc-sug").forEach(b=>b.onclick=()=>{
+      const t=(tSugg[+b.dataset.i]||{}).text||"";if(!t)return;
+      setPending(t);tchatLog("you",t,"reply");modalKeys(t,true,true);
+      tSugg=[];renderSideChats();setTimeout(()=>{modalRefresh();loadDigest();},1500);});
+  }
+  stack.querySelectorAll(".tchat").forEach(el=>{
+    const id=el.dataset.id;
+    const sc=sideChatById(id);
+    if(!sc) return;
+    el.querySelectorAll("[data-act]").forEach(btn=>{
+      btn.onclick=e=>{
+        e.stopPropagation();
+        const act=btn.dataset.act;
+        if(act==="expand"){sc.collapsed=false;renderSideChats();focusSideChat(id);}
+        else if(act==="min"){sc.collapsed=true;renderSideChats();}
+        else if(act==="close"){closeSideChat(id);}
+        else if(act==="send"){sideChatSend(id);}
+        else if(act==="linear"&&sc.topic){window.open(linearIssueUrl(sc.topic),"_blank","noopener,noreferrer");}
+        else if(act==="fresh"){spawnSideChatClaude(id);}
+        else if(act==="openseat"&&sc.seatName){
+          setMode("grid");const s=grid.find(x=>x.name===sc.seatName);if(s)openModal(s);
+        }
+      };
+    });
+    const inp=el.querySelector(".tchatinput");
+    if(inp){
+      inp.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();sideChatSend(id);}};
+      inp.onpaste=e=>{if(modalSession)handleComposerPaste(e,modalSession.session||modalSession.name);};
+    }
+    const log=el.querySelector(".tchatlog");
+    if(log) log.scrollTop=log.scrollHeight;
+  });
+  const fab=stack.querySelector("#tchat-addfab");
+  if(fab) fab.onclick=()=>{
+    const topic=prompt("Side chat topic (Linear key like AIC-284, or any label):");
+    if(topic==null) return;
+    const t=topic.trim();
+    if(!t) return;
+    openSideChat({
+      kind:isLinearIssueKey(t)?"task":"topic",
+      topic:t,
+      title:isLinearIssueKey(t)?("about "+t):t,
+    });
+  };
+  bindLinlinks(stack);
+  if(drawerTab==="chat") renderDrawerChat();
+  const chatBadge=$("#drawerchatbadge");
+  if(chatBadge) chatBadge.textContent=String(sideChats.length);
+  if(drawerTab==="score") renderDrawerScore();
 }
+function sideChatSend(id){
+  const sc=sideChatById(id); if(!sc||!modalSession) return;
+  if(modalAuthMode==="readonly"){
+    tchatLog("bot","Observe-only auth mode — not injecting into the head.",id);
+    renderDrawerChat();
+    return;
+  }
+  const el=document.querySelector('.tchat[data-id="'+id+'"] .tchatinput')
+    ||$("#drawer-chat-input");
+  const t=(el&&el.value||"").trim(); if(!t) return;
+  if(el) el.value="";
+  const payload=composeSidePayload(sc,t);
+  setPending(payload.length>180?payload.slice(0,180)+"…":payload);
+  tchatLog("you",t,id);
+  renderDrawerChat();
+  modalKeys(payload,true,true).then(ok=>{
+    if(!ok){
+      if(el&&!el.value) el.value=t;
+      setPending("");
+    }
+  });
+}
+async function spawnSideChatClaude(id){
+  const sc=sideChatById(id); if(!sc||!modalSession) return;
+  const topic=sc.topic||sc.title||"topic";
+  const slug=String(topic).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,24)||"side";
+  const name=("side-"+slug+"-"+Date.now().toString(36).slice(-4)).slice(0,48);
+  const url=isLinearIssueKey(topic)?linearIssueUrl(topic):"";
+  const prompt=
+    "You are a dedicated side seat for: "+topic+".\n"
+    +(url?("Linear: "+url+"\n"):"")
+    +"Parent session: "+(modalSession.name||"?")+" ("+(modalSession.session||"")+")\n"
+    +"Cwd hint: "+(modalSession.cwd||modalSession.path||".")+"\n\n"
+    +"Stay focused on this topic. Pull Linear context if you can. Report findings clearly.";
+  tchatLog("bot","Spawning Fresh Claude seat “"+name+"”…",id);
+  const st=$("#modalstatus");
+  if(st){st.textContent="spawning side seat…";st.style.color="";}
+  try{
+    const r=await api("/api/spawn",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        name,
+        command:"claude --dangerously-skip-permissions",
+        cwd:modalSession.cwd||modalSession.path||undefined,
+        prompt,
+        description:"Side chat · "+topic+(modalSession.name?(" · from "+modalSession.name):""),
+        tags:["sidechat", topic].concat(isLinearIssueKey(topic)?["linear",topic]:[]),
+      })});
+    if(r&&r.ok){
+      sc.seatName=r.name||name;
+      tchatLog("bot","Seat live: "+sc.seatName+(r.kickstarted?" (kickstarted on the task)":""),id);
+      renderSideChats();
+      try{await poll();}catch(_){}
+      if(st) st.textContent="side seat "+sc.seatName;
+    }else{
+      tchatLog("bot","Spawn failed: "+((r&&r.error)||"unknown"),id);
+      if(st){st.textContent="spawn failed";st.style.color="var(--stale)";}
+    }
+  }catch(e){
+    tchatLog("bot","Spawn unreachable",id);
+  }
+}
+// Back-compat aliases used elsewhere
 function tchatToggle(){
-  tchatCollapsed=!tchatCollapsed;
-  $("#tchat").className=tchatCollapsed?"collapsed":"";
-  if(!tchatCollapsed)setTimeout(()=>$("#tchatinput").focus(),50);
+  const sc=ensureReplySideChat();
+  if(!sc) return;
+  sc.collapsed=!sc.collapsed;
+  renderSideChats();
+  if(!sc.collapsed) focusSideChat("reply");
 }
-function tchatSend(){
-  const i=$("#tchatinput");const t=i.value.trim();if(!t)return;
-  i.value="";setPending(t);tchatLog("you",t);
-  modalKeys(t,true,true).then(ok=>{if(!ok){if(!i.value)i.value=t;setPending("");}});
-}
+function tchatSend(){ sideChatSend("reply"); }
+function renderTChat(){ renderSideChats(); }
 async function modalJudge(){
   if(!modalSession)return;
-  const el=$("#modaljudge");
+  // EID-1142: single calm banner — judge strip is hidden; content lives in #modalbanner only
+  const ban=$("#modalbanner");
+  const el=$("#modaljudge"); // keep for DOM checks / score, never show
   try{
     const r=await api("/api/classify?name="+encodeURIComponent(modalSession.name));
     if(r&&r.ok&&r.state){
-      const flags=(r.flags||[]).map(f=>'<span class="jflag">'+f.replace(/_/g," ")+'</span>').join("");
-      el.innerHTML='<span class="jstate s-'+r.state+'">'+r.state.replace(/_/g,"·")+'</span>'
-        +'<span class="jconf">'+Math.round((r.confidence||0)*100)+'% · '+(r.recommended_action||"")+'</span>'
-        +'<span class="jsum">'+(r.summary||"")+'</span>'+flags;
-      el.className="on";
-    }else{el.className="";el.innerHTML="";}
-  }catch(e){el.className="";}
+      const conf=Math.round((r.confidence||0)*100);
+      const action=(r.recommended_action||"").replace(/_/g," ");
+      const sum=(r.summary||"").toString();
+      const stateLabel=String(r.state).replace(/_/g," ");
+      let badges="";
+      const flags=r.flags||[];
+      for(const f of flags){
+        const fl=String(f).replace(/_/g," ");
+        const warn=/false.?busy|thrash|stuck|error/i.test(fl);
+        badges+='<span class="bbadge'+(warn?" warn":"")+'">'+esc(fl)+'</span>';
+      }
+      if(!flags.length){
+        if(/false.?busy|thrash/i.test(sum+action+r.state)) badges='<span class="bbadge warn">false busy</span>';
+        else if(r.state==="waiting_human") badges='<span class="bbadge warn">needs you</span>';
+      }
+      const html='<span class="bstate s-'+esc(r.state)+'">'+esc(stateLabel)+'</span>'
+        +'<span class="bconf">'+conf+'%'+(action?(" · "+esc(action)):"")+'</span>'
+        +'<span class="bsum">'+(sum?esc(sum.slice(0,200)):"")+'</span>'
+        +badges;
+      if(ban){ban.innerHTML=html;ban.className="on";}
+      if(el){el.innerHTML=html;el.className="on";} // score can still see it
+    }else if(ban&&!ban.classList.contains("on")){
+      ban.className="off";ban.textContent="";
+    }
+  }catch(e){/* classify is best-effort */}
+}
+async function modalScrollTmux(direction,amount){
+  if(!modalSession)return false;
+  try{
+    const r=await api("/api/scroll",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        session:modalSession.session,
+        direction:direction||"up",
+        amount:amount||"page",
+        mode:modalScrollMode==="tmux"?"tmux":"auto",
+      })});
+    const sc=$("#modalscreen");
+    // After in-app scroll, force a new snapshot into the book so HTML height grows
+    if(sc)sc.dataset.last=""; // bust so modalRefresh always re-renders
+    // Stay unpinned only if user was following live; else keep reading position
+    if(direction==="up"&&sc)sc.dataset.userPinned="1";
+    await modalRefresh();
+    if(r&&r.ok&&r.mode==="app"&&sc){
+      // Nudge status so operator knows we scrolled the agent, not empty tmux history
+      const st=$("#modalstatus");
+      if(st&&!(st.textContent||"").includes("scrolled")){
+        st.textContent=(st.textContent||"live")+" · scrolled agent";
+      }
+    }
+    return !!(r&&r.ok);
+  }catch(e){return false;}
 }
 async function modalKeys(keys,literal,enter){
   if(!modalSession)return false;
+  // PageUp/PageDown chips → real tmux scrollback (not keystrokes into the agent)
+  if(!literal&&(keys==="PageUp"||keys==="PageDown"||keys==="PPage"||keys==="NPage")){
+    return modalScrollTmux(keys==="PageUp"||keys==="PPage"?"up":"down","page");
+  }
   try{
     const r=await api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({session:modalSession.session,keys,literal,enter})});
+    if(r&&r.shell_warn){
+      const st=$("#modalstatus");
+      if(st){st.textContent="⚠ pane looks like a shell — agent may not be running";st.style.color="var(--stale)";}
+    }
     setTimeout(modalRefresh,250);
     return !!(r&&r.ok);
   }catch(e){return false;}   // daemon down / network error
 }
-function modalSubmit(){
-  const i=$("#modalinput");const text=i.value;if(!text)return;
+// Web image paste: laptop pasteboard → POST /api/clip-image → path on fleet host → send with prompt.
+// Only intercepts paste when modalinput/tchatinput is focused — never system-wide.
+let modalClips=[];   // {path, mime, bytes, preview}
+function renderModalClips(){
+  const box=$("#modalclips");if(!box)return;
+  if(!modalClips.length){box.className="";box.innerHTML="";return;}
+  box.className="on";
+  box.innerHTML=modalClips.map((c,i)=>
+    '<span class="clip" data-i="'+i+'">'
+    +(c.preview?'<img src="'+c.preview+'" alt="">':'')
+    +'<span class="cp" title="'+esc(c.path)+'">'+esc(c.path)+'</span>'
+    +'<button type="button" class="rm" data-i="'+i+'" title="remove">×</button></span>'
+  ).join("")+'<span class="cliphint">on fleet host · sent with your message</span>';
+  box.querySelectorAll(".rm").forEach(b=>b.onclick=e=>{
+    e.preventDefault();modalClips.splice(+b.dataset.i,1);renderModalClips();
+  });
+}
+function clearModalClips(){modalClips=[];renderModalClips();}
+function fileToDataUrl(file){
+  return new Promise((resolve,reject)=>{
+    const r=new FileReader();
+    r.onload=()=>resolve(r.result);
+    r.onerror=()=>reject(r.error||new Error("read failed"));
+    r.readAsDataURL(file);
+  });
+}
+async function uploadClipImage(file,session){
+  if(!file||!String(file.type||"").startsWith("image/"))return null;
+  if(file.size>8*1024*1024)throw new Error("image over 8MB");
+  const dataUrl=await fileToDataUrl(file);
+  const r=await api("/api/clip-image",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({data:dataUrl,mime:file.type||"image/png",session:session||""})});
+  if(!r||!r.ok)throw new Error((r&&r.error)||"upload failed");
+  return {path:r.path,mime:r.mime||file.type,bytes:r.bytes||file.size,preview:dataUrl};
+}
+async function handleComposerPaste(e,session){
+  const items=e.clipboardData&&e.clipboardData.items;
+  if(!items||!items.length)return false;
+  const images=[];
+  for(let i=0;i<items.length;i++){
+    const it=items[i];
+    if(it.kind==="file"&&it.type&&it.type.startsWith("image/")){
+      const f=it.getAsFile();if(f)images.push(f);
+    }
+  }
+  if(!images.length)return false;   // text paste — leave alone
+  e.preventDefault();
+  const st=$("#modalstatus");
+  for(const f of images){
+    try{
+      if(st){st.textContent="uploading image…";st.style.color="";}
+      const clip=await uploadClipImage(f,session);
+      if(clip){modalClips.push(clip);renderModalClips();}
+      if(st){st.textContent="image on fleet · "+(clip&&clip.path?clip.path.split("/").pop():"ok");st.style.color="var(--amber)";}
+    }catch(err){
+      if(st){st.textContent="image paste failed — "+(err.message||err);st.style.color="var(--stale)";}
+    }
+  }
+  return true;
+}
+function modalIsGrok(){
+  if(!modalSession)return false;
+  const tags=(modalSession.tags||[]).map(t=>String(t).toLowerCase());
+  if(tags.includes("grok"))return true;
+  if(tags.some(t=>t.startsWith("gsid:")))return true;
+  const ag=((modalSession.agent&&modalSession.agent.agent)||modalSession.agent||"")+"";
+  if(/grok/i.test(ag))return true;
+  if(/^chat-grok-/i.test(modalSession.name||""))return true;
+  return false;
+}
+function modalGsid(){
+  if(!modalSession)return "";
+  for(const t of (modalSession.tags||[])){
+    const s=String(t);
+    if(s.toLowerCase().startsWith("gsid:"))return s.slice(5).trim();
+  }
+  return "";
+}
+function modalSubmit(opts){
+  const o=opts||{};
+  if(modalAuthMode==="readonly"){
+    const st=$("#modalstatus");
+    if(st){st.textContent="observe-only — send blocked";st.style.color="var(--stale)";}
+    return;
+  }
+  const i=$("#modalinput");
+  const paths=modalClips.map(c=>c.path).filter(Boolean);
+  const body=(i.value||"").trim();
+  if(!body&&!paths.length)return;
+  // Queue = wait until not actively generating (best-effort: short delay + send)
+  if(o.queue){
+    const st=$("#modalstatus");
+    if(st){st.textContent="queued — sending when quiet…";st.style.color="";}
+    const trySend=()=>{
+      const think=$("#modalthink");
+      if(think&&think.classList.contains("on")){setTimeout(trySend,1200);return;}
+      modalSubmit({queue:false,_queued:true});
+    };
+    setTimeout(trySend,400);
+    return;
+  }
+  // Paths first so Claude/Grok can Read the files on this host; then operator text.
+  const text=paths.length?(paths.join("\n")+(body?"\n\n"+body:"")):body;
   i.value="";                                   // optimistic clear for snappy UX…
-  setPending(text);                             // …and hold it above the box until it lands
+  clearModalClips();
+  setPending(text.length>180?text.slice(0,180)+"…":text);
+  const st=$("#modalstatus");
+  // Grok: control-plane cascade ACP → headless → PTY (server-side auto)
+  if(modalIsGrok()){
+    if(st){st.textContent="acp steer…";st.style.color="";}
+    api("/api/steer",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({session:modalSession.session,prompt:text,mode:"auto",
+        session_id:modalGsid()||undefined,cwd:modalSession.cwd||undefined,
+        tool:"grok",timeout:180})}).then(r=>{
+      if(r&&r.ok){
+        setPending("");
+        const modeLabel=r.mode==="acp"?"acp ok":(r.mode==="headless"?"headless ok":"pty ok");
+        const via=r.via_fallback?" · via fallback":"";
+        if(st)st.textContent=modeLabel+via+(r.elapsed_ms?(" · "+r.elapsed_ms+"ms"):"");
+        if(r.session_id&&!modalGsid()){
+          // remember gsid on the live card for next steer
+          modalSession.tags=modalSession.tags||[];
+          if(!modalSession.tags.some(t=>String(t).startsWith("gsid:")))
+            modalSession.tags.push("gsid:"+r.session_id);
+        }
+        if(r.text)setPending("↳ "+(r.text.length>160?r.text.slice(0,160)+"…":r.text));
+        setTimeout(modalRefresh,400);
+      }else{
+        // last-ditch PTY (server already tried cascade; still try paste)
+        if(st){st.textContent="steer cascade failed — trying pty…";st.style.color="";}
+        modalKeys(text,true,true).then(ok=>{
+          if(!ok){
+            if(!i.value)i.value=body;
+            if(paths.length)i.value=(paths.join("\n")+(i.value?"\n\n"+i.value:""));
+            setPending("");
+            if(st){st.textContent="steer failed — "+((r&&r.error)||"draft kept");st.style.color="var(--stale)";}
+          }else if(st){st.textContent="pty ok";st.style.color="";}
+        });
+      }
+    }).catch(()=>{
+      modalKeys(text,true,true).then(ok=>{
+        if(!ok){if(!i.value)i.value=body;setPending("");if(st){st.textContent="send failed";st.style.color="var(--stale)";}}
+      });
+    });
+    return;
+  }
   modalKeys(text,true,true).then(ok=>{
     if(!ok){                                    // …but if it didn't land, give the draft back
-      if(!i.value)i.value=text;setPending("");
-      const st=$("#modalstatus");st.textContent="send failed — draft kept";st.style.color="var(--stale)";
+      if(!i.value)i.value=body;
+      // cannot restore binary preview easily; path lines still useful
+      if(paths.length)i.value=(paths.join("\n")+(i.value?"\n\n"+i.value:""));
+      setPending("");
+      if(st){st.textContent="send failed — draft kept";st.style.color="var(--stale)";}
     }
   });
 }
@@ -3706,9 +7001,39 @@ function setPending(txt){pendingText=txt;const el=$("#modalpending");
 function updateThinking(t){const el=$("#modalthink");
   if(t&&t.active){el.className="on";if(t.for)el.querySelector("b").textContent=t.for;}
   else el.className="";}
-$("#modalsend").onclick=modalSubmit;
-$("#modalinput").addEventListener("keydown",e=>{if(e.key==="Enter")modalSubmit();});
-$("#tchatinput").addEventListener("keydown",e=>{if(e.key==="Enter")tchatSend();});
+$("#modalsend").onclick=()=>modalSubmit({queue:false});
+const mq=$("#modalqueue"); if(mq) mq.onclick=()=>modalSubmit({queue:true});
+$("#modalinput").addEventListener("keydown",e=>{if(e.key==="Enter")modalSubmit({queue:false});});
+$("#modalinput").addEventListener("paste",e=>{
+  if(!modalSession)return;
+  handleComposerPaste(e,modalSession.session||modalSession.name);
+});
+function syncModalAuth(v){
+  modalAuthMode=v||"always";
+  const a=$("#modalauth"), d=$("#drawerauthsel");
+  if(a&&a.value!==modalAuthMode) a.value=modalAuthMode;
+  if(d&&d.value!==modalAuthMode) d.value=modalAuthMode;
+  try{localStorage.setItem("emux_modal_auth",modalAuthMode);}catch(_){}
+  if(drawerTab==="context") renderDrawerContext();
+  if(drawerTab==="score") renderDrawerScore();
+}
+const ma=$("#modalauth"); if(ma) ma.onchange=()=>syncModalAuth(ma.value);
+const da=$("#drawerauthsel"); if(da) da.onchange=()=>syncModalAuth(da.value);
+document.querySelectorAll("#drawertabs .dtab").forEach(b=>{
+  b.onclick=()=>{
+    setDrawerTab(b.dataset.tab);
+    try{localStorage.setItem("emux_drawer_tab",drawerTab);}catch(_){}
+  };
+});
+const dadd=$("#drawersideadd");
+if(dadd) dadd.onclick=()=>{
+  const topic=prompt("Side chat topic (Linear key like AIC-284, or any label):");
+  if(topic==null||!String(topic).trim()) return;
+  const t=String(topic).trim();
+  openSideChat({kind:isLinearIssueKey(t)?"task":"topic",topic:t,title:isLinearIssueKey(t)?("about "+t):t});
+};
+// Side-chat inputs are bound dynamically in renderSideChats / renderDrawerChat
+$("#modalpop").onclick=()=>popOutSessionTab();
 $("#modaliterm").onclick=async()=>{
   if(!modalSession)return;
   const b=$("#modaliterm");const was=b.textContent;b.disabled=true;b.textContent="opening…";
@@ -3933,18 +7258,61 @@ $("#newcmd").addEventListener("input",()=>{NS.cmd=$("#newcmd").value;nsRender();
 $("#newname").addEventListener("input",()=>{NS.name=$("#newname").value.trim();nsRender();});
 $("#newintent").addEventListener("keydown",e=>{if(e.key==="Enter")doSuggest();});
 
-$("#dgrefresh").onclick=loadDigest;
+$("#dgrefresh").onclick=()=>{digestHasBody=false;loadDigest({force:true});};
 $("#modalclose").onclick=closeModal;
 $("#modalback").onclick=closeModal;
+// Terminal scroll: HTML book when tall; else app/tmux scroll which feeds the book.
+(function(){
+  const sc=$("#modalscreen"), j=$("#modaljump");
+  let wheelBusy=false, wheelAcc=0, wheelTimer=null;
+  if(sc){
+    sc.addEventListener("scroll",()=>{
+      if(modalScreenPinned(sc))sc.dataset.userPinned="0";
+      else sc.dataset.userPinned="1";
+      updateModalJump();
+    },{passive:true});
+    sc.addEventListener("wheel",e=>{
+      e.stopPropagation();
+      const canUp=sc.scrollTop>2;
+      const canDown=sc.scrollTop+sc.clientHeight<sc.scrollHeight-2;
+      const tall=sc.scrollHeight>sc.clientHeight+8;
+      // Native HTML scroll inside the accumulated book whenever possible.
+      if(tall&&e.deltaY<0&&canUp){sc.dataset.userPinned="1";return;}
+      if(tall&&e.deltaY>0&&canDown){return;}
+      // At edge or single-screen capture → drive agent/tmux, which adds pages to the book.
+      e.preventDefault();
+      wheelAcc+=e.deltaY;
+      if(wheelTimer)clearTimeout(wheelTimer);
+      wheelTimer=setTimeout(()=>{wheelAcc=0;},180);
+      if(wheelBusy)return;
+      if(Math.abs(wheelAcc)<24)return;
+      const dir=wheelAcc<0?"up":"down";
+      const amount=Math.abs(wheelAcc)>120?"page":"half";
+      wheelAcc=0;wheelBusy=true;
+      modalScrollTmux(dir,amount).finally(()=>{wheelBusy=false;});
+    },{passive:false});
+  }
+  if(j)j.onclick=()=>{
+    const s=$("#modalscreen");if(s)s.dataset.userPinned="0";
+    // Leave tmux copy-mode if we were in it; re-pin live bottom of the book
+    if(modalSession){
+      api("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({session:modalSession.session,keys:"Escape",literal:false,enter:false})})
+        .finally(()=>{modalScrollBottom();setTimeout(modalRefresh,200);});
+    }else modalScrollBottom();
+  };
+})();
 document.querySelectorAll("#modalchips .chip").forEach(ch=>ch.onclick=()=>modalKeys(ch.dataset.keys,false,false));
 
-// keyboard: Esc closes the modal first; otherwise 1-4 switch views
+// keyboard: Esc closes the topmost modal first; otherwise 1-4 switch views
 document.addEventListener("keydown",e=>{
   if($("#newmodal").classList.contains("open")){if(e.key==="Escape")closeNew();return;}
   if($("#modal").classList.contains("open")){if(e.key==="Escape")closeModal();return;}
+  // EID stress: Esc must dismiss settings (was missing → setmodal stuck, blocked SETTINGS re-click)
+  if($("#setmodal")&&$("#setmodal").classList.contains("open")){if(e.key==="Escape")closeSettings();return;}
   if(e.target.id==="filter"||e.target.id==="input"||e.target.id==="modalinput")return;
   if(e.target.closest&&e.target.closest("#newmodal"))return;
-  const map={"1":"grid","2":"groups","3":"activity","4":"flow","5":"orphans"};
+  const map={"1":"grid","2":"groups","3":"activity","4":"flow","5":"orphans","6":"chats"};
   if(map[e.key])setMode(map[e.key]);
 });
 // resume + clear title flash when tab refocuses (#13 #20)
@@ -3957,6 +7325,463 @@ let feedSeen="";   // signature of the newest event, to flash only what's new
 function fage(ts){const s=Math.max(0,Math.floor(Date.now()/1000-ts));
   return s<60?s+"s":(s<3600?Math.floor(s/60)+"m":(s<86400?Math.floor(s/3600)+"h":Math.floor(s/86400)+"d"));}
 function esc(x){return (x||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+// Linear issue keys (TEAM-123) → https://linear.app/<workspace>/issue/TEAM-123
+// Pure regex client-side — no API. Workspace is eidos-agi across AIC/Eidos fleet.
+const LINEAR_WS="eidos-agi";
+const LINEAR_ISSUE_RE=/\b([A-Z]{2,12}-\d{1,7})\b/g;
+// Common non-Linear TOKEN-n forms we must not turn into issue links.
+const LINEAR_SKIP_PREFIX=/^(UTF|HTTP|HTTPS|ISO|RFC|CPU|GPU|RAM|API|SDK|CLI|SSH|TLS|SSL|XML|JSON|HTML|CSS|PDF|URL|URI|UUID|SHA|MD5|AES|RSA|VPN|CDN|DNS|TCP|UDP|IPv?|OK|ID|US|UK|EU|AI|V\d+)$/i;
+function linearIssueUrl(key){
+  return "https://linear.app/"+LINEAR_WS+"/issue/"+encodeURIComponent(key);
+}
+function isLinearIssueKey(key){
+  const i=String(key||"").indexOf("-");
+  if(i<2) return false;
+  const pre=key.slice(0,i), num=key.slice(i+1);
+  if(LINEAR_SKIP_PREFIX.test(pre)) return false;
+  if(!/^\d{1,7}$/.test(num)) return false;
+  // Team keys are letters (Linear); reject mixed like "H2O-1"
+  if(!/^[A-Z]{2,12}$/.test(pre)) return false;
+  return true;
+}
+/** HTML for one Linear key + chat bubble (bubble loads/pursues the task). */
+function linearKeyHTML(key){
+  return '<span class="linwrap">'
+    +'<a class="linlink" href="'+linearIssueUrl(key)+'" target="_blank" rel="noopener noreferrer" title="Open '+key+' in Linear">'+key+'</a>'
+    +'<button type="button" class="linchat" data-linear="'+key+'" title="Side chat + load '+key+' into this head so you can pursue it">💬</button>'
+    +'</span>';
+}
+/** Escape + turn Linear keys (and bare http URLs) into links + pursue bubbles. */
+function linkifyLinear(raw){
+  const s=String(raw==null?"":raw);
+  if(!s) return "";
+  // Split on existing URLs so we don't nest issue keys inside linear.app/… paths.
+  const parts=s.split(/(https?:\/\/[^\s<>"'`]+)/g);
+  return parts.map((part,i)=>{
+    if(i%2===1){
+      const e=esc(part);
+      // If the URL is a Linear issue page, also offer the pursue bubble.
+      const m=part.match(/linear\.app\/[^/]+\/issue\/([A-Z]{2,12}-\d{1,7})/i);
+      if(m&&isLinearIssueKey(m[1].toUpperCase())){
+        const key=m[1].toUpperCase();
+        return '<span class="linwrap"><a class="linlink" href="'+e+'" target="_blank" rel="noopener noreferrer">'+e+'</a>'
+          +'<button type="button" class="linchat" data-linear="'+key+'" title="Side chat + load '+key+' so you can pursue it">💬</button></span>';
+      }
+      return '<a class="linlink" href="'+e+'" target="_blank" rel="noopener noreferrer">'+e+'</a>';
+    }
+    return esc(part).replace(LINEAR_ISSUE_RE,m=>
+      isLinearIssueKey(m)?linearKeyHTML(m):m
+    );
+  }).join("");
+}
+/** Craft the message that primes a head to load Linear issue KEY and work it. */
+function linearPursuePrompt(key){
+  const url=linearIssueUrl(key);
+  return (
+    "Load Linear issue "+key+" and prepare to pursue it.\n"
+    +"URL: "+url+"\n\n"
+    +"Do this now:\n"
+    +"1. Open/fetch the issue (Linear UI, CLI, or MCP if you have it) and restate: title, status, assignee, description, acceptance criteria, blockers, and linked PRs/branches if any.\n"
+    +"2. Summarize what \"done\" means and the smallest next concrete step.\n"
+    +"3. Stay on "+key+" unless I redirect you — treat this as the active work item for this conversation.\n"
+    +"4. If you cannot reach Linear, say what you need; otherwise start executing the next step after the summary."
+  );
+}
+/**
+ * Chat bubble after a task id: open a side chat about KEY and inject a
+ * "load this Linear issue so we can pursue it" prompt into the open head
+ * (or spawn a fresh Claude if no modal is open).
+ */
+function pursueLinearTask(key, opts){
+  key=String(key||"").trim().toUpperCase();
+  if(!isLinearIssueKey(key)) return;
+  const o=opts||{};
+  // Prefer working inside an open session modal
+  if(modalSession){
+    const sc=openSideChat({
+      kind:"task",
+      topic:key,
+      title:"about "+key,
+      seed:o.seed||(
+        "Pursuing Linear "+key+".\n"+linearIssueUrl(key)+"\n\n"
+        +"I just asked the parent head to load this issue and treat it as active work. "
+        +"Use this side chat for follow-ups about "+key+"; “Fresh Claude” spins a dedicated seat."
+      ),
+    });
+    if(typeof setDrawerTab==="function") setDrawerTab("chat");
+    const prompt=linearPursuePrompt(key);
+    if(sc) tchatLog("you","Load + pursue "+key,sc.id);
+    setPending(prompt.length>160?prompt.slice(0,160)+"…":prompt);
+    const st=$("#modalstatus");
+    if(st){st.textContent="loading "+key+"…";st.style.color="";}
+    modalKeys(prompt,true,true).then(ok=>{
+      if(st){
+        st.textContent=ok?("pursuing "+key):("send failed — try again");
+        st.style.color=ok?"":"var(--stale)";
+      }
+      if(ok) setTimeout(()=>{modalRefresh();loadDigest();},800);
+    });
+    return;
+  }
+  // No modal: spawn a dedicated Claude seat for the issue
+  const slug=key.toLowerCase().replace(/[^a-z0-9]+/g,"-");
+  const name=("task-"+slug+"-"+Date.now().toString(36).slice(-4)).slice(0,48);
+  api("/api/spawn",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({
+      name,
+      command:"claude --dangerously-skip-permissions",
+      prompt:linearPursuePrompt(key),
+      description:"Pursue Linear "+key,
+      tags:["sidechat","linear",key,"pursue"],
+    })}).then(async r=>{
+      if(r&&r.ok){
+        try{await poll();}catch(_){}
+        const s=grid.find(x=>x.name===(r.name||name));
+        if(s) openModal(s);
+      }else{
+        alert("Could not open seat for "+key+": "+((r&&r.error)||"unknown"));
+      }
+    });
+}
+/** Bind linlinks + chat bubbles so parent tile/card clicks do not fire. */
+function bindLinlinks(root){
+  if(!root) return;
+  root.querySelectorAll("a.linlink").forEach(a=>{
+    a.onclick=e=>{e.stopPropagation();};
+  });
+  root.querySelectorAll("button.linchat").forEach(btn=>{
+    btn.onclick=e=>{
+      e.preventDefault();
+      e.stopPropagation();
+      const key=btn.getAttribute("data-linear");
+      if(!key) return;
+      btn.disabled=true;
+      pursueLinearTask(key);
+      setTimeout(()=>{btn.disabled=false;},600);
+    };
+  });
+}
+/** Collect unique Linear keys from any blob of chat text. */
+function extractLinearKeys(text){
+  const out=[];
+  const s=String(text==null?"":text);
+  if(!s) return out;
+  s.replace(LINEAR_ISSUE_RE,m=>{
+    if(isLinearIssueKey(m)&&out.indexOf(m)<0) out.push(m);
+    return m;
+  });
+  LINEAR_ISSUE_RE.lastIndex=0;
+  return out;
+}
+// Accumulate keys for the open modal so a one-frame miss never blanks Tasks (EID-1141).
+let modalTaskKeyCache=[];
+/** All Linear tasks mentioned in the open session (name, summary, pane, history, gist). */
+function collectModalTaskKeys(s){
+  const blobs=[];
+  if(s){
+    blobs.push(s.name,s.description,s.summary,s.content);
+    if(s.linear&&s.linear.issue) blobs.push(String(s.linear.issue));
+    if(Array.isArray(s.tags)) blobs.push(s.tags.join(" "));
+  }
+  if(typeof modalHistoryText==="string"&&modalHistoryText) blobs.push(modalHistoryText);
+  if(Array.isArray(modalBook)&&modalBook.length) blobs.push(modalBook.join("\n"));
+  const dig=$("#modaldigest .dgtext");
+  if(dig){
+    blobs.push(dig.textContent||"");
+    // gist may be linkified HTML — also pull data-linear + plain text from DOM
+    dig.querySelectorAll("[data-linear]").forEach(n=>blobs.push(n.getAttribute("data-linear")||""));
+  }
+  const sc=$("#modalscreen");
+  if(sc){
+    if(sc.dataset.last) blobs.push(sc.dataset.last);
+    // textContent survives after modalRenderBook; never rely only on dataset
+    if(sc.textContent) blobs.push(sc.textContent);
+  }
+  const ban=$("#modalbanner"); if(ban&&ban.textContent) blobs.push(ban.textContent);
+  const keys=[];
+  for(const b of blobs){
+    for(const k of extractLinearKeys(b)){
+      if(keys.indexOf(k)<0) keys.push(k);
+    }
+  }
+  // Merge with cache for this modal open (do not drop keys mid-session)
+  for(const k of modalTaskKeyCache){
+    if(keys.indexOf(k)<0) keys.push(k);
+  }
+  for(const k of keys){
+    if(modalTaskKeyCache.indexOf(k)<0) modalTaskKeyCache.push(k);
+  }
+  keys.sort((a,b)=>{
+    const [ap,an]=a.split("-"),[bp,bn]=b.split("-");
+    if(ap!==bp) return ap<bp?-1:1;
+    return (parseInt(an,10)||0)-(parseInt(bn,10)||0);
+  });
+  return keys;
+}
+let modalTasksOpen=true;
+let drawerTab="tasks";
+let activeSideChatId="reply";
+let modalAuthMode="always";
+let modalOpenedAt=0;
+function toggleModalTasks(force){
+  const d=$("#modaldrawer"), btn=$("#modaltasksbtn");
+  if(!d) return;
+  if(typeof force==="boolean") modalTasksOpen=force;
+  else modalTasksOpen=!modalTasksOpen;
+  d.classList.toggle("collapsed",!modalTasksOpen);
+  if(btn) btn.classList.toggle("on",modalTasksOpen);
+  try{localStorage.setItem("emux_modal_tasks",modalTasksOpen?"1":"0");}catch(_){}
+}
+function setDrawerTab(tab){
+  drawerTab=tab||"tasks";
+  document.querySelectorAll("#drawertabs .dtab").forEach(b=>b.classList.toggle("on",b.dataset.tab===drawerTab));
+  document.querySelectorAll("#modaldrawer .dpane").forEach(p=>{
+    p.classList.toggle("on",p.id==="drawerpane-"+drawerTab);
+  });
+  if(drawerTab==="chat") renderDrawerChat();
+  if(drawerTab==="context") renderDrawerContext();
+  if(drawerTab==="score") renderDrawerScore();
+}
+function primaryLinearIssue(s){
+  const keys=collectModalTaskKeys(s);
+  if(s&&s.linear&&s.linear.issue&&isLinearIssueKey(String(s.linear.issue))){
+    const k=String(s.linear.issue).toUpperCase();
+    if(keys.indexOf(k)<0) keys.unshift(k);
+    else{keys.splice(keys.indexOf(k),1);keys.unshift(k);}
+  }
+  return keys[0]||null;
+}
+function updateModalIssueHeader(){
+  const el=$("#modalissue"); if(!el||!modalSession) return;
+  const key=primaryLinearIssue(modalSession);
+  if(!key){el.hidden=true;el.innerHTML="";return;}
+  el.hidden=false;
+  // Hero line (mock: ARP-24 · Define all five…) — title placeholder until Linear hydrate (EID-1143)
+  const titleHint=modalTaskTitleHint(key);
+  el.innerHTML='<a class="linlink" href="'+linearIssueUrl(key)+'" target="_blank" rel="noopener noreferrer">'+esc(key)+'</a>'
+    +'<span class="issuetitle"> · '+(titleHint?esc(titleHint):"active work")+'</span>'
+    +' <button type="button" class="linchat" data-linear="'+key+'" title="Load + pursue">💬</button>';
+  bindLinlinks(el);
+  // Wall-clock while modal open (EID-1144 partial — honest elapsed, not fake %)
+  const st=$("#modalstatus");
+  if(st&&modalOpenedAt){
+    const sec=Math.max(0,Math.floor((Date.now()-modalOpenedAt)/1000));
+    const mm=Math.floor(sec/60), ss=sec%60;
+    const elap=(mm?mm+"m ":"")+ss+"s open";
+    const base=(st.textContent||"").replace(/\s*·\s*\d+m?\s*\d*s open/g,"").trim();
+    st.textContent=base+(base?" · ":"")+elap;
+    if(/live/i.test(base)) st.className="st live";
+  }
+}
+/** Best-effort title from pane/gist context near a key (offline, no Linear API). */
+function modalTaskTitleHint(key){
+  if(!key) return "";
+  const blobs=[];
+  const dig=$("#modaldigest .dgtext"); if(dig&&dig.textContent) blobs.push(dig.textContent);
+  const sc=$("#modalscreen"); if(sc&&sc.dataset.last) blobs.push(sc.dataset.last.slice(-8000));
+  if(typeof modalHistoryText==="string"&&modalHistoryText) blobs.push(modalHistoryText.slice(0,4000));
+  const escKey=key.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  const re=new RegExp(escKey+"\\s*[·:\\-–—]?\\s+([^\\n\\r]{8,90})","i");
+  for(const b of blobs){
+    const m=String(b||"").match(re);
+    if(m&&m[1]){
+      let t=m[1].replace(/\s+/g," ").trim();
+      // cut at punctuation that looks like next sentence
+      t=t.replace(/\s*[|•].*$/,"").replace(/\s{2,}.*$/,"").trim();
+      if(t.length>=8&&t.length<=80&&!/^https?:/i.test(t)) return t;
+    }
+  }
+  return "";
+}
+function renderModalTasks(){
+  const list=$("#modaltasklist"), countEl=$("#modaltaskcount"), badge=$("#modaltaskbadge");
+  if(!list) return;
+  const keys=collectModalTaskKeys(modalSession);
+  const primary=primaryLinearIssue(modalSession);
+  if(countEl) countEl.textContent=String(keys.length);
+  if(badge){
+    badge.textContent=String(keys.length);
+    badge.classList.toggle("on",keys.length>0);
+  }
+  updateModalIssueHeader();
+  const chatBadge=$("#drawerchatbadge");
+  if(chatBadge) chatBadge.textContent=String(Math.max(0,sideChats.filter(c=>!c.collapsed||c.kind!=="reply").length||sideChats.length));
+  if(!keys.length){
+    list.innerHTML='<div class="mtempty">No Linear tasks mentioned yet. When the head cites <b>AIC-123</b>… they land here. Use <b>💬</b> on a key to load/pursue, or Chat tab <b>+</b> for any topic.</div>';
+  }else{
+    list.innerHTML=keys.map(k=>{
+      const title=modalTaskTitleHint(k);
+      const isPri=k===primary;
+      return '<div class="mtask'+(isPri?" active":"")+'" data-key="'+esc(k)+'">'
+        +'<div class="mtbody">'
+        +'<a class="linlink mtkey" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer" title="Open in Linear">'+esc(k)+'</a>'
+        +'<span class="mttitle">'+(title?esc(title):(isPri?"active work":"mentioned in session"))+'</span>'
+        +'</div>'
+        +(isPri?'<span class="mtpip" title="active"></span>':'')
+        +'<span class="mtacts">'
+        +'<button type="button" class="mtchat" data-act="pursue" title="Side chat + load this issue so the head can pursue it">💬 pursue</button>'
+        +'<a class="mtgo linlink" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer" title="Open in Linear">↗ Linear</a>'
+        +'</span></div>';
+    }).join("");
+    list.querySelectorAll(".mtchat").forEach(btn=>{
+      btn.onclick=e=>{
+        e.preventDefault();e.stopPropagation();
+        const key=btn.closest(".mtask")&&btn.closest(".mtask").dataset.key;
+        if(!key) return;
+        pursueLinearTask(key);
+        setDrawerTab("chat");
+      };
+    });
+    bindLinlinks(list);
+  }
+  if(drawerTab==="context") renderDrawerContext();
+  if(drawerTab==="score") renderDrawerScore();
+  if(drawerTab==="chat") renderDrawerChat();
+}
+function renderDrawerContext(){
+  const el=$("#drawercontext"); if(!el||!modalSession) return;
+  const s=modalSession;
+  const keys=collectModalTaskKeys(s);
+  const rows=[
+    ["session",s.session||s.name||"—"],
+    ["name",s.name||"—"],
+    ["host",s.host||"local"],
+    ["cwd",s.cwd||s.path||"—"],
+    ["agent",(s.agent&&(s.agent.label||s.agent.agent))||"—"],
+    ["state",s.state||"—"],
+    ["tags",(s.tags||[]).join(", ")||"—"],
+    ["linear", (s.linear&&s.linear.issue)||primaryLinearIssue(s)||"—"],
+    ["tasks found", keys.length?keys.join(", "):"—"],
+    ["auth mode", modalAuthMode],
+    ["side chats", String(sideChats.length)],
+    ["open for", modalOpenedAt?Math.round((Date.now()-modalOpenedAt)/1000)+"s":"—"],
+  ];
+  el.innerHTML=rows.map(([k,v])=>
+    '<div class="crow"><span class="ck">'+esc(k)+'</span><span class="cv">'+linkifyLinear(String(v))+'</span></div>'
+  ).join("");
+  bindLinlinks(el);
+}
+/** Score how close this session modal is to docs/target-ux-session-head.md */
+function scoreTargetUX(){
+  const checks=[];
+  const add=(id,pts,ok,label)=>{checks.push({id,pts,ok:!!ok,label});};
+  const drawer=$("#modaldrawer");
+  const tabs=document.querySelectorAll("#drawertabs .dtab[data-tab]");
+  const tabIds=[...tabs].map(t=>t.dataset.tab);
+  add("right_rail",12,!!drawer&&!drawer.classList.contains("collapsed"),"Right work drawer visible");
+  add("tab_tasks",10,tabIds.includes("tasks"),"Tasks tab");
+  add("tab_chat",10,tabIds.includes("chat"),"Chat tab");
+  add("tab_context",10,tabIds.includes("context"),"Context tab");
+  add("linear_list",10,!!$("#modaltasklist"),"Linear task list surface");
+  add("multi_sidechat",10,typeof openSideChat==="function"&&Array.isArray(sideChats),"Multi side-chat model");
+  add("pursue_bubble",8,typeof pursueLinearTask==="function","💬 pursue on task ids");
+  add("issue_header",10,!!$("#modalissue")&&!$("#modalissue").hidden,"Active Linear issue in header");
+  add("auth_mode",6,!!$("#modalauth")&&!!$("#drawerauthsel"),"Per-session authorization mode");
+  add("queue_send",6,!!$("#modalqueue")&&!!$("#modalsend"),"Queue vs Send Now");
+  add("status_banner",4,!!$("#modalbanner"),"Status banner element");
+  add("open_head",4,!!$("#modaliterm"),"Open HEAD action");
+  const earned=checks.reduce((a,c)=>a+(c.ok?c.pts:0),0);
+  const total=checks.reduce((a,c)=>a+c.pts,0);
+  return {earned,total,pct:total?Math.round(100*earned/total):0,checks};
+}
+function renderDrawerScore(){
+  const el=$("#drawerscore"); if(!el) return;
+  const sc=scoreTargetUX();
+  el.innerHTML='<div class="scorenum">'+sc.pct+'%</div>'
+    +'<div class="scorebar"><i style="width:'+sc.pct+'%"></i></div>'
+    +'<div style="color:var(--text-dim);font-size:11px;margin-bottom:10px">'+sc.earned+' / '+sc.total
+    +' pts · target: docs/target-ux-session-head.md</div>'
+    +sc.checks.map(c=>
+      '<div class="scrow"><span class="'+(c.ok?"scok":"scno")+'">'+(c.ok?"✓":"·")+'</span>'
+      +'<span>'+esc(c.label)+'</span><span class="scpts">'+c.pts+'</span></div>'
+    ).join("");
+}
+function renderDrawerChat(){
+  const list=$("#drawerchatlist"), active=$("#drawerchatactive");
+  if(!list||!active) return;
+  ensureReplySideChat();
+  list.innerHTML=sideChats.map(sc=>
+    '<div class="scthread'+(sc.id===activeSideChatId?" on":"")+'" data-id="'+esc(sc.id)+'">'
+    +'<span>'+esc(sc.kind==="reply"?"💬 reply":("◎ "+(sc.topic||sc.title)))+'</span>'
+    +'<span style="margin-left:auto;color:var(--text-dim);font-size:10px">'+(sc.messages||[]).length+'</span></div>'
+  ).join("")
+    +'<div class="scthread" data-id="__new__" style="color:var(--amber)">+ new side chat</div>';
+  list.querySelectorAll(".scthread").forEach(el=>{
+    el.onclick=()=>{
+      if(el.dataset.id==="__new__"){
+        const topic=prompt("Side chat topic (Linear key or label):");
+        if(topic==null||!topic.trim()) return;
+        const t=topic.trim();
+        const sc=openSideChat({kind:isLinearIssueKey(t)?"task":"topic",topic:t,title:isLinearIssueKey(t)?("about "+t):t});
+        if(sc) activeSideChatId=sc.id;
+        setDrawerTab("chat");
+        return;
+      }
+      activeSideChatId=el.dataset.id;
+      const sc=sideChatById(activeSideChatId);
+      if(sc) sc.collapsed=false;
+      renderDrawerChat();
+    };
+  });
+  const sc=sideChatById(activeSideChatId)||ensureReplySideChat();
+  if(!sc){active.innerHTML="";return;}
+  const isReply=sc.kind==="reply";
+  let html='<div class="tchatpanel" data-id="'+esc(sc.id)+'">';
+  html+='<div class="tchathead" style="border-radius:0"><span class="th-title">'
+    +(isReply?('💬 reply to <b>'+esc(modalSession&&modalSession.name||"")+'</b>'):('◎ '+esc(sc.title)))
+    +'</span></div>';
+  html+='<div class="tchatlog" style="max-height:none;flex:1">';
+  (sc.messages||[]).forEach(m=>{
+    html+='<div class="tcmsg '+esc(m.who||"bot")+'">'+linkifyLinear(m.text||"")+'</div>';
+  });
+  html+='</div>';
+  if(isReply) html+='<div class="tchatchips" id="drawer-reply-chips"></div>';
+  html+='<div class="tchatrow">'
+    +'<input class="tchatinput" id="drawer-chat-input" placeholder="'+(isReply?"reply…":"message about "+esc(sc.topic||"this")+"…")+'" autocomplete="off">'
+    +'<button type="button" class="tchatsend" id="drawer-chat-send">➤</button></div>';
+  if(!isReply){
+    html+='<div class="tchatfoot">'
+      +'<button type="button" class="act" id="drawer-chat-fresh">⧉ Fresh Claude</button>'
+      +(sc.seatName?'<button type="button" class="act" id="drawer-chat-seat">↗ '+esc(sc.seatName)+'</button>':"")
+      +'</div>';
+  }
+  html+='</div>';
+  active.innerHTML=html;
+  if(isReply){
+    const chips=$("#drawer-reply-chips");
+    if(chips){
+      const parts=[];
+      tOpts.forEach(o=>parts.push('<button class="tc-opt'+(o.selected?" sel":"")+'" data-n="'+o.n+'"><b>'+o.n+'</b> '+esc(o.label)+'</button>'));
+      tSugg.forEach((s,i)=>{
+        const c=Math.max(0,Math.min(100,s.confidence==null?50:s.confidence));
+        parts.push('<button class="tc-sug" data-i="'+i+'">'+pieHTML(c)+'<span class="tc-txt">'+esc(s.text||"")+'</span></button>');
+      });
+      chips.innerHTML=parts.join("")||'<div class="tc-empty">type below · or + for another side chat</div>';
+      chips.querySelectorAll(".tc-opt").forEach(b=>b.onclick=()=>{
+        chips.querySelectorAll("button").forEach(x=>x.disabled=true);sendOption(+b.dataset.n);});
+      chips.querySelectorAll(".tc-sug").forEach(b=>b.onclick=()=>{
+        const t=(tSugg[+b.dataset.i]||{}).text||"";if(!t)return;
+        setPending(t);tchatLog("you",t,"reply");modalKeys(t,true,true);
+        tSugg=[];renderSideChats();renderDrawerChat();
+        setTimeout(()=>{modalRefresh();loadDigest();},1500);});
+    }
+  }
+  const inp=$("#drawer-chat-input"), send=$("#drawer-chat-send");
+  if(send) send.onclick=()=>sideChatSend(sc.id);
+  if(inp){
+    inp.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();sideChatSend(sc.id);}};
+    setTimeout(()=>inp.focus(),30);
+  }
+  const fresh=$("#drawer-chat-fresh");
+  if(fresh) fresh.onclick=()=>spawnSideChatClaude(sc.id);
+  const seat=$("#drawer-chat-seat");
+  if(seat&&sc.seatName) seat.onclick=()=>{
+    setMode("grid");const s=grid.find(x=>x.name===sc.seatName);if(s)openModal(s);
+  };
+  bindLinlinks(active);
+  const log=active.querySelector(".tchatlog");
+  if(log) log.scrollTop=log.scrollHeight;
+}
 async function pollFeed(){
   if(!$("#feed").classList.contains("open"))return;
   const r=await api("/api/events?limit=60");
@@ -3971,8 +7796,9 @@ async function pollFeed(){
       +'<span class="fage">'+fage(e.ts)+'</span>'
       +'<span class="ftag">'+esc(label)+'</span>'
       +(e.session?'<span class="fsess">'+esc(e.session)+'</span>':'')
-      +'<span class="ftext">'+esc(e.text)+'</span></div>';
+      +'<span class="ftext">'+linkifyLinear(e.text)+'</span></div>';
   }).join("")||'<div class="fev"><span class="ftext">no activity yet</span></div>';
+  bindLinlinks($("#feedlist"));
   feedSeen=newest;
 }
 function setFeed(open){
@@ -4076,8 +7902,14 @@ pollHancock();setInterval(pollHancock,3000);
 // --- model routing settings ---
 const TASK_LABELS={gist:"The Gist (session digest + suggested replies)",placement:"Session placement (new-session machine + name)"};
 async function openSettings(){
+  // Open immediately so Esc works during /api/models fetch (stress open/esc race).
+  $("#setmodal").classList.add("open");
+  $("#nimtestout").textContent="loading…";$("#nimtestout").className="";
   const r=await api("/api/models");
-  if(!r.ok)return;
+  if(!r.ok){
+    $("#nimtestout").textContent="failed to load models";$("#nimtestout").className="err";
+    return;
+  }
   const c=r.config;
   $("#nimurl").value=c.nim.base_url||"";$("#nimmodel").value=c.nim.model||"";$("#nimkey").value=c.nim.api_key||"";
   $("#setroutes").innerHTML=(r.tasks||[]).map(t=>{
@@ -4089,7 +7921,6 @@ async function openSettings(){
       +'</select></label>';
   }).join("");
   $("#nimtestout").textContent="";$("#setsaveout").textContent="";
-  $("#setmodal").classList.add("open");
 }
 function closeSettings(){$("#setmodal").classList.remove("open");}
 async function testNim(){
@@ -4109,7 +7940,25 @@ async function saveSettings(quiet){
 }
 
 applyURL();   // restore view + filters + open session from the URL (falls back to localStorage)
+loadProductChrome();                     // MANAGER chip + managed-planes strip (product.json)
 poll();gridTimer=setInterval(poll,2000);
+setInterval(loadManagedHealth,30000);    // refresh managed plane health on managers
+</script>
+<script id="emux-theme">
+// Wire the topbar button to the real applyTheme() (brand × light/dark).
+(function(){
+  function wire(){
+    var b=document.getElementById("themebtn");
+    if(!b||b._emuxThemeWired) return;
+    b._emuxThemeWired=true;
+    b.addEventListener("click",function(e){
+      e.preventDefault();
+      if(typeof toggleMode==="function") toggleMode();
+    });
+  }
+  wire();
+  document.addEventListener("DOMContentLoaded",wire);
+})();
 </script>
 </body>
 </html>
@@ -4128,9 +7977,20 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
     # Optional canonical browser origin when published through a trusted proxy.
     # Default remains loopback-only.
     public_origin: str | None = None
+    # Optional path prefix when the reverse proxy mounts the UI under a path
+    # (e.g. "/gmux" behind go.greenmarkwaste.com). Empty string = root mount.
+    # Caddy handle_path strips this before the request hits us; the SPA still
+    # needs the prefix on absolute fetch/href so the browser hits the proxy path.
+    public_path: str = ""
     # Disabled unless supplied by an embedding service with a trusted identity
     # boundary. Never infer controller trust from localhost or browser headers.
     remote_controller_api: Any = None
+
+    def _with_public_path(self, html: str) -> str:
+        """Stamp reverse-proxy path + active skin into HTML/JS shells."""
+        from . import skin as _skin
+        html = html.replace("__PUBLIC_PATH__", self.public_path or "")
+        return _skin.active_skin().apply(html, __version__)
 
     def _controller_error(self, exc: Exception) -> None:
         from .remote_control.protocol import ProtocolError
@@ -4146,21 +8006,49 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
 
     def _json(self, payload: dict[str, Any], status: int = 200) -> None:
         body = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # Client gave up (stress tests, tab close) — not a server fault.
+            return
 
     def _host_allowed(self) -> bool:
-        """Defeat DNS-rebinding: only serve requests whose Host header is a
-        loopback name (or the explicit bind host). A rebound attacker domain
-        resolving to 127.0.0.1 carries its own name in Host and is rejected."""
+        """Defeat DNS-rebinding on loopback; allow the configured public origin.
+
+        Production go.greenmarkwaste.com is fronted by Railway (Host can be
+        *.up.railway.app). Caddy may also rewrite Host to 127.0.0.1. Trust:
+          - loopback Host
+          - Host / X-Forwarded-Host matching public_origin hostname
+          - Origin or Referer matching public_origin (browser SPA on the
+            real public URL) — only meaningful when public_origin is set;
+            the daemon remains loopback-bound so this is not a WAN open.
+        """
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
-        public_host = urlparse(self.public_origin).hostname if self.public_origin else None
-        return (host in _LOCALHOSTS
-                or (self.extra_host is not None and host == self.extra_host)
-                or (public_host is not None and host == public_host))
+        if host in _LOCALHOSTS:
+            return True
+        if self.extra_host is not None and host == self.extra_host:
+            return True
+        if not self.public_origin:
+            return False
+        public_host = urlparse(self.public_origin).hostname
+        if not public_host:
+            return False
+        xfh = (self.headers.get("X-Forwarded-Host") or "").split(",")[0].strip()
+        xfh = xfh.rsplit(":", 1)[0].strip("[]") if xfh else ""
+        if host == public_host or xfh == public_host:
+            return True
+        origin = (self.headers.get("Origin") or "").rstrip("/")
+        if origin == self.public_origin.rstrip("/"):
+            return True
+        referer = self.headers.get("Referer") or ""
+        pub = self.public_origin.rstrip("/")
+        if referer == pub or referer.startswith(pub + "/"):
+            return True
+        return False
 
     def _origin_allowed(self) -> bool:
         """Block cross-site writes: a POST carrying an Origin from any non-local
@@ -4178,29 +8066,204 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return True
         return self.public_origin is not None and origin.rstrip("/") == self.public_origin
 
-    def do_GET(self) -> None:  # noqa: N802 (http.server API)
-        url = urlparse(self.path)
-        if url.path == "/" or url.path == "/index.html":
-            body = _help.control_room_page(PAGE, __version__).replace("__OS__", _host_os()).encode()
-            self.send_response(200)
+    def _send_html(self, html: str, status: int = 200) -> None:
+        body = html.encode()
+        try:
+            self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
+
+    def _send_text(self, text: str, content_type: str = "text/markdown; charset=utf-8",
+                   status: int = 200) -> None:
+        body = text.encode("utf-8")
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
+
+    def handle_error(self, request, client_address) -> None:  # noqa: ANN001
+        """Swallow client disconnect noise; log real handler errors."""
+        import sys
+        import traceback
+
+        err = traceback.format_exc()
+        if "BrokenPipeError" in err or "ConnectionResetError" in err:
+            return
+        # Avoid super().handle_error typing issues under pyright (BaseHTTPRequestHandler stubs).
+        print("-" * 40, file=sys.stderr)
+        print(
+            f"Exception occurred during processing of request from {client_address}",
+            file=sys.stderr,
+        )
+        print(err, file=sys.stderr)
+        print("-" * 40, file=sys.stderr)
+
+    def _control_room_html(self) -> str:
+        html = _help.control_room_page(PAGE, __version__).replace("__OS__", _host_os())
+        return self._with_public_path(html)
+
+    def _wants_ai_format(self, url) -> bool:
+        qs = parse_qs(url.query or "")
+        fmt = (qs.get("format") or qs.get("mode") or [""])[0].lower()
+        if fmt in ("ai", "md", "markdown", "text", "txt"):
+            return True
+        accept = (self.headers.get("Accept") or "").lower()
+        if "text/markdown" in accept or "text/plain" in accept:
+            if "text/html" not in accept.split(",")[0]:
+                return True
+        return False
+
+    def _strip_public_path(self) -> None:
+        """Rewrite self.path so /gmux/api/* is handled like /api/* without Caddy.
+
+        The SPA stamps PUBLIC_PATH=/gmux and fetches absolute `/gmux/api/grid`.
+        Caddy handle_path strips that prefix; loopback, SSH tunnels, and chrime
+        do not. Without this strip the request never matches /api/* and the room
+        shows a hard failure (often misread as FORBIDDEN_HOST).
+        """
+        prefix = (getattr(self, "public_path", None) or "").rstrip("/")
+        if not prefix:
+            return
+        parts = urlparse(self.path)
+        path = parts.path or "/"
+        if path == prefix:
+            new_path = "/"
+        elif path.startswith(prefix + "/"):
+            new_path = path[len(prefix):] or "/"
+        else:
+            return
+        # rebuild path?query
+        self.path = new_path + (("?" + parts.query) if parts.query else "")
+
+    def _simple_status_from_url(self, url) -> str:
+        """Parse filter/peek query params for the simple status page."""
+        qs = parse_qs(url.query or "")
+
+        def _flag(name: str) -> bool:
+            vals = qs.get(name) or []
+            if not vals:
+                return False
+            return vals[0].lower() in ("1", "true", "yes", "on")
+
+        peek_vals = qs.get("peek") or []
+        peek = (peek_vals[0].strip() if peek_vals else "") or None
+        try:
+            line_vals = qs.get("lines") or []
+            lines = int(line_vals[0]) if line_vals else 24
+        except (TypeError, ValueError):
+            lines = 24
+        # Default live-only. all=1 shows registry ghosts. live=1 is explicit same as default.
+        show_all = _flag("all")
+        if "live" in qs and not show_all:
+            live_only = _flag("live")
+        else:
+            live_only = not show_all
+        return simple_status_html(
+            __version__,
+            self.public_path or "",
+            live_only=live_only,
+            registered_only=_flag("registered"),
+            peek=peek,
+            peek_lines=lines,
+        )
+
+    def do_GET(self) -> None:  # noqa: N802 (http.server API)
+        self._strip_public_path()
+        url = urlparse(self.path)
+        # AI mode: plain markdown diagnosis (also ?format=ai on status routes).
+        # Per-product health page (standing, cheap). Distinct from /healthz (JSON
+        # probe) and /ai (deep diagnosis with pane/chat scans). Criteria evolve.
+        if url.path in ("/health", "/health/", "/health.md"):
+            qs = parse_qs(url.query or "")
+            want_html = (qs.get("view") or [""])[0].lower() in ("html", "1", "yes")
+            if want_html:
+                self._send_html(health_page_html(__version__, self.public_path or ""))
+            else:
+                self._send_text(health_page_markdown(__version__, self.public_path or ""))
+            return
+        if url.path in ("/health.html", "/health.html/"):
+            self._send_html(health_page_html(__version__, self.public_path or ""))
+            return
+        if url.path in ("/ai", "/ai/", "/ai.md", "/diagnosis", "/diagnosis/"):
+            qs = parse_qs(url.query or "")
+            want_html = (qs.get("view") or [""])[0].lower() in ("html", "1", "yes")
+            if want_html or url.path.rstrip("/").endswith(".html"):
+                html = _expensive_get(
+                    f"ai_html:{self.public_path or ''}",
+                    _EXPENSIVE_TTL["ai_html"],
+                    lambda: ai_diagnosis_html(__version__, self.public_path or ""),
+                )
+                self._send_html(html)
+            else:
+                md = _expensive_get(
+                    f"ai_md:{self.public_path or ''}",
+                    _EXPENSIVE_TTL["ai_md"],
+                    lambda: ai_diagnosis_markdown(__version__, self.public_path or ""),
+                )
+                self._send_text(md)
+            return
+        if url.path in ("/ai.html", "/ai.html/"):
+            html = _expensive_get(
+                f"ai_html:{self.public_path or ''}",
+                _EXPENSIVE_TTL["ai_html"],
+                lambda: ai_diagnosis_html(__version__, self.public_path or ""),
+            )
+            self._send_html(html)
+            return
+        # Simple status first: under a public path mount, "/" is the testable
+        # read-only table; full SPA lives at /room. Local loopback (no path)
+        # keeps "/" as the full control room for existing muscle memory.
+        if url.path in ("/simple", "/simple/", "/status", "/status/"):
+            if self._wants_ai_format(url):
+                self._send_text(ai_diagnosis_markdown(__version__, self.public_path or ""))
+                return
+            self._send_html(self._simple_status_from_url(url))
+            return
+        if url.path in ("/room", "/room/"):
+            if self._wants_ai_format(url):
+                self._send_text(ai_diagnosis_markdown(__version__, self.public_path or ""))
+                return
+            self._send_html(self._control_room_html())
+            return
+        if url.path == "/" or url.path == "/index.html":
+            if self._wants_ai_format(url):
+                self._send_text(ai_diagnosis_markdown(__version__, self.public_path or ""))
+                return
+            if self.public_path:
+                self._send_html(self._simple_status_from_url(url))
+            else:
+                self._send_html(self._control_room_html())
             return
         if url.path in ("/docs", "/docs/"):
-            body = _help.docs_page(__version__).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_html(self._with_public_path(_help.docs_page(__version__)))
             return
         if url.path == "/healthz":
             # Unguarded on purpose: leaks nothing, lets launchd/monitoring probe liveness.
             live = sessions_payload()
             n = len([s for s in live.get("sessions", []) if s.get("live")]) if live.get("ok") else 0
-            self._json({"ok": True, "version": __version__, "live_sessions": n})
+            body: dict[str, Any] = {"ok": True, "version": __version__, "live_sessions": n}
+            try:
+                from . import product_config as _pc
+                from . import skin as _skin
+
+                cfg = _pc.load_product_config(_skin.active_skin().id)
+                body["product"] = cfg.product
+                body["role"] = cfg.role
+                if cfg.is_manager:
+                    body["managed_planes"] = [p.id for p in cfg.managed_planes]
+            except Exception:
+                pass
+            self._json(body)
             return
         if url.path.startswith("/api/"):
             if not self._host_allowed():
@@ -4239,7 +8302,13 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                 self._controller_error(exc)
             return
         if url.path == "/api/sessions":
-            self._json(sessions_payload())
+            self._json(
+                _expensive_get(
+                    "sessions",
+                    _EXPENSIVE_TTL["sessions"],
+                    sessions_payload,
+                )
+            )
             return
         if url.path == "/api/help":
             query = (parse_qs(url.query).get("q") or [""])[0]
@@ -4333,9 +8402,113 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                         "dirs": _candidate_dirs(rh),
                         "running": _running_sessions(rh)})
             return
+        if url.path == "/api/chats":
+            # Claude Code + Grok Build transcripts on disk (this host). Not tmux.
+            # Single-flight cache so concurrent Chats tab polls share one scan (EID-1109).
+            qs = parse_qs(url.query)
+            cache_key = "chats:" + urlencode(
+                {k: (v[0] if v else "") for k, v in sorted(qs.items())}
+            )
+            self._json(
+                _expensive_get(
+                    cache_key,
+                    _EXPENSIVE_TTL["chats"],
+                    lambda: chats_payload(qs),
+                )
+            )
+            return
+        if url.path == "/api/chats/peek":
+            self._json(chats_peek_payload(parse_qs(url.query)))
+            return
+        if url.path in ("/api/ux-score", "/api/ux-score/"):
+            # Static feature flags for docs/target-ux-session-head.md (ship score).
+            self._json(_target_ux_score())
+            return
+        if url.path in ("/api/schedule", "/api/schedule/"):
+            # In-process cron message jobs (product-scoped schedule.json).
+            # Optional ?from=&to= ISO expand occurrences for calendar views.
+            # Calendar paints skeleton immediately; keep this path light — skip
+            # next_run_at when expanding a range (UI uses events, not next).
+            try:
+                from datetime import datetime, timedelta
+
+                from . import schedule as _sched
+
+                qs = parse_qs(url.query)
+                fr = (qs.get("from") or [""])[0].strip()
+                to = (qs.get("to") or [""])[0].strip()
+                with_range = bool(fr and to)
+                payload: dict[str, Any] = {
+                    "ok": True,
+                    "path": str(_sched.schedule_path()),
+                    "product": _sched._product_id(),
+                    "jobs": _sched.list_jobs(with_next=not with_range),
+                }
+                if with_range:
+                    try:
+                        start = datetime.fromisoformat(fr.replace("Z", "+00:00"))
+                        end = datetime.fromisoformat(to.replace("Z", "+00:00"))
+                        if start.tzinfo is None:
+                            start = start.replace(tzinfo=UTC)
+                        if end.tzinfo is None:
+                            end = end.replace(tzinfo=UTC)
+                    except ValueError:
+                        start = datetime.now(UTC).replace(
+                            hour=0, minute=0, second=0, microsecond=0
+                        )
+                        end = start + timedelta(days=7)
+                    payload["from"] = start.isoformat()
+                    payload["to"] = end.isoformat()
+                    payload["events"] = _sched.occurrences(start, end)
+                self._json(payload)
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+            return
+        if url.path in ("/api/product", "/api/product/"):
+            # Worker vs manager role + managed plane registry (config-driven).
+            try:
+                from . import product_config as _pc
+                from . import skin as _skin
+
+                cfg = _pc.load_product_config(_skin.active_skin().id)
+                self._json({"ok": True, **cfg.as_dict()})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+            return
+        if url.path in ("/api/managed", "/api/managed/"):
+            # Manager-only: probe configured planes (healthz URLs from product.json).
+            try:
+                from . import product_config as _pc
+                from . import skin as _skin
+
+                cfg = _pc.load_product_config(_skin.active_skin().id)
+                if not cfg.is_manager:
+                    self._json(
+                        {
+                            "ok": False,
+                            "error": "not_a_manager",
+                            "role": cfg.role,
+                            "hint": "only manager products expose /api/managed",
+                        },
+                        400,
+                    )
+                    return
+                # Cache + stale-while-revalidate: concurrent room tabs must not
+                # re-probe every external healthz (EID-1107, EID-1115).
+                probe = _expensive_get(
+                    f"managed:{cfg.product}:{cfg.path}",
+                    _EXPENSIVE_TTL["managed"],
+                    lambda: _probe_managed_planes(cfg),
+                    stale_ttl=_EXPENSIVE_TTL["managed_stale"],
+                )
+                self._json({"ok": True, **probe})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+            return
         self._json({"ok": False, "error": "not_found"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802
+        self._strip_public_path()
         url = urlparse(self.path)
         controller_submit = url.path == "/api/controller/v1/requests"
         controller_cancel = re.fullmatch(
@@ -4368,9 +8541,13 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                 self._controller_error(exc)
             return
         if url.path not in ("/api/send", "/api/head", "/api/spawn", "/api/suggest",
-                            "/api/adopt", "/api/reply",
+                            "/api/adopt", "/api/reply", "/api/chats/resume",
+                            "/api/clip-image", "/api/steer", "/api/scroll",
                             "/api/hancock/approve", "/api/hancock/deny",
-                            "/api/models", "/api/models/test", "/api/plan/switch"):
+                            "/api/models", "/api/models/test", "/api/plan/switch",
+                            "/api/schedule", "/api/schedule/",
+                            "/api/schedule/run", "/api/schedule/delete",
+                            "/api/schedule/update"):
             self._json({"ok": False, "error": "not_found"}, 404)
             return
         if not self._host_allowed():
@@ -4381,9 +8558,86 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
+            # image paste can be a few MB of base64
+            if length > 12 * 1024 * 1024:
+                self._json({"ok": False, "error": "body_too_large"}, 413)
+                return
             data = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
             self._json({"ok": False, "error": "bad_json"}, 400)
+            return
+        if url.path == "/api/clip-image":
+            self._json(_clip_image_save(data if isinstance(data, dict) else {}))
+            return
+        if url.path in ("/api/schedule", "/api/schedule/"):
+            # Add a cron message job: {cron, target, message, timezone?, id?}
+            try:
+                from . import schedule as _sched
+
+                body = data if isinstance(data, dict) else {}
+                job = _sched.add_job(
+                    cron=str(body.get("cron") or ""),
+                    target=str(body.get("target") or ""),
+                    message=str(body.get("message") or ""),
+                    timezone=str(body.get("timezone") or "America/Chicago"),
+                    job_id=(str(body["id"]).strip() if body.get("id") else None),
+                    title=(str(body.get("title") or "").strip() or None),
+                    enabled=bool(body.get("enabled", True)),
+                )
+                self._json({"ok": True, "job": job.as_dict(), "path": str(_sched.schedule_path())})
+            except ValueError as exc:
+                self._json({"ok": False, "error": str(exc)}, 400)
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+            return
+        if url.path == "/api/schedule/update":
+            try:
+                from . import schedule as _sched
+
+                body = data if isinstance(data, dict) else {}
+                jid = str(body.get("id") or "").strip()
+                if not jid:
+                    self._json({"ok": False, "error": "missing_id"}, 400)
+                    return
+                fields = {
+                    k: body[k]
+                    for k in ("cron", "target", "message", "title", "timezone", "enabled")
+                    if k in body
+                }
+                job = _sched.update_job(jid, **fields)
+                if not job:
+                    self._json({"ok": False, "error": "unknown_job", "id": jid}, 404)
+                    return
+                self._json({"ok": True, "job": job.as_dict()})
+            except ValueError as exc:
+                self._json({"ok": False, "error": str(exc)}, 400)
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+            return
+        if url.path == "/api/schedule/run":
+            try:
+                from . import schedule as _sched
+
+                jid = str((data or {}).get("id") or "").strip()
+                if not jid:
+                    self._json({"ok": False, "error": "missing_id"}, 400)
+                    return
+                self._json(_sched.fire_by_id(jid, force=True))
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+            return
+        if url.path == "/api/schedule/delete":
+            try:
+                from . import schedule as _sched
+
+                jid = str((data or {}).get("id") or "").strip()
+                if not jid:
+                    self._json({"ok": False, "error": "missing_id"}, 400)
+                    return
+                ok = _sched.remove_job(jid)
+                self._json({"ok": ok, "id": jid, **({} if ok else {"error": "unknown_job"})})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
             return
         if url.path == "/api/suggest":
             intent = (data.get("intent") or "").strip()
@@ -4401,12 +8655,35 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         if url.path == "/api/spawn":
             self._json(_spawn_session(data))
             return
+        if url.path == "/api/chats/resume":
+            # Abandoned transcript → live registered fleet session (local host).
+            self._json(_resume_chat_in_fleet(data))
+            return
+        if url.path == "/api/steer":
+            # Grok headless (B) / ACP (C) / tmux PTY — control plane steer
+            self._json(steer_payload(data if isinstance(data, dict) else {}))
+            return
+        if url.path == "/api/scroll":
+            # Wheel / PgUp → tmux history OR app alt-screen (Claude), auto-detected
+            sess = (data.get("session") or data.get("name") or "").strip()
+            if not sess:
+                self._json({"ok": False, "error": "missing_session"}, 400)
+                return
+            self._json(scroll_payload(
+                sess,
+                direction=str(data.get("direction") or "up"),
+                amount=str(data.get("amount") or "page"),
+                host=_session_host(sess),
+                mode=(str(data.get("mode") or "auto") or "auto"),
+            ))
+            return
         if url.path == "/api/reply":
             sess = (data.get("session") or "").strip()
             if not sess:
                 self._json({"ok": False, "error": "missing_session"}, 400)
                 return
-            self._json(_reply_suggestions(sess, _session_host(sess)))
+            force = bool(data.get("force"))
+            self._json(_reply_suggestions(sess, _session_host(sess), force=force))
             return
         if url.path == "/api/adopt":
             self._json(_adopt_session(data))
@@ -4482,29 +8759,1359 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
         pass
 
 
-def launchd_plist(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
+def launchd_plist(
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    public_origin: str | None = None,
+    public_path: str = "",
+    skin: str = "",
+) -> str:
     """A ready-to-install launchd plist that keeps `emux web` running and
-    restarts it on crash / login. Print with `emux web --print-launchd`."""
+    restarts it on crash / login. Print with `emux web --print-launchd`.
+
+    Includes launchd-safe PATH + absolute EMUX_*_BIN when resolvable (launchd
+    otherwise ships PATH=/usr/bin:/bin only).
+    """
+    from pathlib import Path
+
     emux = sys.argv[0]
+    extra = ""
+    if public_origin:
+        extra += f"\n    <string>--public-origin</string><string>{public_origin}</string>"
+    if public_path:
+        extra += f"\n    <string>--public-path</string><string>{public_path}</string>"
+    if skin:
+        extra += f"\n    <string>--skin</string><string>{skin}</string>"
+
+    home = str(Path.home())
+    path_parts = [
+        f"{home}/.local/bin",
+        f"{home}/.grok/bin",
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ]
+    path_val = ":".join(path_parts)
+    skin_key = (skin or os.environ.get("EMUX_SKIN") or "").strip().lower()
+    if skin_key in ("reevux", "reeves", "personal", "rvs"):
+        label = "com.reeves.reevux-web"
+        log_base = "reevux-web"
+    elif skin_key in ("gmux", "greenmux", "greenmark"):
+        label = "com.eidos.gmux-web"
+        log_base = "gmux-web"
+    elif skin_key in ("amux", "aic"):
+        label = "com.eidos.amux-web"
+        log_base = "amux-web"
+    else:
+        label = "com.eidos.emux-web"
+        log_base = "emux-web"
+
+    env_items: list[tuple[str, str]] = [
+        ("HOME", home),
+        ("PATH", path_val),
+        ("EMUX_SKIN", skin_key or "emux"),
+    ]
+    grok = _resolve_cli("grok") or os.environ.get("EMUX_GROK_BIN") or ""
+    claude = _resolve_cli("claude") or os.environ.get("EMUX_CLAUDE_BIN") or ""
+    if grok:
+        env_items.append(("EMUX_GROK_BIN", grok))
+    if claude:
+        env_items.append(("EMUX_CLAUDE_BIN", claude))
+    if skin_key in ("reevux", "reeves", "personal", "rvs"):
+        env_items.append(("EMUX_CONNECT_SSH", os.environ.get("EMUX_CONNECT_SSH") or "mac-mini-01"))
+    env_xml = "\n".join(
+        f"    <key>{k}</key><string>{v}</string>" for k, v in env_items
+    )
+
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.eidos.emux-web</string>
+  <key>Label</key><string>{label}</string>
   <key>ProgramArguments</key>
   <array>
     <string>{emux}</string>
     <string>web</string>
     <string>--host</string><string>{host}</string>
-    <string>--port</string><string>{port}</string>
+    <string>--port</string><string>{port}</string>{extra}
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+{env_xml}
+  </dict>
+  <key>WorkingDirectory</key><string>{home}</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/emux-web.log</string>
-  <key>StandardErrorPath</key><string>/tmp/emux-web.err.log</string>
+  <key>StandardOutPath</key><string>/tmp/{log_base}.log</string>
+  <key>StandardErrorPath</key><string>/tmp/{log_base}.err.log</string>
 </dict>
 </plist>
 """
+
+
+def normalize_public_path(path: str | None) -> str | None:
+    """Return a normalized path prefix ('' or '/gmux') or None if invalid.
+
+    Rules: empty/None → ''; must start with /; no trailing slash; no //, ., ..,
+    query, fragment, or whitespace. Used by Caddy handle_path mounts where the
+    proxy strips the prefix before the daemon sees the request.
+    """
+    if path is None or path == "":
+        return ""
+    p = path.strip()
+    if not p.startswith("/") or p == "/":
+        return None
+    if p.endswith("/") or "//" in p or "?" in p or "#" in p or " " in p:
+        return None
+    segments = [s for s in p.split("/") if s]
+    if not segments or any(s in (".", "..") for s in segments):
+        return None
+    return "/" + "/".join(segments)
+
+
+def _fmt_age(seconds: float | int | None) -> str:
+    """Human age for uptime / last-activity columns."""
+    if seconds is None:
+        return "—"
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return "—"
+    if s < 0:
+        s = 0
+    if s < 2:
+        return "now"
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
+def connect_command(
+    session: str,
+    *,
+    socket_path: str | None = None,
+    socket_name: str = "default",
+    ssh_host: str | None = None,
+) -> str:
+    """One shell line: attach to this tmux session (optionally over ssh).
+
+    From a laptop to rentamac greenmux this is typically:
+      ssh -t rentamac 'tmux attach -t <session>'
+    Non-default sockets use -S path or -L name. Local (no ssh_host) is bare tmux.
+    """
+    import shlex
+
+    sess = shlex.quote(session)
+    # Prefer short form on the default server; pin -S/-L only when non-default.
+    if socket_name and socket_name not in ("default", "", "local"):
+        if socket_path:
+            tmux = f"tmux -S {shlex.quote(socket_path)} attach -t {sess}"
+        else:
+            tmux = f"tmux -L {shlex.quote(socket_name)} attach -t {sess}"
+    elif socket_path and not str(socket_path).endswith("/default"):
+        tmux = f"tmux -S {shlex.quote(socket_path)} attach -t {sess}"
+    else:
+        tmux = f"tmux attach -t {sess}"
+    if ssh_host:
+        return f"ssh -t {shlex.quote(ssh_host)} {shlex.quote(tmux)}"
+    return tmux
+
+
+def health_page_markdown(version: str, public_path: str = "") -> str:
+    """Standing per-product health page — cheap, product-stamped, evolvable.
+
+    Distinct from:
+      - /healthz  — machine JSON liveness probe
+      - /ai       — deep diagnosis (pane peeks, chat scans, full playbook)
+
+    Each emux product instance (emux / amux / gmux / reevux / directrux) serves
+    its own page under its public_path. Health *criteria* start minimal and grow.
+    """
+    from datetime import datetime
+
+    from . import skin as _skin
+
+    sk = _skin.active_skin()
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    base = public_path or ""
+
+    # Cheap liveness — same core as /healthz (no pane peeks, no chat disk scan).
+    live_n = 0
+    sessions_ok = False
+    sessions_err = ""
+    try:
+        payload = sessions_payload()
+        sessions_ok = bool(payload.get("ok"))
+        sessions_err = str(payload.get("error") or "")
+        if sessions_ok:
+            live_n = len([s for s in (payload.get("sessions") or []) if s.get("live")])
+    except Exception as exc:  # noqa: BLE001
+        sessions_err = str(exc)[:200]
+
+    role = "worker"
+    product = sk.product
+    chats_match = ""
+    cfg_path = ""
+    managed_section = ""
+    mgr_verdict = ""
+    try:
+        from . import product_config as _pc
+
+        cfg = _pc.load_product_config(sk.id)
+        product = cfg.product or product
+        role = cfg.role or role
+        chats_match = cfg.chats_match or ""
+        cfg_path = str(cfg.path or "")
+        if cfg.is_manager:
+            probe = _probe_managed_planes(cfg)
+            planes = probe.get("planes") or []
+            down = [p for p in planes if not p.get("ok")]
+            deg = [p for p in planes if p.get("ok") and p.get("degraded")]
+            if not planes:
+                mgr_verdict = "FAIL"
+            elif down:
+                mgr_verdict = "FAIL"
+            elif deg:
+                mgr_verdict = "DEGRADED"
+            else:
+                mgr_verdict = "HEALTHY"
+            rows = [
+                "",
+                "## Managed planes",
+                "",
+                "| plane | lane | host | ok | degraded | reason | live | probe |",
+                "|---|---|---|---|---|---|---|---|",
+            ]
+            for p in planes:
+                rows.append(
+                    f"| {p.get('id') or '—'} | {p.get('lane') or '—'} | {p.get('host') or '—'} | "
+                    f"{p.get('ok')} | {p.get('degraded')} | {p.get('reason') or '—'} | "
+                    f"{p.get('live_sessions') if p.get('live_sessions') is not None else '—'} | "
+                    f"{p.get('probe_kind') or '—'} |"
+                )
+            if not planes:
+                rows.append("| _(empty allowlist)_ | | | | | | | |")
+            rows += [
+                "",
+                f"- managed_verdict: **{mgr_verdict}**",
+                f"- workers_ok: {probe.get('workers_ok')} (auth_gated counts as reachable)",
+                f"- healthy / auth_gated: {probe.get('healthy')} / {probe.get('auth_gated')}",
+                "- reason=auth_gated means public OIDC/login, not plane DOWN — use healthz_loopback",
+                "",
+            ]
+            managed_section = "\n".join(rows)
+    except Exception as exc:  # noqa: BLE001
+        managed_section = f"\n## Managed planes\n\n_(probe failed: {exc})_\n"
+
+    # Minimal evolving criteria (v0). Expand over time — do not pretend completeness.
+    reasons: list[str] = []
+    if not sessions_ok and not mgr_verdict:
+        verdict = "FAIL"
+        reasons.append(f"session inventory not ok: {sessions_err or 'unknown'}")
+    elif mgr_verdict == "FAIL":
+        verdict = "FAIL"
+        reasons.append("one or more managed worker planes DOWN or allowlist empty")
+    elif mgr_verdict == "DEGRADED":
+        verdict = "DEGRADED"
+        reasons.append(
+            "managed plane(s) degraded — auth_gated public healthz (OIDC) and/or "
+            "non-JSON; set healthz_loopback for operational truth (not the same as DOWN)"
+        )
+    elif not sessions_ok:
+        verdict = "DEGRADED"
+        reasons.append(f"local session inventory flaky: {sessions_err or 'unknown'}")
+    else:
+        verdict = "HEALTHY"
+        if mgr_verdict == "HEALTHY":
+            reasons.append("all managed worker planes healthy")
+        reasons.append(f"daemon up · {live_n} live local session(s) counted")
+
+    lines = [
+        f"# {product} health",
+        "",
+        f"- generated: {now}",
+        f"- product: **{product}** (skin=`{sk.id}`)",
+        f"- role: **{role}**",
+        f"- engine: emux {version}",
+        f"- public_path: `{base or '/'}`",
+        f"- chats_match: `{chats_match or '(engine default)'}`",
+        f"- product_config: `{cfg_path or '(none)'}`",
+        f"- live_sessions: {live_n}",
+        f"- verdict: **{verdict}**",
+        "",
+        "## Why this verdict",
+        "",
+    ]
+    for r in reasons:
+        lines.append(f"- {r}")
+    if managed_section:
+        lines.append(managed_section)
+
+    lines += [
+        "",
+        "## Health criteria (evolving)",
+        "",
+        "These are the **current** checks. Expect this list to grow; absence of a",
+        "check does not mean the concern is irrelevant — only that we have not",
+        "automated it on this page yet.",
+        "",
+        "| # | criterion | status on this page |",
+        "|---|-----------|---------------------|",
+        "| 1 | Daemon answers HTTP | **checked** (you are reading this) |",
+        f"| 2 | Session inventory ok | **checked** → sessions_ok={sessions_ok} |",
+        f"| 3 | Live session count (informational) | **reported** → {live_n} |",
+        (
+            f"| 4 | Managed worker healthz (manager only) | "
+            f"**{'checked → ' + mgr_verdict if mgr_verdict else 'n/a (worker)'}** |"
+        ),
+        "| 5 | Abandoned / stale agent chats | *not yet — use `/ai` or `emux chats`* |",
+        "| 6 | Pane gates / stuck sessions | *not yet — use `/ai` or room* |",
+        "| 7 | Disk / launchd / Tailscale serve | *not yet* |",
+        "| 8 | Cross-lane isolation (no hat mix) | *policy — not automated here* |",
+        "",
+        "## Links",
+        "",
+        f"- health (this page, markdown): `{base}/health`",
+        f"- health (HTML): `{base}/health.html`",
+        f"- healthz (JSON probe): `{base}/healthz`",
+        f"- deep diagnosis (AI): `{base}/ai` · `{base}/ai.html`",
+        f"- status table: `{base}/` or `{base}/status`",
+        f"- control room: `{base}/room`",
+        "",
+        "## How to use",
+        "",
+        "1. Bookmark **this product's** `/health` — do not use another plane's page.",
+        "2. For managers: fix managed planes before fretting about local session noise.",
+        "3. For deep signal (panes, chats): open `/ai` — slower on purpose.",
+        "4. For machines/launchd: hit `/healthz` (JSON, unguarded).",
+        "",
+        f"— end {product} health —",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def health_page_html(version: str, public_path: str = "") -> str:
+    """Human-readable wrapper for the standing health page."""
+    import html as _html
+
+    from . import skin as _skin
+
+    sk = _skin.active_skin()
+    md = health_page_markdown(version, public_path)
+    base = public_path or ""
+    return sk.apply(
+        f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__PRODUCT__ health</title>
+<style id="skin-theme">__THEME_CSS__</style>
+<link rel="icon" href="__FAVICON__">
+<style>
+body{{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--ink)}}
+header{{padding:16px 20px;border-bottom:1px solid var(--line);background:var(--card);
+ display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between}}
+.brand-row{{display:flex;align-items:center;gap:10px}}
+.brand-row .skin-logo{{color:var(--amber)}}
+.brand-word{{font-weight:600;color:var(--ink)}}
+.meta{{font-size:12px;color:var(--dim)}}
+.meta a{{color:var(--ink)}}
+#themebtn,button.copy{{font:12px system-ui;cursor:pointer;border:1px solid var(--line);
+ background:var(--card);color:var(--ink);padding:6px 12px;border-radius:6px}}
+main{{padding:16px 20px 40px;max-width:900px}}
+pre{{white-space:pre-wrap;word-break:break-word;background:var(--bg-raise);border:1px solid var(--line);
+ border-radius:8px;padding:16px;font:12px/1.45 ui-monospace,Menlo,monospace;color:var(--ink)}}
+.hint{{font-size:12px;color:var(--dim);margin:0 0 12px}}
+</style>
+</head><body>
+<header>
+  <div>
+    <div class="brand-row">__LOGO_HTML__</div>
+    <div class="meta">standing health · product-scoped ·
+      <a href="{base}/">status</a> ·
+      <a href="{base}/health">raw markdown</a> ·
+      <a href="{base}/ai.html">deep diagnosis</a> ·
+      <a href="{base}/room">__TAGLINE__</a> ·
+      <a href="{base}/healthz">healthz</a>
+    </div>
+  </div>
+  <div style="display:flex;gap:8px">
+    <button type="button" class="copy" id="copyhealth">copy all</button>
+    <button type="button" id="themebtn">☾ dark</button>
+  </div>
+</header>
+<main>
+  <p class="hint">This is <b>__PRODUCT__</b>'s health page — not another plane's.
+  Criteria evolve. Raw for agents: <code>{base}/health</code> (text/markdown).
+  Deep scan: <code>{base}/ai</code>.</p>
+  <pre id="health">{_html.escape(md)}</pre>
+</main>
+<script>
+document.getElementById("copyhealth").onclick=function(){{
+  var t=document.getElementById("health").textContent;
+  var b=this;
+  if(navigator.clipboard&&navigator.clipboard.writeText){{
+    navigator.clipboard.writeText(t).then(function(){{b.textContent="copied";setTimeout(function(){{b.textContent="copy all"}},1200)}});
+  }}
+}};
+(function(){{
+  var KEY="__THEME_STORAGE_KEY__";
+  var def="__DEFAULT_THEME__";
+  function pref(){{
+    try{{var s=localStorage.getItem(KEY); if(s==="light"||s==="dark")return s;}}catch(e){{}}
+    if(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
+    return def==="dark"?"dark":"light";
+  }}
+  function apply(t){{
+    document.documentElement.setAttribute("data-theme", t);
+    var b=document.getElementById("themebtn");
+    if(b) b.textContent=t==="dark"?"☀ light":"☾ dark";
+  }}
+  function toggle(){{
+    var next=(document.documentElement.getAttribute("data-theme")||pref())==="dark"?"light":"dark";
+    try{{localStorage.setItem(KEY,next);}}catch(e){{}}
+    apply(next);
+  }}
+  apply(pref());
+  var b=document.getElementById("themebtn");
+  if(b) b.onclick=toggle;
+}})();
+</script>
+</body></html>
+""",
+        version,
+    )
+
+
+def ai_diagnosis_markdown(
+    version: str,
+    public_path: str = "",
+    *,
+    include_panes: bool = True,
+    pane_lines: int = 12,
+) -> str:
+    """Plain markdown diagnosis of the fleet — for AIs and humans who want signal.
+
+    No HTML chrome. Designed so a model can answer "is anything broken?" from one
+    document: scope honesty, live vs ghost, unknown sockets, connect commands,
+    optional short pane samples from LIVE sessions only.
+    """
+    from datetime import datetime
+
+    from . import skin as _skin
+
+    sk = _skin.active_skin()
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    payload = sessions_payload()
+    sessions = payload.get("sessions") or []
+    scope = payload.get("scope") or {}
+    ok = bool(payload.get("ok"))
+    err = payload.get("error") or ""
+
+    live = [s for s in sessions if s.get("live")]
+    ghosts = [
+        s for s in sessions
+        if s.get("registered") and not s.get("live") and s.get("state") != "unknown"
+    ]
+    unknown = [s for s in sessions if s.get("state") == "unknown"]
+    unregistered_live = [s for s in live if not s.get("registered")]
+
+    # Manager products: managed-plane health is the primary diagnosis signal.
+    mgr_section = ""
+    mgr_verdict = ""
+    try:
+        from . import product_config as _pc
+
+        cfg = _pc.load_product_config(sk.id)
+        if cfg.is_manager:
+            # Share the same short-TTL cache as /api/managed (avoid double probe on cold /ai).
+            probe = _expensive_get(
+                f"managed:{cfg.product}:{cfg.path}",
+                _EXPENSIVE_TTL["managed"],
+                lambda: _probe_managed_planes(cfg),
+                stale_ttl=_EXPENSIVE_TTL["managed_stale"],
+            )
+            planes = probe.get("planes") or []
+            down = [p for p in planes if not p.get("ok")]
+            deg = [p for p in planes if p.get("ok") and p.get("degraded")]
+            if not planes:
+                mgr_verdict = "FAIL"
+            elif down:
+                mgr_verdict = "FAIL"
+            elif deg:
+                mgr_verdict = "DEGRADED"
+            else:
+                mgr_verdict = "HEALTHY"
+            lines_m = [
+                "",
+                "## Managed planes (manager allowlist — primary job)",
+                "",
+                "- product role: **manager**",
+                f"- config: `{cfg.path or 'default (no product.json)'}`",
+                f"- chats_match: `{cfg.chats_match}` (never worker dumps)",
+                f"- managed_ids: {', '.join(sorted(cfg.managed_ids())) or '(empty)'}",
+                f"- workers_ok: {probe.get('workers_ok')}",
+                f"- managed_verdict: **{mgr_verdict}**",
+                "",
+                "| plane | lane | host | ok | degraded | live | version | healthz | fix |",
+                "|---|---|---|---|---|---|---|---|---|",
+            ]
+            for p in planes:
+                fix = "—"
+                pid = p.get("id") or ""
+                if not p.get("ok"):
+                    if pid == "amux":
+                        fix = "`launchctl kickstart -k gui/$(id -u)/com.eidos.amux-web`; curl Tailscale `/amux/healthz`"
+                    elif pid == "gmux":
+                        fix = "`ssh rentamac 'curl -sS http://127.0.0.1:8689/healthz'`; public URL may be OIDC-gated"
+                    elif pid == "reevux":
+                        fix = "`ssh mac-mini-01 'launchctl kickstart -k gui/$(id -u)/com.reeves.reevux-web'`"
+                    else:
+                        fix = f"check host={p.get('host')} healthz={p.get('healthz')}"
+                elif p.get("degraded"):
+                    fix = f"reachable but degraded: {p.get('error') or 'see healthz'}; prefer loopback/SSH over auth-gated public"
+                room = p.get("room") or ""
+                room_cell = room if room else "—"
+                lines_m.append(
+                    f"| {pid} | {p.get('lane') or '—'} | {p.get('host') or '—'} | "
+                    f"{p.get('ok')} | {p.get('degraded')} | "
+                    f"{p.get('live_sessions') if p.get('live_sessions') is not None else '—'} | "
+                    f"{p.get('version') or '—'} | {p.get('healthz') or '—'} | {fix} |"
+                )
+                if room:
+                    lines_m.append(f"| | | | | | | | room | {room_cell} |")
+            lines_m += [
+                "",
+                "### Manager fix playbook",
+                "",
+                "1. Prefer **managed_verdict** over local laptop session noise.",
+                "2. DOWN plane → kick that product's launchd on its host; re-probe healthz.",
+                "3. Do **not** resume personal chats under amux or AIC under reevux.",
+                "4. Open the **worker room** URL from the table to steer that plane.",
+                "5. Standing health chat session name: `directrux-health` (manager only).",
+                "6. Refresh report: `curl -sS http://127.0.0.1:8691/ai` (or public `/directrux/ai`).",
+                "",
+            ]
+            mgr_section = "\n".join(lines_m)
+    except Exception as exc:  # noqa: BLE001
+        mgr_section = f"\n## Managed planes\n\n_(probe failed: {exc})_\n"
+
+    # Verdict — conservative, explicit reasons
+    reasons: list[str] = []
+    if mgr_verdict == "FAIL":
+        verdict = "FAIL"
+        reasons.append("one or more managed worker planes are DOWN or allowlist empty")
+    elif not ok:
+        verdict = "FAIL"
+        reasons.append(f"sessions_payload not ok: {err or 'unknown'}")
+    elif mgr_verdict == "DEGRADED":
+        verdict = "DEGRADED"
+        reasons.append(
+            "managed plane(s) degraded — auth_gated public healthz (OIDC) and/or "
+            "non-JSON; set healthz_loopback for operational truth (not the same as DOWN)"
+        )
+    elif any(s.get("status") == "unknown" for s in (scope.get("sockets") or [])):
+        verdict = "DEGRADED"
+        reasons.append("one or more tmux sockets unreadable (unknown)")
+    elif not live and ghosts:
+        verdict = "DEGRADED"
+        reasons.append(f"no LIVE sessions; {len(ghosts)} registry ghost(s)")
+    elif not live and not mgr_verdict:
+        verdict = "DEGRADED"
+        reasons.append("no LIVE tmux sessions on scanned sockets")
+    else:
+        verdict = "HEALTHY"
+        if mgr_verdict == "HEALTHY":
+            reasons.append("all managed worker planes healthy")
+        reasons.append(f"{len(live)} live local session(s) on scanned sockets")
+    if unregistered_live:
+        reasons.append(
+            f"{len(unregistered_live)} live session(s) not in registry "
+            f"(visible but unmanaged): "
+            + ", ".join(str(s.get("name")) for s in unregistered_live[:8])
+        )
+    if ghosts:
+        reasons.append(f"{len(ghosts)} stale registry row(s) kept (not reaped)")
+
+    # Claude Code + Grok Build chats on disk (dropped missions)
+    chat_section = ""
+    try:
+        from . import chats as chat_find
+        from . import product_config as _pc2
+
+        _chat_match = _pc2.default_chats_match_for_skin(sk.id)
+        chat_hits = chat_find.find_chats(
+            match=_chat_match,
+            recent_hours=24.0,
+            statuses=["stale", "recent"],
+            limit=25,
+        )
+        stale_chats = [h for h in chat_hits if h.status == "stale"]
+        if stale_chats and not (sk.id == "directrux" or _pc2.load_product_config(sk.id).is_manager):
+            reasons.append(
+                f"{len(stale_chats)} stale agent chat(s) on disk (Claude/Grok) — "
+                "may be dropped missions; resume before starting new agents"
+            )
+            if verdict == "HEALTHY":
+                verdict = "DEGRADED"
+        if chat_hits and not _pc2.load_product_config(sk.id).is_manager:
+            chat_section = "\n" + chat_find.format_text(
+                chat_hits,
+                title="Abandoned / nonoperative agent chats (Claude + Grok)",
+            )
+            chat_section += f"\nCLI: `emux chats --match {_chat_match} --abandoned-only`\n"
+    except Exception as exc:  # noqa: BLE001
+        chat_section = f"\n## Abandoned agent chats\n\n_(scan failed: {exc})_\n"
+
+    ssh_host = resolve_connect_ssh_host(public_path)
+    lines: list[str] = [
+        f"# {sk.product} system diagnosis",
+        "",
+        f"- generated: {now}",
+        f"- product: {sk.product} (skin={sk.id})",
+        f"- engine: {sk.engine_label} {version}",
+        f"- public_path: {public_path or '/'}",
+        f"- verdict: **{verdict}**",
+        "",
+        "## Why this verdict",
+    ]
+    for r in reasons:
+        lines.append(f"- {r}")
+    if mgr_section:
+        lines.append(mgr_section)
+    lines += [
+        "",
+        "## Local host scan scope (secondary for managers)",
+        "",
+        f"{scope.get('claim') or 'scope not scanned yet'}",
+        "",
+        "This is NOT all host processes, NOT other users' tmux, NOT bare ssh/nohup.",
+        "For **manager** products, prefer **Managed planes** above over local noise.",
+        "",
+        "### Sockets probed",
+        "",
+    ]
+    socks = scope.get("sockets") or []
+    if not socks:
+        lines.append("- (none recorded)")
+    else:
+        for skt in socks:
+            lines.append(
+                f"- `{skt.get('socket')}` status={skt.get('status')} "
+                f"n={skt.get('n')} path={skt.get('path') or '—'} "
+                f"err={skt.get('error') or '—'}"
+            )
+
+    lines += [
+        "",
+        "## Counts",
+        "",
+        f"- live: {len(live)}",
+        f"- ghosts (stale registered): {len(ghosts)}",
+        f"- unknown sockets: {len(unknown)}",
+        f"- registered total: {sum(1 for s in sessions if s.get('registered'))}",
+        f"- rows total: {len(sessions)}",
+        "",
+        "## Sessions",
+        "",
+        "| name | tmux | host | socket | state | registered | tags | description |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for s in sessions:
+        tags = ",".join(s.get("tags") or []) or "—"
+        desc = (s.get("description") or "—").replace("|", "\\|").replace("\n", " ")
+        lines.append(
+            f"| {s.get('name')} | {s.get('session')} | {s.get('host') or 'local'} | "
+            f"{s.get('socket') or 'default'} | {s.get('state') or ('live' if s.get('live') else 'stale')} | "
+            f"{'yes' if s.get('registered') else 'no'} | {tags} | {desc} |"
+        )
+
+    lines += ["", "## Connect commands (LIVE only)", ""]
+    if not live:
+        lines.append("- (none — no live sessions)")
+    else:
+        for s in live:
+            if str(s.get("session") or "").startswith("socket:"):
+                continue
+            cmd = connect_command(
+                str(s.get("session")),
+                socket_path=s.get("socket_path"),
+                socket_name=str(s.get("socket") or "default"),
+                ssh_host=ssh_host,
+            )
+            lines.append(f"- `{s.get('name')}`: `{cmd}`")
+
+    if include_panes and live:
+        # Cold /ai used to capture EVERY live pane serially (~0.5s × N → 15–30s).
+        # Cap + prioritize permanent seats + parallelize so diagnosis stays < budget.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        max_pane_samples = int(os.environ.get("EMUX_AI_PANE_SAMPLES", "8"))
+        max_pane_samples = max(0, min(max_pane_samples, 24))
+        priority_names = (
+            "directrux-vp",
+            "directrux-engine",
+            "directrux-health",
+            "fleet-vp",
+        )
+
+        def _pane_rank(s: dict[str, Any]) -> tuple:
+            name = str(s.get("name") or s.get("session") or "")
+            try:
+                prio = priority_names.index(name)
+            except ValueError:
+                prio = 100
+            # registered first, then name for stability
+            return (prio, 0 if s.get("registered") else 1, name)
+
+        candidates = [
+            s
+            for s in live
+            if not str(s.get("session") or "").startswith("socket:")
+        ]
+        candidates.sort(key=_pane_rank)
+        sample_sessions = candidates[:max_pane_samples]
+        skipped = max(0, len(candidates) - len(sample_sessions))
+
+        lines += [
+            "",
+            f"## Pane samples (last {pane_lines} lines, LIVE only)",
+            "",
+            "Use these to see if agents are stuck on gates, idle shells, or errors.",
+            f"Showing **{len(sample_sessions)}** of {len(candidates)} live"
+            + (f" (skipped {skipped} for latency; set EMUX_AI_PANE_SAMPLES)" if skipped else "")
+            + ".",
+            "",
+        ]
+
+        def _one_pane(s: dict[str, Any]) -> tuple[str, str, str]:
+            tmux_name = str(s.get("session") or "")
+            label = str(s.get("name") or tmux_name)
+            try:
+                cap = capture_payload(
+                    tmux_name,
+                    lines=max(5, min(pane_lines, 80)),
+                    host=s.get("host"),
+                    socket=s.get("socket_path"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                return label, tmux_name, f"(capture failed: {exc})"
+            if not cap.get("ok"):
+                return label, tmux_name, f"(capture failed: {cap.get('error')})"
+            content = (cap.get("content") or "").rstrip("\n")
+            sample = "\n".join(content.splitlines()[-pane_lines:])
+            return label, tmux_name, sample if sample else "(empty pane)"
+
+        pane_rows: list[tuple[str, str, str]] = []
+        if sample_sessions:
+            workers = min(6, len(sample_sessions))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futs = {pool.submit(_one_pane, s): s for s in sample_sessions}
+                try:
+                    for fut in as_completed(futs, timeout=8.0):
+                        try:
+                            pane_rows.append(fut.result(timeout=0.1))
+                        except Exception as exc:  # noqa: BLE001
+                            s = futs[fut]
+                            pane_rows.append(
+                                (
+                                    str(s.get("name") or "?"),
+                                    str(s.get("session") or "?"),
+                                    f"(capture failed: {exc})",
+                                )
+                            )
+                except TimeoutError:
+                    done_names = {r[0] for r in pane_rows}
+                    for s in sample_sessions:
+                        nm = str(s.get("name") or s.get("session") or "?")
+                        if nm not in done_names:
+                            pane_rows.append(
+                                (nm, str(s.get("session") or "?"), "(capture timeout)")
+                            )
+            # Keep priority order in the report
+            order = {
+                str(s.get("name") or s.get("session") or ""): i
+                for i, s in enumerate(sample_sessions)
+            }
+            pane_rows.sort(key=lambda r: order.get(r[0], 99))
+
+        for label, tmux_name, sample in pane_rows:
+            lines.append(f"### {label} (`{tmux_name}`)")
+            lines.append("```")
+            lines.append(sample)
+            lines.append("```")
+            lines.append("")
+
+    lines += [
+        "## How an AI should use this",
+        "",
+        "1. Read **verdict** first — FAIL/DEGRADED/HEALTHY.",
+        "2. If this product is a **manager**: fix **Managed planes** first (worker healthz/launchd/room).",
+        "3. If DEGRADED with only ghosts: work died; registry still has names — do not treat as running.",
+        "4. If unknown sockets: inventory is incomplete; do not claim full host coverage.",
+        "5. Unregistered LIVE rows are real processes — consider registering for governance.",
+        "6. Connect commands are for a human laptop (ssh → tmux attach), not for inventing new sessions.",
+        "7. Pane samples beat guessing — look for gates, errors, idle shells.",
+        "8. Stale Claude/Grok chats are often dropped missions — resume those before spawning new agents.",
+        "9. Do not dump personal into AIC/Greenmark while fixing manager health.",
+        "",
+        f"— end {sk.product} diagnosis —",
+        "",
+    ]
+    body = "\n".join(lines)
+    if chat_section:
+        # insert chat section before "How an AI should use this"
+        marker = "## How an AI should use this"
+        if marker in body:
+            body = body.replace(marker, chat_section + "\n" + marker, 1)
+        else:
+            body = body + "\n" + chat_section
+    return body
+
+
+def ai_diagnosis_html(version: str, public_path: str = "") -> str:
+    """Human-readable wrapper around the AI markdown (copy-friendly)."""
+    import html as _html
+
+    from . import skin as _skin
+
+    sk = _skin.active_skin()
+    # Reuse the markdown cache so /ai.html after /ai (or concurrent) is free.
+    md = _expensive_get(
+        f"ai_md:{public_path or ''}",
+        _EXPENSIVE_TTL["ai_md"],
+        lambda: ai_diagnosis_markdown(version, public_path),
+    )
+    base = public_path or ""
+    return sk.apply(
+        f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__PRODUCT__ AI diagnosis</title>
+<style id="skin-theme">__THEME_CSS__</style>
+<link rel="icon" href="__FAVICON__">
+<style>
+body{{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--ink)}}
+header{{padding:16px 20px;border-bottom:1px solid var(--line);background:var(--card);
+ display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between}}
+.brand-row{{display:flex;align-items:center;gap:10px}}
+.brand-row .skin-logo{{color:var(--amber)}}
+.brand-word{{font-weight:600;color:var(--ink)}}
+.meta{{font-size:12px;color:var(--dim)}}
+.meta a{{color:var(--ink)}}
+#themebtn,button.copy{{font:12px system-ui;cursor:pointer;border:1px solid var(--line);
+ background:var(--card);color:var(--ink);padding:6px 12px;border-radius:6px}}
+main{{padding:16px 20px 40px;max-width:900px}}
+pre{{white-space:pre-wrap;word-break:break-word;background:var(--bg-raise);border:1px solid var(--line);
+ border-radius:8px;padding:16px;font:12px/1.45 ui-monospace,Menlo,monospace;color:var(--ink)}}
+.hint{{font-size:12px;color:var(--dim);margin:0 0 12px}}
+</style>
+</head><body>
+<header>
+  <div>
+    <div class="brand-row">__LOGO_HTML__</div>
+    <div class="meta">AI mode · plain diagnosis ·
+      <a href="{base}/">status UI</a> ·
+      <a href="{base}/health.html">health</a> ·
+      <a href="{base}/ai">raw markdown</a> ·
+      <a href="{base}/room">__TAGLINE__</a>
+    </div>
+  </div>
+  <div style="display:flex;gap:8px">
+    <button type="button" class="copy" id="copyai">copy all</button>
+    <button type="button" id="themebtn">☾ dark</button>
+  </div>
+</header>
+<main>
+  <p class="hint">Paste this whole page into an AI to diagnose the fleet.
+  Raw URL for agents: <code>{base}/ai</code> (Content-Type: text/markdown).</p>
+  <pre id="diag">{_html.escape(md)}</pre>
+</main>
+<script>
+document.getElementById("copyai").onclick=function(){{
+  var t=document.getElementById("diag").textContent;
+  var b=this;
+  if(navigator.clipboard&&navigator.clipboard.writeText){{
+    navigator.clipboard.writeText(t).then(function(){{b.textContent="copied";setTimeout(function(){{b.textContent="copy all"}},1200)}});
+  }}
+}};
+(function(){{
+  var KEY="__THEME_STORAGE_KEY__";
+  var def="__DEFAULT_THEME__";
+  function pref(){{
+    try{{var s=localStorage.getItem(KEY); if(s==="light"||s==="dark")return s;}}catch(e){{}}
+    if(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
+    return def==="dark"?"dark":"light";
+  }}
+  function apply(t){{
+    document.documentElement.setAttribute("data-theme", t);
+    var b=document.getElementById("themebtn");
+    if(b) b.textContent=t==="dark"?"☀ light":"☾ dark";
+  }}
+  function toggle(){{
+    var next=(document.documentElement.getAttribute("data-theme")||pref())==="dark"?"light":"dark";
+    try{{localStorage.setItem(KEY,next);}}catch(e){{}}
+    apply(next);
+  }}
+  apply(pref());
+  var b=document.getElementById("themebtn");
+  if(b) b.onclick=toggle;
+}})();
+</script>
+</body></html>
+""",
+        version,
+    )
+
+
+def resolve_connect_ssh_host(public_path: str = "") -> str | None:
+    """SSH destination for connect-copy.
+
+    Env wins. Else skin defaults: gmux → rentamac, reevux → mac-mini-01,
+    amux → local (no remote ssh prefix).
+    public_path without skin still defaults to rentamac (gmux go-door legacy).
+    """
+    env = (os.environ.get("EMUX_CONNECT_SSH") or os.environ.get("GREENMUX_HOST") or "").strip()
+    if env:
+        return env
+    try:
+        from .skin import active_skin
+        sid = active_skin().id
+        if sid == "gmux":
+            return "rentamac"
+        if sid == "reevux":
+            return "mac-mini-01"
+        if sid == "amux":
+            return None  # local laptop — plain tmux attach
+    except Exception:
+        pass
+    if public_path:  # reverse-proxied status without skin ⇒ attach on mux host
+        return "rentamac"
+    return None
+
+
+def simple_status_html(
+    version: str,
+    public_path: str = "",
+    *,
+    live_only: bool = True,
+    registered_only: bool = False,
+    peek: str | None = None,
+    peek_lines: int = 24,
+) -> str:
+    """Server-rendered, read-only session table — the first testable view.
+
+    Default filter is live-only (ghosts stay available via "all"). Filters, age,
+    and pane peek are query-string driven. Scope stamp states what tmux sockets
+    were actually scanned — not "all work on the host".
+    """
+    import html as _html
+    from datetime import datetime
+    from urllib.parse import urlencode
+
+    base = public_path or ""
+    ssh_host = resolve_connect_ssh_host(public_path)
+    now_ts = time.time()
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    payload = sessions_payload()
+    all_sessions = payload.get("sessions") or []
+    scope = payload.get("scope") or {}
+    live_n = sum(1 for s in all_sessions if s.get("live"))
+    reg_n = sum(1 for s in all_sessions if s.get("registered"))
+    ghost_n = sum(
+        1 for s in all_sessions
+        if s.get("registered") and not s.get("live") and s.get("state") != "unknown"
+    )
+    unknown_n = sum(1 for s in all_sessions if s.get("state") == "unknown")
+    ok = bool(payload.get("ok"))
+    err = payload.get("error") or ""
+
+    sessions = list(all_sessions)
+    if live_only:
+        # keep unknown scan rows even in live-only — they are not ghosts, they are gaps
+        sessions = [s for s in sessions if s.get("live") or s.get("state") == "unknown"]
+    if registered_only:
+        sessions = [s for s in sessions if s.get("registered") or s.get("state") == "unknown"]
+
+    def _qs(**extra: Any) -> str:
+        """Build query string. Default view is live-only → use all=1 for ghosts."""
+        q: dict[str, str] = {}
+        # start from current mode
+        show_all = (not live_only) if "all" not in extra else bool(extra.get("all"))
+        if extra.get("all") is False:
+            show_all = False
+        if extra.get("live") is True:
+            show_all = False
+        if extra.get("live") is False and "all" not in extra:
+            show_all = True
+        if show_all:
+            q["all"] = "1"
+        if registered_only and "registered" not in extra:
+            q["registered"] = "1"
+        if peek and "peek" not in extra:
+            q["peek"] = peek
+        for k, v in extra.items():
+            if k in ("live", "all") and v is False:
+                continue
+            if v is None or v is False or v == "":
+                q.pop(k, None)
+                continue
+            if v is True:
+                if k == "live":
+                    q.pop("all", None)
+                    continue  # live is default — no query needed
+                q[k] = "1"
+            else:
+                q[k] = str(v)
+        if extra.get("registered") is False:
+            q.pop("registered", None)
+        if extra.get("peek") is None and "peek" in extra:
+            q.pop("peek", None)
+        return ("?" + urlencode(q)) if q else ""
+
+    def _href(**extra: Any) -> str:
+        return f"{base}/{_qs(**extra)}"
+
+    # Filter chips (server-rendered links — no JS)
+    def chip(label: str, active: bool, **extra: Any) -> str:
+        cls = "chip on" if active else "chip"
+        return f'<a class="{cls}" href="{_html.escape(_href(**extra))}">{_html.escape(label)}</a>'
+
+    filters_html = (
+        chip("live", live_only and not registered_only, live=True, all=False, registered=False)
+        + chip(
+            f"all ({ghost_n} ghost{'s' if ghost_n != 1 else ''})",
+            not live_only and not registered_only,
+            all=True,
+            registered=False,
+        )
+        + chip("registered", registered_only and not live_only, all=True, registered=True)
+        + chip("live · registered", live_only and registered_only, live=True, registered=True)
+    )
+
+    rows: list[str] = []
+    peek_block = ""
+    peek_found = False
+    for s in sessions:
+        name_raw = str(s.get("name") or "")
+        tmux_raw = str(s.get("session") or "")
+        name = _html.escape(name_raw)
+        tmux = _html.escape(tmux_raw)
+        host = _html.escape(str(s.get("host") or "local"))
+        sock = _html.escape(str(s.get("socket") or "default"))
+        desc = _html.escape(str(s.get("description") or "—"))
+        is_live = bool(s.get("live"))
+        state = s.get("state") or ("live" if is_live else "stale")
+        if state == "unknown":
+            live, live_cls = "unknown", "unknown"
+        elif is_live:
+            live, live_cls = "LIVE", "live"
+        else:
+            live, live_cls = "stale", "stale"
+        reg = "yes" if s.get("registered") else "no"
+        tags = _html.escape(", ".join(s.get("tags") or []) or "—")
+
+        created = s.get("created_unix")
+        uptime = _fmt_age((now_ts - created) if created else None) if is_live else "—"
+        # activity is keyed by tmux session name in the poller cache
+        meta = _meta(tmux_raw) if is_live else {}
+        act_age = meta.get("last_change_age")
+        if state == "unknown":
+            active = "—"
+        elif is_live:
+            active = _fmt_age(act_age) if act_age is not None else "quiet"
+        else:
+            active = "gone"
+
+        is_peek = peek is not None and peek in (name_raw, tmux_raw)
+        if is_peek:
+            peek_found = True
+        open_href = _html.escape(_href(peek=name_raw))
+        close_href = _html.escape(_href(peek=None))
+        if state == "unknown":
+            name_cell = f"<code>{name}</code>"
+        elif is_peek:
+            name_cell = (
+                f'<a class="name" href="{close_href}" title="close peek"><code>{name}</code> ▾</a>'
+            )
+        else:
+            name_cell = (
+                f'<a class="name" href="{open_href}" title="peek pane"><code>{name}</code></a>'
+            )
+        # Connect: laptop → ssh → tmux attach (live only). Ghosts have nothing to attach to.
+        if is_live and not tmux_raw.startswith("socket:"):
+            cmd = connect_command(
+                tmux_raw,
+                socket_path=s.get("socket_path"),
+                socket_name=str(s.get("socket") or "default"),
+                ssh_host=ssh_host,
+            )
+            cmd_esc = _html.escape(cmd)
+            cmd_attr = _html.escape(cmd, quote=True)
+            connect_cell = (
+                f'<div class="connect">'
+                f'<code class="cmd" title="run on your laptop">{cmd_esc}</code>'
+                f'<button type="button" class="copy" data-cmd="{cmd_attr}">copy</button>'
+                f"</div>"
+            )
+        else:
+            connect_cell = '<span class="dim">—</span>'
+        row_cls = f"{live_cls}{' open' if is_peek else ''}"
+        rows.append(
+            f"<tr class='{row_cls}'>"
+            f"<td>{name_cell}</td>"
+            f"<td><code>{tmux}</code></td>"
+            f"<td>{host}</td>"
+            f"<td><code>{sock}</code></td>"
+            f"<td><span class='pill {live_cls}'>{live}</span></td>"
+            f"<td class='age' title='session uptime'>{uptime}</td>"
+            f"<td class='age' title='time since last pane change'>{active}</td>"
+            f"<td>{reg}</td>"
+            f"<td>{tags}</td>"
+            f"<td class='connect-td'>{connect_cell}</td>"
+            f"<td>{desc}</td>"
+            f"</tr>"
+        )
+        if is_peek:
+            if not is_live:
+                pane_html = (
+                    "<p class='peek-err'>Session is not live — no pane to capture "
+                    "(ghosts are kept on purpose; they are not reaped).</p>"
+                )
+            else:
+                cap = capture_payload(
+                    tmux_raw,
+                    lines=max(5, min(int(peek_lines), 200)),
+                    host=s.get("host"),
+                    socket=s.get("socket_path"),
+                )
+                if not cap.get("ok"):
+                    pane_html = (
+                        f"<p class='peek-err'>capture failed: "
+                        f"{_html.escape(str(cap.get('error') or 'unknown'))}</p>"
+                    )
+                else:
+                    content = (cap.get("content") or "").rstrip("\n")
+                    lines = content.splitlines()
+                    if len(lines) > peek_lines:
+                        lines = lines[-peek_lines:]
+                    content = "\n".join(lines)
+                    pane_html = f"<pre class='pane'>{_html.escape(content) if content else '(empty pane)'}</pre>"
+            rows.append(
+                f"<tr class='peek-row'><td colspan='11'>"
+                f"<div class='peek'>"
+                f"<div class='peek-bar'>pane peek · <code>{name}</code> · last {peek_lines} lines · "
+                f"<a href='{close_href}'>close</a></div>"
+                f"{pane_html}"
+                f"</div></td></tr>"
+            )
+
+    if peek and not peek_found:
+        peek_block = (
+            f"<div class='summary bad'>No session named "
+            f"<code>{_html.escape(peek)}</code> in the current filter.</div>"
+        )
+
+    body_rows = "\n".join(rows) if rows else (
+        "<tr><td colspan='11' class='empty'>No sessions match this filter.</td></tr>"
+    )
+    connect_hint = (
+        f"copy · run on your laptop → ssh { _html.escape(ssh_host) } → tmux attach"
+        if ssh_host
+        else "copy · run locally → tmux attach"
+    )
+    shown = len([s for s in sessions if s.get("state") != "unknown"])
+    status_line = (
+        f"ok · showing {shown} · {live_n} live · {ghost_n} ghost · "
+        f"{reg_n} registered · {unknown_n} unknown socket"
+        if ok else f"error · {_html.escape(str(err))}"
+    )
+    claim = _html.escape(str(scope.get("claim") or "scope not yet scanned"))
+    sock_bits = []
+    for sk in scope.get("sockets") or []:
+        st = sk.get("status") or "?"
+        nm = _html.escape(str(sk.get("socket") or "?"))
+        n = sk.get("n")
+        sock_bits.append(f"<code>{nm}</code>:{st}" + (f"({n})" if n else ""))
+    scope_html = " · ".join(sock_bits) if sock_bits else "—"
+    # meta-refresh keeps filters + peek
+    refresh_url = _html.escape(f"{base}/{_qs()}")
+
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="15;url={refresh_url}">
+<title>__STATUS_TITLE__</title>
+<style id="skin-theme">__THEME_CSS__</style>
+<link rel="icon" href="__FAVICON__">
+<style>
+  * {{ box-sizing: border-box; }}
+  body {{ margin:0; font:14px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--ink); }}
+  header {{ padding:20px 24px 12px; border-bottom:1px solid var(--line); background:var(--card);
+            display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:12px; }}
+  .hdr-left {{ min-width:0; }}
+  .brand-row {{ display:flex; align-items:center; gap:10px; margin:0 0 4px; }}
+  .brand-row .skin-logo {{ color:var(--amber); flex:none; }}
+  .brand-row .brand-word {{ font:600 18px/1.2 system-ui,sans-serif; color:var(--ink); letter-spacing:.02em; }}
+  h1 {{ margin:0; font-size:18px; font-weight:600; color:var(--ink); }}
+  .meta {{ color:var(--dim); font-size:12px; }}
+  .meta a {{ color:var(--ink); }}
+  #themebtn {{ font:12px system-ui,sans-serif; cursor:pointer; border:1px solid var(--line);
+               background:var(--card); color:var(--ink); padding:6px 12px; border-radius:6px; }}
+  #themebtn:hover {{ border-color:var(--amber); color:var(--amber); }}
+  main {{ padding:16px 24px 40px; max-width:1200px; }}
+  .summary {{ margin:0 0 12px; padding:10px 12px; background:var(--card);
+              border:1px solid var(--line); border-radius:6px; font-size:13px; }}
+  .summary.bad {{ border-color:#c45; color:#822; }}
+  .filters {{ display:flex; flex-wrap:wrap; gap:6px; margin:0 0 14px; }}
+  .chip {{ display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px;
+           text-decoration:none; border:1px solid var(--line); color:var(--dim); background:var(--card); }}
+  .chip.on {{ background:var(--on); color:var(--on-accent); border-color:var(--on); }}
+  table {{ width:100%; border-collapse:collapse; background:var(--card);
+           border:1px solid var(--line); border-radius:6px; overflow:hidden; }}
+  th, td {{ text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
+            vertical-align:top; font-size:13px; }}
+  th {{ font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--dim);
+       background:var(--bg-raise); }}
+  tr:last-child td {{ border-bottom:0; }}
+  tr.open td {{ background:var(--pill); }}
+  a.name {{ color:var(--ink); text-decoration:none; }}
+  a.name:hover {{ color:var(--live); text-decoration:underline; }}
+  code {{ font:12px/1.4 ui-monospace,Menlo,monospace; }}
+  .age {{ white-space:nowrap; color:var(--dim); font-variant-numeric:tabular-nums; }}
+  .pill {{ display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px;
+           font-weight:600; letter-spacing:.03em; }}
+  .pill.live {{ background:var(--pill); color:var(--live); }}
+  .pill.stale {{ background:var(--bg-raise); color:var(--stale); }}
+  .pill.unknown {{ background:var(--bg-raise); color:var(--text-dim); }}
+  .empty {{ color:var(--dim); text-align:center; padding:24px; }}
+  .dim {{ color:var(--dim); }}
+  .scope {{ margin:0 0 14px; padding:8px 12px; background:var(--bg-raise); border:1px dashed var(--line);
+            border-radius:6px; font-size:12px; color:var(--dim); }}
+  .scope strong {{ color:var(--ink); font-weight:600; }}
+  .connect {{ display:flex; flex-direction:column; gap:4px; max-width:28rem; }}
+  .connect .cmd {{ display:block; font:11px/1.35 ui-monospace,Menlo,monospace;
+                   white-space:pre-wrap; word-break:break-all; color:var(--ink);
+                   background:var(--bg-raise); padding:6px 8px; border-radius:4px; border:1px solid var(--line); }}
+  .connect .copy {{ align-self:flex-start; font:11px system-ui,sans-serif; cursor:pointer;
+                    border:1px solid var(--line); background:var(--card); color:var(--ink);
+                    padding:3px 10px; border-radius:4px; }}
+  .connect .copy:hover {{ border-color:var(--live); color:var(--live); }}
+  .connect .copy.ok {{ background:var(--pill); color:var(--live); border-color:var(--live); }}
+  .peek {{ background:#0f1411; color:#d7e0d9; border-radius:6px; overflow:hidden; }}
+  [data-theme=dark] .peek {{ background:#0a100c; }}
+  .peek-bar {{ padding:8px 12px; font-size:12px; color:#9aab9f; border-bottom:1px solid #243028; }}
+  .peek-bar a {{ color:#9fd6b0; }}
+  .peek-bar code {{ color:#e8f5ee; }}
+  pre.pane {{ margin:0; padding:12px 14px; font:12px/1.45 ui-monospace,Menlo,monospace;
+              white-space:pre-wrap; word-break:break-word; max-height:420px; overflow:auto; }}
+  .peek-err {{ margin:0; padding:12px 14px; color:#e8b4b4; }}
+  tr.peek-row td {{ padding:0; border-bottom:1px solid var(--line); }}
+  footer {{ margin-top:14px; color:var(--dim); font-size:12px; }}
+</style>
+</head>
+<body>
+<header>
+  <div class="hdr-left">
+    <div class="brand-row">__LOGO_HTML__</div>
+    <h1>__STATUS_TITLE__</h1>
+    <div class="meta">
+      __PRODUCT_LINE__ · read-only · auto-refresh 15s ·
+      <a href="{base}/room">__TAGLINE__</a> ·
+      <a href="{base}/health.html">health</a> ·
+      <a href="{base}/ai.html">AI mode</a> ·
+      <a href="{base}/ai">AI markdown</a> ·
+      <a href="{base}/healthz">healthz</a>
+      <span class="dim"> · __FOOTER_NOTE__</span>
+    </div>
+  </div>
+  <button type="button" id="themebtn" title="toggle light/dark">☾ dark</button>
+</header>
+<main>
+  <div class="summary{' bad' if not ok else ''}" id="summary">{status_line} · checked {now}</div>
+  <div class="scope"><strong>scan scope</strong> — {claim}<br>sockets: {scope_html}<br>
+    <strong>connect</strong> — {connect_hint}</div>
+  <div class="filters">{filters_html}</div>
+  {peek_block}
+  <table>
+    <thead>
+      <tr>
+        <th>name</th><th>tmux</th><th>host</th><th>socket</th><th>state</th>
+        <th>uptime</th><th>active</th>
+        <th>registered</th><th>tags</th><th>connect</th><th>description</th>
+      </tr>
+    </thead>
+    <tbody>
+{body_rows}
+    </tbody>
+  </table>
+  <footer>
+    Default is live tmux only; ghosts stay under <strong>all</strong> (not reaped).
+    Click a name to peek. <strong>copy</strong> the connect line, paste in your laptop terminal.
+    Path prefix: <code>{_html.escape(base or "/")}</code>
+  </footer>
+</main>
+<script>
+document.querySelectorAll("button.copy").forEach(function(btn){{
+  btn.addEventListener("click", function(){{
+    var t = btn.getAttribute("data-cmd") || "";
+    function done(ok){{
+      btn.textContent = ok ? "copied" : "select+copy";
+      btn.classList.toggle("ok", !!ok);
+      setTimeout(function(){{ btn.textContent = "copy"; btn.classList.remove("ok"); }}, 1400);
+    }}
+    if (navigator.clipboard && navigator.clipboard.writeText) {{
+      navigator.clipboard.writeText(t).then(function(){{ done(true); }}).catch(function(){{ done(false); }});
+    }} else {{
+      done(false);
+    }}
+  }});
+}});
+</script>
+<script id="emux-theme">
+(function(){{
+  var KEY="__THEME_STORAGE_KEY__";
+  var def="__DEFAULT_THEME__";
+  function pref(){{
+    try{{var s=localStorage.getItem(KEY); if(s==="light"||s==="dark")return s;}}catch(e){{}}
+    if(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
+    return (def==="dark")?"dark":"light";
+  }}
+  function apply(t){{
+    document.documentElement.setAttribute("data-theme", t);
+    var b=document.getElementById("themebtn");
+    if(b){{b.textContent=t==="dark"?"☀ light":"☾ dark";}}
+  }}
+  function toggle(){{
+    var cur=document.documentElement.getAttribute("data-theme")||pref();
+    var next=cur==="dark"?"light":"dark";
+    try{{localStorage.setItem(KEY,next);}}catch(e){{}}
+    apply(next);
+  }}
+  apply(pref());
+  document.addEventListener("DOMContentLoaded",function(){{
+    apply(pref());
+    var b=document.getElementById("themebtn");
+    if(b) b.addEventListener("click",toggle);
+  }});
+}})();
+</script>
+</body>
+</html>
+"""
+    from . import skin as _skin
+    return _skin.active_skin().apply(html, version)
 
 
 def _remote_controller_from_env() -> Any:
@@ -4562,10 +10169,24 @@ def _remote_controller_from_env() -> Any:
 
 
 def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bool = False,
-            public_origin: str | None = None) -> int:
-    """Start the emux web daemon. Blocks until Ctrl-C."""
+            public_origin: str | None = None, public_path: str | None = None,
+            skin: str | None = None) -> int:
+    """Start the emux web daemon. Blocks until Ctrl-C.
+
+    `skin` is product chrome only (e.g. gmux) — see emux.skin. Same engine.
+    """
+    from . import skin as _skin
+
+    active = _skin.set_active_skin(skin)  # None → $EMUX_SKIN → emux
+    # launchd often ships PATH=/usr/bin:/bin — gist + resume need ~/.local/bin/claude
+    _ensure_agent_path_env()
     if _server._resolve_tmux() is None:
         print("emux web: tmux not found on PATH — the UI will load but show nothing.", file=sys.stderr)
+    claude_bin = _resolve_cli("claude")
+    if claude_bin:
+        print(f"emux web: claude → {claude_bin}", file=sys.stderr)
+    else:
+        print("emux web: claude CLI not found — gist/resume may degrade.", file=sys.stderr)
     if public_origin:
         parsed = urlparse(public_origin)
         if (parsed.scheme not in {"http", "https"} or not parsed.hostname
@@ -4574,11 +10195,43 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
             print("emux web: --public-origin must be a bare http(s) origin.", file=sys.stderr)
             return 2
         public_origin = public_origin.rstrip("/")
+    normalized_path = normalize_public_path(public_path)
+    if normalized_path is None:
+        print("emux web: --public-path must look like /gmux (leading slash, no trail).", file=sys.stderr)
+        return 2
     EmuxWebHandler.extra_host = host if host not in _LOCALHOSTS else None
     EmuxWebHandler.public_origin = public_origin
+    EmuxWebHandler.public_path = normalized_path
     EmuxWebHandler.remote_controller_api = _remote_controller_from_env()
+
+    class EmuxThreadingHTTPServer(ThreadingHTTPServer):
+        """Threading HTTP with a real listen backlog (EID-1100/1107).
+
+        CPython's default request_queue_size is 5 — concurrent stress (16 clients)
+        overflows the accept queue and surfaces as ConnectionReset / refused.
+        """
+
+        allow_reuse_address = True
+        daemon_threads = True
+        request_queue_size = int(os.environ.get("EMUX_HTTP_BACKLOG", "256"))
+
+        def handle_error(self, request, client_address) -> None:  # noqa: ANN001
+            import sys
+            import traceback
+
+            err = traceback.format_exc()
+            if "BrokenPipeError" in err or "ConnectionResetError" in err:
+                return
+            print("-" * 40, file=sys.stderr)
+            print(
+                f"Exception occurred during processing of request from {client_address}",
+                file=sys.stderr,
+            )
+            print(err, file=sys.stderr)
+            print("-" * 40, file=sys.stderr)
+
     try:
-        server = ThreadingHTTPServer((host, port), EmuxWebHandler)
+        server = EmuxThreadingHTTPServer((host, port), EmuxWebHandler)
     except OSError as e:
         if "address already in use" in str(e).lower():
             print(f"emux web: port {port} is already in use — try `emux web --port {port + 1}`.", file=sys.stderr)
@@ -4590,11 +10243,22 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
     stop = threading.Event()
 
     def poll_loop() -> None:
+        # schedule tick every ~15s (not every pane poll) — cheap, message-only cron
+        schedule_every = max(1, int(15 / max(_POLL_INTERVAL, 0.5)))
+        n = 0
         while not stop.is_set():
             try:
                 poll_once(14)
             except Exception:  # noqa: BLE001 — a transient tmux error must not kill the loop
                 pass
+            n += 1
+            if n % schedule_every == 0:
+                try:
+                    from . import schedule as _sched
+
+                    _sched.tick_once()
+                except Exception:  # noqa: BLE001 — schedule must not kill the daemon
+                    pass
             stop.wait(_POLL_INTERVAL)
 
     poller = threading.Thread(target=poll_loop, daemon=True)
@@ -4602,6 +10266,11 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
 
     url = f"http://{host}:{port}"
     print(f"emux web daemon → {url}  (Ctrl-C to stop)")
+    print(f"  skin: {active.id} ({active.brand} · {active.tagline})")
+    if normalized_path:
+        print(f"  public path prefix: {normalized_path}  (proxy should strip before us)")
+    if public_origin:
+        print(f"  public origin: {public_origin}")
     if host not in _LOCALHOSTS:
         print("  WARNING: bound beyond localhost. The API blocks foreign Host/Origin", file=sys.stderr)
         print("  requests, but there is still NO authentication — anyone who can reach", file=sys.stderr)

@@ -2,6 +2,8 @@
 
 > **Eidos mux.** Pick up where you left off in tmux, and let an agent drive it. A TUI session picker for humans + an MCP server for agents to observe, converse with, navigate, and autonomously pursue goals through existing sessions — never spawning or killing them. Same registry, same sessions, same operating model.
 
+**Vocabulary:** *Sessions run. Heads are how you attach. CHATS are what you recover when nothing is live.* See [`docs/vocabulary.md`](docs/vocabulary.md) (Linear [RVS-371](https://linear.app/eidos-agi/issue/RVS-371)).
+
 ## What it does
 
 Three front-ends over one shared registry of named tmux sessions:
@@ -22,13 +24,13 @@ emux login        → Drive a Claude Code login in a session: surface the
                     OAuth URL, then finish with --code. --switch to change
                     account (/logout first).
 
-emux web          → Web daemon. Browser UI that monitors any session
-                    like a chatbot: live pane is the bot's side of
-                    the chat, input bar types into the session.
+emux web          → Web daemon. Browser room over live sessions.
+                    Open a head to type into a pane; CHATS is past
+                    transcripts (not live heads).
 
-emux web          → Web daemon. Browser UI that monitors any session
-                    like a chatbot: live pane is the bot's side of
-                    the chat, input bar types into the session.
+emux web          → Web daemon. Browser room over live sessions.
+                    Open a head to type into a pane; CHATS is past
+                    transcripts (not live heads).
 
 emux ls           → Print registered + live sessions (non-interactive,
                     CI-friendly).
@@ -358,13 +360,50 @@ Five views over the same registry:
 - **Groups** — the same tiles sectioned by registry tag (`#prod`, `#agents`, …), with `untagged` and `unregistered` sections at the end. A session with multiple tags appears in each of its groups.
 - **Activity** — one row per session with a 60-sample change-detection strip (lit cell = the pane moved during that sample) and a "last active" age. Detection ignores cursor blinks and spinner frames (braille/block glyphs are stripped before comparison) so an idle session with a thinking spinner doesn't read as busy. Tracking lives in the daemon, so every browser tab sees the same history.
 - **Flow** — agent topology as a layered hierarchy: orchestrators on top, the agents they drive below, connected by directed **manages** arrows. Each node is a **live mini tmux pane** with a title bar showing the session name and the **detected AI/tool** running in it — Claude Code (✳), Codex (◇), Gemini (♊), Hermes (☿), Aider (✦), or the raw process name otherwise — so you watch the whole fleet working at once. Detection reads tmux's live `pane_current_command`, falling back to a content signature for node-wrapped CLIs that all report as `node`. Built from registry relationships (`emux register boss main --manages worker-1 worker-2`, or the `manages` arg on the MCP `tmux_register` tool); sessions in no relationship sit in an "unconnected" row at the bottom. (Edges reflect *declared* intent in the registry, not observed traffic.) The panes stream live in place (the layout only rebuilds when the topology changes). **Click any box to zoom into a modal** with the full live screen and an input bar to prompt/steer that session — control chips (`^C`, `ESC`, `⏎`, `↑`, `TAB`) included; `Esc` or click-outside closes it.
-- **Chat** — pick any session (sidebar or any tile/node). Its pane renders as a **live screen that updates in place** — it's the rendered terminal, so a full-screen TUI like Claude Code or vim mutates rather than scrolls — with your keystrokes logged as a chat above it. The input bar sends what you type into the session verbatim (`send-keys -l` + Enter); control chips (`^C`, `ESC`, `⏎`, `↑`, `TAB`) send named keys for steering interactive programs.
+- **Head** — pick any session (sidebar or any tile/node) and open a **head**: the pane renders as a **live screen that updates in place** — it's the rendered terminal, so a full-screen TUI like Claude Code or vim mutates rather than scrolls — with your keystrokes logged above it. The input bar sends what you type into the session verbatim (`send-keys -l` + Enter); control chips (`^C`, `ESC`, `⏎`, `↑`, `TAB`) send named keys. Use **OPEN HEAD** / `emux head` for a real iTerm/Terminal attach. **CHATS** is a different tab (past transcripts on disk).
 
 One background thread captures every live pane on a timer into a shared cache, so N tabs watching M sessions cost one capture sweep, not N×M; dead sessions are evicted from the cache as tmux reaps them.
 
 **Niceties:** keys `1`–`4` switch views and `Esc` leaves chat; the last view is remembered across reloads; a sidebar **filter** narrows by name; tile/row ages are color-tiered by recency; sessions show **uptime** and an **attached** marker; the tab title shows the live count (and flashes when a watched chat session changes in the background); polling pauses on a hidden tab. A wrap toggle, copy-attach button, and per-message timestamps live in the chat view.
 
 API: `GET /healthz` (unauthenticated liveness), `GET /api/sessions`, `GET /api/grid?lines=` (captures + activity for all live panes in one call), `GET /api/capture?session=&lines=`, `POST /api/send {session, keys, literal, enter}`. The `/api/*` routes enforce the Host/Origin guards above. Same operations the MCP server exposes, over HTTP.
+
+### Schedule + CALENDAR (every product)
+
+The control room **CALENDAR** tab and in-process cron jobs ship in the **shared
+engine** — not an amux-only feature. Every skin that runs `emux web` gets the
+same UI and API. Jobs are **product-scoped**:
+
+| Product | Schedule file | Room |
+|---------|---------------|------|
+| amux | `~/.config/amux/schedule.json` | `/amux/room` → CALENDAR |
+| gmux / greenmux | product config dir | Greenmark room |
+| reevux | `~/.config/reevux/schedule.json` | mini room |
+| directrux | `~/.config/directrux/schedule.json` | `/directrux/room` |
+| emux | `~/.config/emux/schedule.json` | base control room |
+
+Uses **`croniter`**. Tick ~15s. Sidebar shows plain-English `when` labels;
+cold open uses skeleton shimmer (same idea as CHATS). Range GET expands
+occurrences and skips `next_run_at` for speed.
+
+```bash
+# honor EMUX_PRODUCT so you hit the right schedule file
+EMUX_PRODUCT=amux emux schedule list
+EMUX_PRODUCT=directrux emux schedule list
+emux schedule add --cron '0 7 * * 1-5' --timezone America/Chicago \
+  --title 'Desk job' --target some-seat --message '…'
+emux schedule run <id>
+emux schedule rm <id>
+
+# HTTP
+GET  /api/schedule                 # jobs (+ next_run_at)
+GET  /api/schedule?from=&to=       # + calendar events
+POST /api/schedule | /update | /run | /delete
+```
+
+v1 is **message inject only** (does not spawn seats). Missed fires older than
+15 minutes are skipped (laptop sleep). Requires that product's `emux web`
+KeepAlive.
 
 ### Security
 

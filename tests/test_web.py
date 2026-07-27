@@ -55,7 +55,7 @@ def test_send_payload_literal_sends_text_then_enter(monkeypatch):
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
     monkeypatch.setattr(server, "_pane_settle", lambda s, h=None: 0.0)   # no paste-settle wait
     calls: list[list[str]] = []
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (calls.append(args), (0, "", ""))[1])
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (calls.append(args), (0, "", ""))[1])
     result = web.send_payload("main", "C-c looks like text", literal=True, enter=True)
     assert result["ok"]
     # text and Enter go as SEPARATE send-keys events (so a paste-detecting TUI submits)
@@ -68,16 +68,25 @@ def test_send_payload_named_key(monkeypatch):
     from emux import server, web
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
     calls: list[list[str]] = []
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (calls.append(args), (0, "", ""))[1])
+
+    def _run(args, timeout=10, host=None, socket=None, **kw):
+        calls.append(args)
+        # shell_warn probes pane_current_command first
+        if args and args[0] == "display-message":
+            return (0, "claude", "")
+        return (0, "", "")
+
+    monkeypatch.setattr(server, "_run_tmux", _run)
     result = web.send_payload("main", "C-c", literal=False, enter=False)
     assert result["ok"]
-    assert calls == [["send-keys", "-t", "main", "C-c"]]
+    sends = [c for c in calls if c and c[0] == "send-keys"]
+    assert sends == [["send-keys", "-t", "main", "C-c"]]
 
 
 def test_capture_payload_reports_failure(monkeypatch):
     from emux import server, web
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (1, "", "no such session"))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (1, "", "no such session"))
     result = web.capture_payload("nope")
     assert result["ok"] is False
     assert result["error"] == "tmux_capture_failed"
@@ -93,8 +102,16 @@ def test_poll_once_tracks_activity_then_grid_reads_cache(monkeypatch):
         "boss": {"session": "main", "description": None, "tags": ["agents"],
                  "manages": ["worker-1"], "registered_at": 0},
     })
-    outputs = iter(["pane v1\n", "pane v1\n", "pane v2\n"])
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, next(outputs), ""))
+    # capture_payload does capture-pane then display-message (history meta) per sample.
+    pane_outputs = iter(["pane v1\n", "pane v1\n", "pane v2\n"])
+    meta = "10 24 2000"
+
+    def _run(args, timeout=10, host=None, socket=None, **kw):
+        if args and args[0] == "display-message":
+            return (0, meta, "")
+        return (0, next(pane_outputs), "")
+
+    monkeypatch.setattr(server, "_run_tmux", _run)
     monkeypatch.setattr(web, "_pane_command", lambda s: "")  # don't consume the capture iterator
     web._ACTIVITY.clear()
     web._CACHE.clear()
@@ -166,7 +183,7 @@ def test_observe_ignores_spinner_frame_change():
 def test_poll_once_evicts_dead_sessions(monkeypatch):
     from emux import server, web
     monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "x\n", ""))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (0, "x\n", ""))
     web._ACTIVITY.clear()
     web._CACHE.clear()
 
@@ -192,8 +209,10 @@ def daemon(monkeypatch):
         {"name": "main", "windows": 1, "created_unix": 0, "attached": False},
     ])
     monkeypatch.setattr(server, "_load_registry", lambda: {})
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "pane content here\n", ""))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (0, "pane content here\n", ""))
 
+    web.EmuxWebHandler.public_origin = None
+    web.EmuxWebHandler.public_path = ""
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), web.EmuxWebHandler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -201,6 +220,7 @@ def daemon(monkeypatch):
     httpd.shutdown()
     httpd.server_close()
     web.EmuxWebHandler.public_origin = None
+    web.EmuxWebHandler.public_path = ""
 
 
 def _get(url: str) -> tuple[int, dict | str]:
@@ -218,6 +238,241 @@ def test_http_serves_ui(daemon):
     assert "EMUX" in body and "control room" in body
     assert 'id="help-panel"' in body and "/api/help?q=" in body
     assert 'id="docsbtn"' in body and 'href="/docs"' in body
+    # root mount: empty public path, no leftover placeholder
+    assert 'const PUBLIC_PATH=""' in body
+    assert "__PUBLIC_PATH__" not in body
+
+
+def test_http_simple_status_always_available(daemon):
+    """Read-only table at /simple — works with or without public_path."""
+    from emux import skin
+    skin.set_active_skin("emux")
+    status, body = _get(daemon + "/simple")
+    assert status == 200
+    assert "emux status" in body
+    assert "main" in body  # mocked live session
+    assert "read-only" in body
+    assert "auto-refresh" in body
+    assert "uptime" in body and "active" in body
+    assert 'class="chip' in body  # filters
+    assert "scan scope" in body  # honest multi-socket claim stamp
+    # local simple status (no public_path) → bare tmux attach, no ssh
+    assert "tmux attach -t main" in body or "tmux attach -t" in body
+
+
+def test_ai_diagnosis_has_verdict_and_sessions(daemon):
+    """AI mode is plain markdown with an explicit HEALTHY/DEGRADED/FAIL verdict."""
+    status, body = _get(daemon + "/ai")
+    assert status == 200
+    text = body if isinstance(body, str) else str(body)
+    # /ai returns markdown; _get may parse as str
+    assert "verdict:" in text.lower() or "verdict" in text.lower()
+    assert "main" in text
+    assert "Scan scope" in text or "scan scope" in text.lower()
+    assert "Connect commands" in text or "connect" in text.lower()
+
+
+def test_ai_diagnosis_html_wrapper(daemon):
+    status, body = _get(daemon + "/ai.html")
+    assert status == 200
+    assert "AI mode" in body or "diagnosis" in body.lower()
+    assert "<pre" in body
+
+
+def test_health_page_markdown_is_product_scoped(daemon):
+    """Standing /health is cheap markdown with verdict + evolving criteria."""
+    status, body = _get(daemon + "/health")
+    assert status == 200
+    text = body if isinstance(body, str) else str(body)
+    assert "verdict:" in text.lower() or "verdict" in text.lower()
+    assert "health criteria" in text.lower()
+    assert "healthz" in text.lower()
+    # product-stamped title line
+    assert text.lstrip().startswith("#") and "health" in text.splitlines()[0].lower()
+
+
+def test_health_page_html_wrapper(daemon):
+    status, body = _get(daemon + "/health.html")
+    assert status == 200
+    assert "standing health" in body.lower() or "health" in body.lower()
+    assert "<pre" in body
+
+
+def test_gmux_skin_rebrands_without_forking():
+    from emux import skin
+    s = skin.get_skin("gmux")
+    assert s.id == "gmux" and s.brand == "GMUX"
+    assert s.engine_label == "emux" and "emux" in s.footer_note
+    assert s.light.accent.startswith("#") and s.dark.accent.startswith("#")
+    assert s.light.accent.lower() != "#8e6129"  # not emux amber
+    css = s.theme_css()
+    assert "[data-theme=dark]" in css and s.light.bg in css and s.dark.bg in css
+    assert "skin-logo" in s.logo_svg and "GMUX" in s.logo_html()
+    stamped = s.apply(
+        "<h1>__BRAND__</h1>__LOGO_HTML__<style>__THEME_CSS__</style> · __ENGINE__",
+        "1.2.3",
+    )
+    assert "GMUX" in stamped and "emux 1.2.3" in stamped and "__THEME_CSS__" not in stamped
+    assert skin.get_skin("greenmux").id == "gmux"
+    skin.set_active_skin("gmux")
+    assert skin.active_skin().product == "gmux"
+    skin.set_active_skin("emux")
+
+
+def test_reevux_skin_personal_branding():
+    from emux import skin
+    s = skin.get_skin("reevux")
+    assert s.id == "reevux" and s.brand == "REEVUX"
+    assert s.product == "reevux" and "personal" in s.tagline.lower()
+    assert s.engine_label == "emux"
+    assert s.light.accent.lower() == "#3b5ba5"  # Reeves slate blue, not gmux green
+    assert s.light.accent.lower() != "#1b7a4e"
+    assert "skin-logo" in s.logo_svg and "REEVUX" in s.logo_html()
+    stamped = s.apply("__BRAND__ · __STATUS_TITLE__ · __ENGINE__", "9.9.9")
+    assert "REEVUX" in stamped and "reevux status" in stamped and "emux 9.9.9" in stamped
+    assert skin.get_skin("reeves").id == "reevux"
+    assert skin.get_skin("personal").id == "reevux"
+    skin.set_active_skin("reevux")
+    assert skin.active_skin().product == "reevux"
+    skin.set_active_skin("emux")
+
+
+def test_amux_skin_aic_branding():
+    from emux import skin
+    s = skin.get_skin("amux")
+    assert s.id == "amux" and s.brand == "AMUX"
+    assert s.product == "amux" and "aic" in s.tagline.lower()
+    assert s.engine_label == "emux"
+    # Meridian primary + brand-plate navy (from AIC Holdings logo art)
+    assert s.light.accent.lower() == "#143ca2"
+    assert s.dark.bg.lower() == "#151c36"
+    assert s.default_theme == "dark"
+    assert s.light.accent.lower() != "#1b7a4e"  # not gmux green
+    assert s.light.accent.lower() != "#3b5ba5"  # not reevux slate
+    assert "skin-logo" in s.logo_svg and "AMUX" in s.logo_html()
+    # feather path (not the old A-triangle)
+    assert "M46 14" in s.logo_svg
+    stamped = s.apply("__BRAND__ · __STATUS_TITLE__ · __ENGINE__", "9.9.9")
+    assert "AMUX" in stamped and "amux status" in stamped and "emux 9.9.9" in stamped
+    assert skin.get_skin("aic").id == "amux"
+    skin.set_active_skin("amux")
+    assert skin.active_skin().product == "amux"
+    skin.set_active_skin("emux")
+
+
+def test_http_simple_filters_and_peek(daemon):
+    """Default is live-only; peek=name captures pane (server-rendered)."""
+    status, body = _get(daemon + "/simple")
+    assert status == 200
+    assert "main" in body
+    assert "chip on" in body
+    status, body = _get(daemon + "/simple?peek=main")
+    assert status == 200
+    assert "pane peek" in body
+    assert "pane content here" in body or "empty pane" in body or "pre class='pane'" in body or 'pre class="pane"' in body
+    # stale peek message when name unknown under filter
+    status, body = _get(daemon + "/simple?peek=nope-session")
+    assert status == 200
+    assert "No session named" in body
+
+
+def test_discover_local_tmux_sockets_includes_default():
+    from emux import server
+    socks = server._discover_local_tmux_sockets()
+    assert any(s.get("name") == "default" for s in socks)
+
+
+def test_connect_command_ssh_and_local():
+    from emux import skin, web
+    assert web.connect_command("greenmux-proof", ssh_host="rentamac") == (
+        "ssh -t rentamac 'tmux attach -t greenmux-proof'"
+    )
+    assert web.connect_command("s1", socket_name="other", ssh_host="rentamac") == (
+        "ssh -t rentamac 'tmux -L other attach -t s1'"
+    )
+    assert web.connect_command("s1", socket_path="/tmp/tmux-501/x") == (
+        "tmux -S /tmp/tmux-501/x attach -t s1"
+    )
+    skin.set_active_skin("emux")
+    assert web.resolve_connect_ssh_host("/gmux") == "rentamac"
+    assert web.resolve_connect_ssh_host("") is None
+    skin.set_active_skin("gmux")
+    assert web.resolve_connect_ssh_host("") == "rentamac"
+    skin.set_active_skin("reevux")
+    assert web.resolve_connect_ssh_host("") == "mac-mini-01"
+    skin.set_active_skin("emux")
+
+
+def test_normalize_public_path():
+    from emux import web
+    assert web.normalize_public_path(None) == ""
+    assert web.normalize_public_path("") == ""
+    assert web.normalize_public_path("/gmux") == "/gmux"
+    assert web.normalize_public_path("/gmux/") is None
+    assert web.normalize_public_path("gmux") is None
+    assert web.normalize_public_path("/../etc") is None
+    assert web.normalize_public_path("/") is None
+
+
+def test_http_ui_stamps_public_path_prefix(monkeypatch):
+    """Under public_path, "/" is the simple table; /room is the full SPA."""
+    from emux import server, web
+    monkeypatch.setattr(server, "_resolve_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(server, "_live_sessions", lambda: [
+        {"name": "main", "windows": 1, "created_unix": 0, "attached": False},
+    ])
+    monkeypatch.setattr(server, "_load_registry", lambda: {
+        "proof": {"session": "main", "description": "scratch", "tags": ["test"],
+                  "registered_at": 0},
+    })
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (0, "pane\n", ""))
+    from emux import skin
+    skin.set_active_skin("gmux")
+    web.EmuxWebHandler.public_origin = "https://go.greenmarkwaste.com"
+    web.EmuxWebHandler.public_path = "/gmux"
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), web.EmuxWebHandler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        # default landing = simple status with gmux skin
+        status, body = _get(base + "/")
+        assert status == 200
+        assert "gmux status" in body
+        assert "GMUX" in body or "gmux" in body
+        assert "powered by emux" in body
+        assert "themebtn" in body and "data-theme" in body or "emux-theme" in body
+        assert "skin-logo" in body  # gmux logo mark
+        assert "proof" in body and "LIVE" in body
+        assert 'href="/gmux/room"' in body
+        assert "uptime" in body and "active" in body
+        assert "ssh -t rentamac" in body  # connect under gmux skin
+        # live filter drops unregistered-only noise when only registered live
+        status, body = _get(base + "/?live=1&registered=1")
+        assert status == 200 and "proof" in body
+        # peek under public path
+        status, body = _get(base + "/?peek=proof")
+        assert status == 200 and "pane peek" in body
+        # full SPA still at /room with path stamp + skin
+        status, body = _get(base + "/room")
+        assert status == 200
+        assert 'const PUBLIC_PATH="/gmux"' in body
+        assert 'href="/gmux/docs"' in body
+        assert "GMUX" in body  # skinned brand
+        # Host guard accepts the public origin hostname
+        req = urllib.request.Request(
+            base + "/api/sessions",
+            headers={"Host": "go.greenmarkwaste.com"},
+        )
+        with urllib.request.urlopen(req) as r:
+            assert r.status == 200
+            assert json.loads(r.read().decode())["ok"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        web.EmuxWebHandler.public_origin = None
+        web.EmuxWebHandler.public_path = ""
+        skin.set_active_skin("emux")
 
 
 def test_http_serves_docs_with_shared_help_client(daemon):
@@ -455,7 +710,7 @@ def test_grid_payload_attaches_agent(monkeypatch):
         {"name": "main", "windows": 1, "created_unix": 0, "attached": False},
     ])
     monkeypatch.setattr(server, "_load_registry", lambda: {})
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "x\n", ""))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (0, "x\n", ""))
     monkeypatch.setattr(web, "_pane_command", lambda s: "claude")
     web._ACTIVITY.clear()
     web._CACHE.clear()
@@ -486,7 +741,7 @@ def test_flow_handles_recursive_manages_cycle(monkeypatch):
         "a": {"session": "a", "description": None, "tags": [], "manages": ["b"], "registered_at": 0},
         "b": {"session": "b", "description": None, "tags": [], "manages": ["a"], "registered_at": 0},
     })
-    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None: (0, "x\n", ""))
+    monkeypatch.setattr(server, "_run_tmux", lambda args, timeout=10, host=None, socket=None, **kw: (0, "x\n", ""))
     web._ACTIVITY.clear()
     web._CACHE.clear()
 
@@ -618,7 +873,7 @@ def _wire_gate_policy(monkeypatch, tmp_path, rules):
                         signals.append({"kind": kind, "payload": payload}))
     sent = []
     monkeypatch.setattr(server, "_run_tmux",
-                        lambda args, timeout=10, host=None:
+                        lambda args, timeout=10, host=None, socket=None, **kw:
                         (sent.append({"args": list(args), "host": host}), (0, "", ""))[1])
     monkeypatch.setattr(web, "_file_hancock_escalation", lambda *a, **k: None)
     web._ESCALATED.clear()
@@ -704,7 +959,7 @@ def test_remote_session_reads_live_and_captures_over_ssh(monkeypatch):
                        "manages": [], "tags": [], "registered_at": 0},
     })
     calls = []
-    def fake_tmux(args, timeout=10, host=None):
+    def fake_tmux(args, timeout=10, host=None, socket=None, **kw):
         calls.append((args[0], host))
         if args[0] == "ls":
             return (0, "wrk\nother\n", "") if host == "rentamac" else (0, "", "")

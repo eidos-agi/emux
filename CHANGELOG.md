@@ -1,5 +1,65 @@
 # Changelog
 
+## v0.68.17
+
+### Fixes
+- **First paint:** shallow capture (400 lines) then deepen; `#modalscreen` shows “connecting to pane…” instead of blank white; capture errors surface in status.
+- **Gist:** delayed start so capture wins the connection race; 18s client abort (no infinite “reading…”).
+- **Float chat close:** default reply is **drawer-only** (no sticky 💬 FAB). Extra side chats get a real ✕ (panel + collapsed bubble). Suggestions no longer re-open the float.
+- **Spacing:** normalized modal scale (`--ms1`…`--ms5`) on header/banner/gist/chips/composer/drawer.
+
+## v0.68.16
+
+### Fixes / polish (EID-1142)
+- **Header hierarchy:** Linear issue is the hero title; seat name is secondary.
+- **One status banner:** classifier strip folded into a single calm `#modalbanner` (no double strip).
+- **Task rows:** key + title line + active pip + pursue / ↗ Linear actions (CSS actually applied to `div.mtask`).
+- **Gist stuck-on-reading:** keep prior digest while re-reading; client timeout + time-based retry when pane is stable; refresh forces recompute.
+
+## v0.68.15
+
+### Fixes
+- **EID-1141:** Tasks tab re-scan on every modal refresh + key cache so Linear keys in the pane are not stuck at 0.
+
+
+
+## v0.68.14
+
+### Features
+- **Target session-head UX (v1):** left head + right **Tasks / Chat / Context / UX** drawer. Active Linear issue in header; docked multi side-chats; auth mode; Queue vs Send Now; classifier status banner.
+- **UX score:** `GET /api/ux-score` + drawer **UX** tab — weighted checklist against `docs/target-ux-session-head.md` (ship bar ≥85%).
+
+## v0.68.13
+
+### Features
+- **💬 after every Linear task id:** linkified `TEAM-123` keys (and Linear URLs) show a chat bubble. Click → open a side chat about that issue **and** inject a “load this Linear issue and prepare to pursue it” prompt into the open head (or spawn Claude if no modal). Tasks drawer **💬 pursue** does the same.
+
+## v0.68.12
+
+### Features
+- **Many side chats:** the floating “reply to &lt;session&gt;” pattern becomes a stack — open as many topic/task side chats as you want (+ FAB or **💬 chat** on a Linear task). Each has its own log; messages inject into the parent head with a topic tag. **Fresh Claude** spawns a dedicated seat for that topic.
+
+## v0.68.11
+
+### Features
+- **Session modal Linear tasks drawer:** opening a chat shows the live head **and** a right-side drawer listing every `TEAM-123` mentioned in that session (name, summary, registry linear link, pane capture, history, gist). Click → Linear. Toggle with **TASKS**; preference remembered.
+
+## v0.68.10
+
+### Features
+- **Linear issue links in chat (regex):** any `TEAM-123` key (AIC-*, EID-*, GMW-*, ARP-*, RVS-*, …) in CHATS titles/summaries/peeks, grid rails, head bubbles, and the live feed becomes a clickable link to `https://linear.app/eidos-agi/issue/TEAM-123`. No Linear API — pure client-side linkify with a small denylist for false positives (UTF-8, HTTP-2, …).
+
+## v0.68.9
+
+### Features
+- **Schedule calendar for every product:** in-process cron jobs + **CALENDAR** tab (week/month, series rail, plain-English `when` labels, skeleton + stale-while-revalidate load). Product-scoped `~/.config/<product>/schedule.json` (amux / gmux / reevux / directrux / emux). Range GET skips `next_run_at` so the calendar path stays light.
+- **CLI:** `emux schedule list|add|rm|run` with human schedule lines; desk default examples use weekdays (`1-5`).
+
+## v0.68.8
+
+### Fixes
+- **Directrux concurrency under Mafia stress (EID-1107+):** HTTP accept backlog `EMUX_HTTP_BACKLOG` (default 256); single-flight caches for expensive GETs; cold `/ai` pane-sample cap (`EMUX_AI_PANE_SAMPLES`); Esc dismisses settings modal.
+- **Manager probe truth (EID-1112/1115):** prefer `healthz_loopback` when set; classify OIDC 3xx as `auth_gated` (reachable degraded, not DOWN); `/api/managed` stale-while-revalidate + hard ~3s probe wall so concurrent room polls stay responsive.
 
 ## v0.68.7
 

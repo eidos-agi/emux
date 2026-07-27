@@ -3,7 +3,7 @@
   emux              → TUI picker (registered + live tmux sessions)
   emux new          → new mission: chat → confirm spec → spawn (same as 'n' in the TUI)
   emux mcp          → start the MCP server
-  emux web          → start the web daemon (chat-style session monitor)
+  emux web          → start the web daemon (room: sessions, heads, CHATS)
   emux register …   → CLI register
   emux ls           → list registered + live sessions
   emux send …        → send keys to a registered/live session
@@ -436,6 +436,75 @@ def cmd_ls() -> int:
             mark = " (registered)" if s["name"] in registered_sessions else ""
             attached = " (attached)" if s.get("attached") else ""
             print(f"  {s['name']}{mark}{attached}")
+    return 0
+
+
+def cmd_chats(args: argparse.Namespace) -> int:
+    """List abandoned chats from the durable index (re-scan disk if stale/forced)."""
+    from . import chats as chat_find
+    from . import chats_store
+
+    statuses = list(args.statuses or [])
+    if args.abandoned_only:
+        statuses = ["stale"]
+    tools = args.tools or ["claude", "grok"]
+    refresh = bool(getattr(args, "sync", False) or getattr(args, "refresh", False))
+    bundle = chats_store.list_or_sync(
+        refresh=refresh,
+        tools=tools,
+        match=args.match,
+        recent_hours=args.recent_hours,
+        statuses=statuses or None,
+        limit=args.limit,
+        q=getattr(args, "q", None) or None,
+        sort=getattr(args, "sort", None) or "priority",
+    )
+    hits = bundle["hits"]
+    # normalize to ChatHit-like dicts for format_text
+    as_hits = []
+    for h in hits:
+        if isinstance(h, chat_find.ChatHit):
+            as_hits.append(h)
+        else:
+            as_hits.append(
+                chat_find.ChatHit(
+                    tool=h.get("tool", ""),
+                    session_id=h.get("session_id", ""),
+                    cwd=h.get("cwd", ""),
+                    title=h.get("title", ""),
+                    summary=h.get("summary", ""),
+                    path=h.get("path", ""),
+                    mtime=float(h.get("mtime") or 0),
+                    age_hours=float(h.get("age_hours") or 0),
+                    status=h.get("status", "stale"),
+                    resume=h.get("resume", ""),
+                    messages=h.get("messages"),
+                    model=h.get("model"),
+                    branch=h.get("branch"),
+                    priority=int(h.get("priority") or 0),
+                    greenmark=bool(h.get("greenmark")),
+                )
+            )
+    if args.json:
+        payload = {
+            "chats": [h.as_dict() if hasattr(h, "as_dict") else h for h in as_hits],
+            "source": bundle.get("source"),
+            "did_sync": bundle.get("did_sync"),
+            "store_path": bundle.get("store_path"),
+            "store_rows": bundle.get("store_rows"),
+            "last_full_scan": bundle.get("last_full_scan"),
+            "counts": bundle.get("counts"),
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+    header = chat_find.format_text(as_hits)
+    meta = (
+        f"\n_store: {bundle.get('store_path')} · rows {bundle.get('store_rows')} · "
+        f"source={bundle.get('source')} · did_sync={bundle.get('did_sync')}_\n"
+    )
+    print(header + meta)
+    if any(h.status == "stale" for h in as_hits):
+        return 2
     return 0
 
 
@@ -1303,6 +1372,64 @@ def cmd_head(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_schedule(args: argparse.Namespace) -> int:
+    """Cron-style message jobs stored per product (e.g. ~/.config/amux/schedule.json)."""
+    from . import schedule as _sched
+
+    sub = getattr(args, "schedule_cmd", None)
+    if sub is None or sub == "list":
+        rows = _sched.list_jobs()
+        print(f"schedule file: {_sched.schedule_path()}  product={_sched._product_id()}")
+        if not rows:
+            print("(no jobs — add with: emux schedule add --cron '…' --target NAME --message '…')")
+            return 0
+        for r in rows:
+            en = "on" if r.get("enabled") else "off"
+            when = r.get("when") or _sched.humanize_cron(
+                str(r.get("cron") or ""), str(r.get("timezone") or "America/Chicago")
+            )
+            print(
+                f"{r['id']:24} {en:3} {when}  "
+                f"target={r['target']} next={r.get('next_run_at') or '—'} "
+                f"last={r.get('last_status') or '—'}  cron={r['cron']!r}"
+            )
+        return 0
+    if sub == "add":
+        try:
+            job = _sched.add_job(
+                cron=args.cron,
+                target=args.target,
+                message=args.message,
+                timezone=args.timezone,
+                job_id=args.id,
+                title=getattr(args, "title", None),
+            )
+        except Exception as e:
+            print(f"emux schedule: {e}", file=sys.stderr)
+            return 1
+        when = _sched.humanize_cron(job.cron, job.timezone)
+        print(f"added {job.id} — {when} → {_sched.schedule_path()}")
+        return 0
+    if sub == "rm":
+        if not _sched.remove_job(args.id):
+            print(f"emux schedule: unknown id {args.id}", file=sys.stderr)
+            return 1
+        print(f"removed {args.id}")
+        return 0
+    if sub == "run":
+        r = _sched.fire_by_id(args.id, force=True)
+        if getattr(args, "json", False):
+            print(json.dumps(r, indent=2))
+        elif r.get("ok"):
+            print(f"fired {args.id} → {r.get('target')}")
+        else:
+            print(f"emux schedule: fire failed: {r.get('error')}", file=sys.stderr)
+            return 1
+        return 0 if r.get("ok") else 1
+    print("emux schedule: need list|add|rm|run", file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="emux",
@@ -1317,6 +1444,60 @@ def main(argv: list[str] | None = None) -> int:
         help="new mission: describe what you want, confirm the AI's session spec, start it (same as 'n' in the TUI)",
     )
     sub.add_parser("ls", help="print registered + live sessions (non-interactive)")
+
+    p_chats = sub.add_parser(
+        "chats",
+        help="list Claude/Grok chats from durable chats.db (re-index disk if stale)",
+    )
+    p_chats.add_argument(
+        "--match",
+        default="greenmark",
+        help="path/title filter: greenmark (default), all, or a regex",
+    )
+    p_chats.add_argument(
+        "--tool",
+        action="append",
+        dest="tools",
+        choices=["claude", "grok"],
+        help="limit to a tool (repeatable); default both",
+    )
+    p_chats.add_argument(
+        "--status",
+        action="append",
+        dest="statuses",
+        choices=["live", "recent", "stale", "abandoned", "resumed"],
+        help="filter status (repeatable); abandoned ≡ stale",
+    )
+    p_chats.add_argument(
+        "--recent-hours",
+        type=float,
+        default=24.0,
+        help="not-live sessions newer than this are 'recent' (default 24)",
+    )
+    p_chats.add_argument("--limit", type=int, default=40, help="max rows (default 40)")
+    p_chats.add_argument("--json", action="store_true", help="machine-readable list")
+    p_chats.add_argument(
+        "--abandoned-only",
+        action="store_true",
+        help="shortcut: only stale (not live, older than --recent-hours)",
+    )
+    p_chats.add_argument(
+        "--sync",
+        action="store_true",
+        help="force full disk re-index into chats.db before listing",
+    )
+    p_chats.add_argument(
+        "--refresh",
+        action="store_true",
+        help="alias for --sync",
+    )
+    p_chats.add_argument("-q", "--query", dest="q", default=None, help="text search")
+    p_chats.add_argument(
+        "--sort",
+        choices=["priority", "mtime", "age"],
+        default="priority",
+        help="sort order (default priority)",
+    )
 
     p_ask = sub.add_parser(
         "ask",
@@ -1417,7 +1598,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_web = sub.add_parser(
         "web",
-        help="start the web daemon — monitor sessions in a browser (grid/groups/activity/flow/chat)",
+        help="start the web daemon — room over sessions (grid/groups/activity/flow/head; CHATS=past)",
     )
     p_web.add_argument(
         "--host",
@@ -1428,7 +1609,20 @@ def main(argv: list[str] | None = None) -> int:
     p_web.add_argument(
         "--public-origin",
         default=None,
-        help="single trusted reverse-proxy origin, e.g. https://emux.example.com",
+        help="single trusted reverse-proxy origin, e.g. https://go.greenmarkwaste.com",
+    )
+    p_web.add_argument(
+        "--public-path",
+        default=None,
+        help="path prefix when reverse-proxied under a subpath, e.g. /gmux "
+             "(Caddy handle_path should strip it; the SPA keeps the prefix on fetches)",
+    )
+    p_web.add_argument(
+        "--skin",
+        default=None,
+        help="product chrome only: emux (default), gmux (Greenmark), reevux "
+             "(personal/Reeves), amux (AIC Holdings). Same engine. Also via "
+             "$EMUX_SKIN. Aliases: greenmux→gmux, reeves/personal→reevux, aic→amux.",
     )
     p_web.add_argument("--open", action="store_true", help="open the browser after starting")
     p_web.add_argument(
@@ -1670,6 +1864,45 @@ def main(argv: list[str] | None = None) -> int:
         help="print the tmux attach command without opening a terminal",
     )
 
+    p_sched = sub.add_parser(
+        "schedule",
+        help="cron-style message jobs (in-process; product-scoped schedule.json)",
+    )
+    sched_sub = p_sched.add_subparsers(dest="schedule_cmd")
+    sched_sub.add_parser("list", help="list jobs + next fire time")
+    p_sched_add = sched_sub.add_parser("add", help="add a cron message job")
+    p_sched_add.add_argument(
+        "--cron",
+        required=True,
+        help='5-field cron; desk default weekdays e.g. "0 7 * * 1-5" (min hour dom mon dow)',
+    )
+    p_sched_add.add_argument(
+        "--target",
+        required=True,
+        help="registry name (preferred) or tmux session",
+    )
+    p_sched_add.add_argument(
+        "--message",
+        required=True,
+        help="text to send into the session (like typing a prompt)",
+    )
+    p_sched_add.add_argument(
+        "--title",
+        default=None,
+        help="human label on the calendar sidebar (defaults to id)",
+    )
+    p_sched_add.add_argument(
+        "--timezone",
+        default="America/Chicago",
+        help="IANA timezone (default America/Chicago)",
+    )
+    p_sched_add.add_argument("--id", default=None, help="optional job id")
+    p_sched_rm = sched_sub.add_parser("rm", help="remove a job by id")
+    p_sched_rm.add_argument("id", help="job id")
+    p_sched_run = sched_sub.add_parser("run", help="fire a job now (does not wait for cron)")
+    p_sched_run.add_argument("id", help="job id")
+    p_sched_run.add_argument("--json", action="store_true", help="print result JSON")
+
     args = parser.parse_args(argv)
 
     if args.cmd is None:
@@ -1682,16 +1915,33 @@ def main(argv: list[str] | None = None) -> int:
         if args.print_launchd:
             from .web import launchd_plist
 
-            print(launchd_plist(host=args.host, port=args.port), end="")
+            print(
+                launchd_plist(
+                    host=args.host,
+                    port=args.port,
+                    public_origin=args.public_origin,
+                    public_path=args.public_path or "",
+                    skin=args.skin or "",
+                ),
+                end="",
+            )
             return 0
         from .web import run_web
 
-        return run_web(host=args.host, port=args.port, open_browser=args.open,
-                       public_origin=args.public_origin)
+        return run_web(
+            host=args.host,
+            port=args.port,
+            open_browser=args.open,
+            public_origin=args.public_origin,
+            public_path=args.public_path,
+            skin=args.skin,
+        )
     if args.cmd == "new":
         return cmd_new_mission()
     if args.cmd == "ls":
         return cmd_ls()
+    if args.cmd == "chats":
+        return cmd_chats(args)
     if args.cmd == "ask":
         return cmd_ask(args)
     if args.cmd == "navigate":
@@ -1728,6 +1978,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_run(args)
     if args.cmd == "head":
         return cmd_head(args)
+    if args.cmd == "schedule":
+        return cmd_schedule(args)
     if args.cmd == "doctor":
         return cmd_doctor(args)
     if args.cmd == "gates":
