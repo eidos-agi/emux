@@ -3703,11 +3703,58 @@ a.linlink:hover{color:var(--amber);border-bottom-style:solid;filter:brightness(1
 #modaliterm{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:13px;cursor:pointer;padding:2px 10px;margin-left:6px}
 #modaliterm:hover{color:var(--amber);border-color:var(--amber-dim)}
 #modaliterm:disabled{opacity:.6;cursor:default}
+/* Body row: terminal head + right Linear tasks drawer */
+#modalbody{
+  flex:1 1 0;min-height:160px;min-width:0;display:flex;flex-direction:row;
+  overflow:hidden;border-top:1px solid var(--line);
+}
 /* Shell owns the flex slot; screen is absolute-fill so height is always the
    free region between header/gist and composer — never content-sized, never 0. */
 #modalshell{
-  flex:1 1 0;min-height:160px;min-width:0;position:relative;
-  overflow:hidden;background:var(--bg-card);border-top:1px solid var(--line);
+  flex:1 1 0;min-height:0;min-width:0;position:relative;
+  overflow:hidden;background:var(--bg-card);
+}
+/* Right drawer — every Linear TEAM-123 mentioned in this chat */
+#modaltasks{
+  flex:0 0 240px;width:240px;max-width:42vw;min-width:0;
+  display:flex;flex-direction:column;
+  border-left:1px solid var(--line);background:var(--bg-raise);
+  overflow:hidden;
+}
+#modaltasks.collapsed{display:none}
+#modaltasks .mthead{
+  display:flex;align-items:center;gap:8px;padding:8px 10px;
+  border-bottom:1px solid var(--line);flex:0 0 auto;
+  font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--text-dim);
+}
+#modaltasks .mthead b{color:var(--amber);font-weight:700;letter-spacing:.8px}
+#modaltasks .mthead .mtcount{
+  font-size:10px;padding:0 6px;border-radius:8px;
+  background:color-mix(in srgb, var(--amber) 18%, transparent);color:var(--amber);
+}
+#modaltasks .mthead button{
+  margin-left:auto;background:transparent;border:1px solid var(--line);
+  color:var(--text-dim);font-size:12px;cursor:pointer;padding:1px 8px;
+}
+#modaltasks .mthead button:hover{color:var(--amber);border-color:var(--amber-dim)}
+#modaltasklist{flex:1 1 0;min-height:0;overflow:auto;padding:8px}
+#modaltasklist .mtempty{font-size:11px;color:var(--text-dim);line-height:1.45;padding:6px 4px}
+#modaltasklist a.mtask{
+  display:flex;align-items:center;gap:8px;padding:8px 9px;margin-bottom:5px;
+  border:1px solid var(--line);border-radius:6px;background:var(--bg-card);
+  text-decoration:none;color:var(--text);font-size:12px;
+}
+#modaltasklist a.mtask:hover{border-color:var(--amber-dim);background:color-mix(in srgb, var(--amber) 8%, var(--bg-card))}
+#modaltasklist .mtkey{font-weight:700;color:var(--amber);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px}
+#modaltasklist .mtgo{margin-left:auto;color:var(--text-dim);font-size:11px}
+#modaltasksbtn{background:transparent;border:1px solid var(--line);color:var(--amber-dim);font-size:11px;cursor:pointer;padding:2px 8px;margin-left:6px;letter-spacing:.4px}
+#modaltasksbtn:hover,#modaltasksbtn.on{color:var(--amber);border-color:var(--amber-dim)}
+#modaltasksbtn .mtbadge{display:none;margin-left:4px;font-size:9px;padding:0 5px;border-radius:8px;background:var(--amber);color:var(--on-accent);font-weight:700}
+#modaltasksbtn .mtbadge.on{display:inline}
+@media(max-width:720px){
+  #modaltasks{position:absolute;right:0;top:0;bottom:0;z-index:20;width:min(280px,88vw);max-width:none;
+    box-shadow:-8px 0 24px rgba(0,0,0,.35)}
+  #modalbody{position:relative}
 }
 #modalscreen{
   position:absolute;inset:0;
@@ -4046,6 +4093,7 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
       <button id="modalswitch" title="fail this session over to another Claude account (exits + relaunches + resumes)" onclick="switchPlan()">⇄ switch account</button>
       <button id="modaliterm" class="maconly" title="open a head on this session in iTerm2 (emux head / tmux attach)">⧉ OPEN HEAD</button>
       <button id="modalpop" type="button" title="open this session as its own browser tab">↗ tab</button>
+      <button id="modaltasksbtn" type="button" title="Linear tasks mentioned in this chat" onclick="toggleModalTasks()">☰ TASKS<span class="mtbadge" id="modaltaskbadge">0</span></button>
       <button id="modalclose">✕ close</button>
     </div>
     <div id="modaljudge"></div>
@@ -4054,9 +4102,19 @@ html:not([data-os="Darwin"]) .maconly{display:none !important}
       <div class="dgtext"></div>
       <div class="dgsugg"></div>
     </div>
-    <div id="modalshell">
-      <div id="modalscreen" tabindex="0" role="log" aria-label="session head"></div>
-      <button type="button" id="modaljump" title="jump to live bottom">↓ live</button>
+    <div id="modalbody">
+      <div id="modalshell">
+        <div id="modalscreen" tabindex="0" role="log" aria-label="session head"></div>
+        <button type="button" id="modaljump" title="jump to live bottom">↓ live</button>
+      </div>
+      <aside id="modaltasks" aria-label="Linear tasks in this chat">
+        <div class="mthead">
+          <b>Linear</b> <span>tasks</span>
+          <span class="mtcount" id="modaltaskcount">0</span>
+          <button type="button" id="modaltasks-hide" title="hide tasks drawer" onclick="toggleModalTasks(false)">›</button>
+        </div>
+        <div id="modaltasklist"></div>
+      </aside>
     </div>
     <div id="tchat" class="collapsed">
       <button id="tchatlauncher" onclick="tchatToggle()">💬<span id="tchatbadge"></span></button>
@@ -5970,6 +6028,10 @@ function openModal(s){
   switchArmed=null;$("#modalswitch").textContent="⇄ switch account";$("#modalswitch").className="";
   $("#modalswitch").classList.toggle("hot",!!s.cost);   // highlight when this session is throttled
   $("#tchatsess").textContent=s.name;$("#tchat").className="collapsed";renderTChat();
+  // Tasks drawer: prefer remembered open state; default open
+  try{modalTasksOpen=localStorage.getItem("emux_modal_tasks")!=="0";}catch(_){modalTasksOpen=true;}
+  toggleModalTasks(modalTasksOpen);
+  renderModalTasks();
   $("#modal").classList.add("open");
   updateModalJump();
   // Live poll + async history (when history lands, re-render with scrollable transcript)
@@ -5988,6 +6050,7 @@ function openModal(s){
         }
       }
     }
+    renderModalTasks(); // history often holds the issue keys
   });
   loadDigest();                                  // the gist + suggested replies, up front
   syncURL();                                      // deep-link the open session
@@ -6026,6 +6089,7 @@ async function modalRefresh(){
           if(modalBook.length>MODAL_BOOK_MAX)modalBook=modalBook.slice(-MODAL_BOOK_MAX);
         }
         modalRenderBook(sc,atBottom,keepTop);
+        renderModalTasks(); // re-scan pane for new TEAM-123 keys
         // The Gist failed but the web changed — ok to try to recover, capped at 10
         if(digestErr&&digestRetries<10){digestRetries++;loadDigest();}
       }
@@ -6055,7 +6119,9 @@ async function loadDigest(){
     const more=digestRetries<10?" · will retry when the session moves":"";
     $("#modaldigest .dgtext").textContent="(couldn't summarize — "+(r.error||"")+")"+more;return;}
   digestErr=false;digestRetries=0;   // recovered
-  $("#modaldigest .dgtext").textContent=r.digest||"(nothing notable)";
+  const dgt=$("#modaldigest .dgtext");
+  if(dgt){dgt.innerHTML=linkifyLinear(r.digest||"(nothing notable)");bindLinlinks(dgt);}
+  renderModalTasks(); // gist often names the Linear issue
   if(r.digest&&r.digest!==tLoggedDigest){tchatLog("bot",r.digest);tLoggedDigest=r.digest;}  // the gist opens the chat
   setSuggestions(r.suggestions||[]);   // gist replies become chips (with confidence pies)
 }
@@ -6665,6 +6731,73 @@ function bindLinlinks(root){
   root.querySelectorAll("a.linlink").forEach(a=>{
     a.onclick=e=>{e.stopPropagation();};
   });
+}
+/** Collect unique Linear keys from any blob of chat text. */
+function extractLinearKeys(text){
+  const out=[];
+  const s=String(text==null?"":text);
+  if(!s) return out;
+  s.replace(LINEAR_ISSUE_RE,m=>{
+    if(isLinearIssueKey(m)&&out.indexOf(m)<0) out.push(m);
+    return m;
+  });
+  LINEAR_ISSUE_RE.lastIndex=0;
+  return out;
+}
+/** All Linear tasks mentioned in the open session (name, summary, pane, history, gist). */
+function collectModalTaskKeys(s){
+  const blobs=[];
+  if(s){
+    blobs.push(s.name,s.description,s.summary,s.content);
+    if(s.linear&&s.linear.issue) blobs.push(String(s.linear.issue));
+    if(Array.isArray(s.tags)) blobs.push(s.tags.join(" "));
+  }
+  if(typeof modalHistoryText==="string"&&modalHistoryText) blobs.push(modalHistoryText);
+  if(Array.isArray(modalBook)&&modalBook.length) blobs.push(modalBook.join("\n"));
+  const dig=$("#modaldigest .dgtext"); if(dig&&dig.textContent) blobs.push(dig.textContent);
+  const sc=$("#modalscreen"); if(sc&&sc.dataset.last) blobs.push(sc.dataset.last);
+  const keys=[];
+  for(const b of blobs){
+    for(const k of extractLinearKeys(b)){
+      if(keys.indexOf(k)<0) keys.push(k);
+    }
+  }
+  // Stable order: alphabetical by team then number
+  keys.sort((a,b)=>{
+    const [ap,an]=a.split("-"),[bp,bn]=b.split("-");
+    if(ap!==bp) return ap<bp?-1:1;
+    return (parseInt(an,10)||0)-(parseInt(bn,10)||0);
+  });
+  return keys;
+}
+let modalTasksOpen=true;
+function toggleModalTasks(force){
+  const d=$("#modaltasks"), btn=$("#modaltasksbtn");
+  if(!d) return;
+  if(typeof force==="boolean") modalTasksOpen=force;
+  else modalTasksOpen=!modalTasksOpen;
+  d.classList.toggle("collapsed",!modalTasksOpen);
+  if(btn) btn.classList.toggle("on",modalTasksOpen);
+  try{localStorage.setItem("emux_modal_tasks",modalTasksOpen?"1":"0");}catch(_){}
+}
+function renderModalTasks(){
+  const list=$("#modaltasklist"), countEl=$("#modaltaskcount"), badge=$("#modaltaskbadge");
+  if(!list) return;
+  const keys=collectModalTaskKeys(modalSession);
+  if(countEl) countEl.textContent=String(keys.length);
+  if(badge){
+    badge.textContent=String(keys.length);
+    badge.classList.toggle("on",keys.length>0);
+  }
+  if(!keys.length){
+    list.innerHTML='<div class="mtempty">No Linear tasks mentioned yet. When the head cites <b>AIC-123</b>, <b>EID-45</b>, <b>GMW-9</b>… they land here as links.</div>';
+    return;
+  }
+  list.innerHTML=keys.map(k=>
+    '<a class="mtask linlink" href="'+linearIssueUrl(k)+'" target="_blank" rel="noopener noreferrer" title="Open '+esc(k)+' in Linear">'
+    +'<span class="mtkey">'+esc(k)+'</span><span class="mtgo">↗ Linear</span></a>'
+  ).join("");
+  bindLinlinks(list);
 }
 async function pollFeed(){
   if(!$("#feed").classList.contains("open"))return;

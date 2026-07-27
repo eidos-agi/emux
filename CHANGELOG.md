@@ -1,6 +1,11 @@
 # Changelog
 
 
+## v0.68.11
+
+### Features
+- **Session modal Linear tasks drawer:** opening a chat shows the live head **and** a right-side drawer listing every `TEAM-123` mentioned in that session (name, summary, registry linear link, pane capture, history, gist). Click → Linear. Toggle with **TASKS**; preference remembered.
+
 ## v0.68.10
 
 ### Features
