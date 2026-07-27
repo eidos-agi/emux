@@ -287,7 +287,15 @@ class ChatStore:
         self.db.commit()
         return cur.rowcount > 0
 
-    def _recompute_live_status(self, row: sqlite3.Row, now: float, recent_hours: float) -> str:
+    def _recompute_live_status(
+        self,
+        row: sqlite3.Row,
+        now: float,
+        recent_hours: float,
+        *,
+        claude_live: set[str] | None = None,
+        grok_live: set[str] | None = None,
+    ) -> str:
         """Cheap status without re-reading transcripts: process liveness + mtime."""
         # Durable "resumed into fleet" wins until the human archives it
         if row["status"] == "resumed" and row["fleet_name"]:
@@ -297,9 +305,11 @@ class ChatStore:
         tool = row["tool"]
         sid = row["session_id"]
         if tool == "claude":
-            live = sid.lower() in _claude_live_ids()
+            live_ids = claude_live if claude_live is not None else _claude_live_ids()
+            live = sid.lower() in live_ids
         elif tool == "grok":
-            live = sid in _grok_live_ids()
+            live_ids = grok_live if grok_live is not None else _grok_live_ids()
+            live = sid in live_ids
         else:
             live = False
         if live:
@@ -344,6 +354,10 @@ class ChatStore:
         else:
             pat = re.compile(match, re.I)
 
+        # one process table walk per query — not per row
+        claude_live = _claude_live_ids() if "claude" in tools_set else set()
+        grok_live = _grok_live_ids() if "grok" in tools_set else set()
+
         qn = (q or "").strip().lower()
         hits: list[dict[str, Any]] = []
         counts = {"live": 0, "recent": 0, "stale": 0, "resumed": 0, "archived": 0, "total": 0}
@@ -358,7 +372,9 @@ class ChatStore:
                     continue
             elif pat is not None and not pat.search(blob):
                 continue
-            status = self._recompute_live_status(row, now, recent_hours)
+            status = self._recompute_live_status(
+                row, now, recent_hours, claude_live=claude_live, grok_live=grok_live
+            )
             age_h = max(0.0, (now - float(row["mtime"] or 0)) / 3600.0)
             gm = bool(row["greenmark"])
             prio = int(row["priority"] or 0)
