@@ -1241,11 +1241,13 @@ def _spawn_session(data: dict[str, Any]) -> dict[str, Any]:
     """Create a new session (local or remote) — and KICKSTART it.
 
     A session created from "say what you want to do" should start DOING it, not
-    boot to a blank composer. So when the command is a known agent and there's an
-    intent, we hand that intent to the agent as its opening prompt (`claude
-    <prompt>` / `codex <prompt>`) — the session comes up already working."""
+    boot to a blank composer. For known agents + intent we write a markdown
+    mission brief + product missions.jsonl entry, then launch with a short
+    "load this file" instruction (EID-1164). Never embed the full mission text
+    in the agent argv.
+    """
     import asyncio
-    import shlex
+
     name = (data.get("name") or "").strip()
     if not name:
         return {"ok": False, "error": "missing_name"}
@@ -1257,21 +1259,43 @@ def _spawn_session(data: dict[str, Any]) -> dict[str, Any]:
     intent = (data.get("prompt") or data.get("description") or "").strip()
 
     kicked = False
+    mission_meta: dict[str, Any] = {}
     if command and intent:
         from . import adapters
-        a = adapters.detect(command.split()[0])
-        if a is not None:      # it's a real agent → launch it ON the task
-            command = f"{command} {shlex.quote(intent)}"
+        from . import missions as mission_store
+
+        agent = command.split()[0]
+        if adapters.detect(agent) is not None:
+            registered = mission_store.register_mission(
+                name=name,
+                summary=intent,
+                intent=intent,
+                host=host,
+                cwd=cwd,
+                command=agent,
+                permission_mode=None,
+            )
+            command = str(registered.get("launch_command") or command)
             kicked = True
+            mission_meta = {
+                "mission_id": registered.get("id"),
+                "brief_path": registered.get("brief_path"),
+                "log_path": registered.get("log_path"),
+            }
     try:
+        tags = list(data.get("tags") or [])
+        if mission_meta.get("mission_id"):
+            tags = list(tags) + ["mission", f"mission-{mission_meta['mission_id']}"]
         r = asyncio.run(_server.tmux_spawn(
             name=name, command=command, host=host, cwd=cwd,
             gui=bool(data.get("gui", False)),
             description=(data.get("description") or "").strip() or None,
-            tags=data.get("tags") or None,
+            tags=tags or None,
         ))
         if isinstance(r, dict):
             r["kickstarted"] = kicked
+            if mission_meta:
+                r.update(mission_meta)
         return r
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": str(e)}
@@ -10178,6 +10202,16 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
     from . import skin as _skin
 
     active = _skin.set_active_skin(skin)  # None → $EMUX_SKIN → emux
+    # Bind product durable paths (registry/state) so a restart reloads disk SSOT.
+    try:
+        from . import durable as _dur
+
+        if active and getattr(active, "id", None):
+            os.environ.setdefault("EMUX_PRODUCT", active.id)
+            os.environ.setdefault("EMUX_SKIN", active.id)
+        _dur.apply_env_for_product()
+    except Exception:
+        pass
     # launchd often ships PATH=/usr/bin:/bin — gist + resume need ~/.local/bin/claude
     _ensure_agent_path_env()
     if _server._resolve_tmux() is None:

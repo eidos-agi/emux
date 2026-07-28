@@ -53,19 +53,69 @@ from . import linear as linear_store
 mcp = FastMCP("emux")
 
 
-REGISTRY_PATH = Path(
-    os.environ.get("EMUX_REGISTRY")
-    or os.environ.get("TMUX_MCP_REGISTRY")  # back-compat with prior name
-    or (Path.home() / ".config" / "emux" / "registry.json")
-)
+def _default_registry_path() -> Path:
+    """Product-aware registry path (EMUX_REGISTRY wins; else product config dir)."""
+    env = (os.environ.get("EMUX_REGISTRY") or os.environ.get("TMUX_MCP_REGISTRY") or "").strip()
+    if env:
+        return Path(env).expanduser()
+    try:
+        from .durable import registry_path as _rp
+
+        return _rp()
+    except Exception:
+        return Path.home() / ".config" / "emux" / "registry.json"
 
 
-_STATE_DIR = Path(os.environ.get("EMUX_STATE") or (Path.home() / ".local" / "state" / "emux"))
+def _default_state_dir() -> Path:
+    env = (os.environ.get("EMUX_STATE") or "").strip()
+    if env:
+        return Path(env).expanduser()
+    try:
+        from .durable import state_dir as _sd
+
+        return _sd()
+    except Exception:
+        return Path.home() / ".local" / "state" / "emux"
+
+
+# Tests monkeypatch REGISTRY_PATH / _STATE_DIR as module attributes. rebind_durable_paths()
+# refreshes them after product wrappers set EMUX_PRODUCT / EMUX_REGISTRY / EMUX_STATE.
+REGISTRY_PATH = _default_registry_path()
+_STATE_DIR = _default_state_dir()
 _LOG_DIR = _STATE_DIR / "logs"
 _AUDIT_PATH = _STATE_DIR / "audit.jsonl"
 _GATE_AUDIT_PATH = _STATE_DIR / "gate-approvals.jsonl"
 _GATE_LOCK_PATH = _STATE_DIR / "gate-approvals.lock"
 _GATE_FINGERPRINT_TTL = 60
+_SIGNAL_OFFSETS = _STATE_DIR / "signal_offsets.json"
+_SIGNAL_LEDGER = _STATE_DIR / "signals.jsonl"
+_INBOX_DIR = _STATE_DIR / "inbox"
+_SIGNAL_SEEN = _STATE_DIR / "signal_seen.json"
+_INDEX_PATH = _STATE_DIR / "index.json"
+
+
+def rebind_durable_paths() -> None:
+    """Recompute registry/state paths from current env (after product bind)."""
+    global REGISTRY_PATH, _STATE_DIR, _LOG_DIR, _AUDIT_PATH, _GATE_AUDIT_PATH
+    global _GATE_LOCK_PATH, _SIGNAL_OFFSETS, _SIGNAL_LEDGER, _INBOX_DIR, _SIGNAL_SEEN, _INDEX_PATH
+    REGISTRY_PATH = _default_registry_path()
+    _STATE_DIR = _default_state_dir()
+    _LOG_DIR = _STATE_DIR / "logs"
+    _AUDIT_PATH = _STATE_DIR / "audit.jsonl"
+    _GATE_AUDIT_PATH = _STATE_DIR / "gate-approvals.jsonl"
+    _GATE_LOCK_PATH = _STATE_DIR / "gate-approvals.lock"
+    _SIGNAL_OFFSETS = _STATE_DIR / "signal_offsets.json"
+    _SIGNAL_LEDGER = _STATE_DIR / "signals.jsonl"
+    _INBOX_DIR = _STATE_DIR / "inbox"
+    _SIGNAL_SEEN = _STATE_DIR / "signal_seen.json"
+    _INDEX_PATH = _STATE_DIR / "index.json"
+    try:
+        _STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        _INBOX_DIR.mkdir(parents=True, exist_ok=True)
+        REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
 
 
 def _audit(op: str, args: dict[str, Any], result: Any = None) -> None:
@@ -155,16 +205,11 @@ def _read_log(name: str, lines: int | None = None, strip: bool = True) -> str:
 # = "my whole purpose is finished, I may exit". e.g. echo "@@EMUX@@ IDLE".
 _SIGNAL_RE = re.compile(r"@@EMUX@@[ \t]+(IDLE|READY|DONE|NEED|PROGRESS|ERROR)\b[ \t]*(.*)")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
-_SIGNAL_OFFSETS = _STATE_DIR / "signal_offsets.json"
-_SIGNAL_LEDGER = _STATE_DIR / "signals.jsonl"
+# Signal paths (_SIGNAL_*, _INBOX_DIR) are bound in rebind_durable_paths() above.
 # The ROBUST up-channel: a hook (Claude Code Stop/Notification) or the `emux
 # signal` CLI writes a signal DIRECTLY here, per session — no echoing into the
 # pane, no scraping a redraw-heavy TUI. Read alongside the output sentinel so a
 # hook-injected signal and a scraped one are indistinguishable to a manager.
-_INBOX_DIR = _STATE_DIR / "inbox"
-
-
-_SIGNAL_SEEN = _STATE_DIR / "signal_seen.json"  # per-session id dedup: {name: [ids]}
 _INBOX_RELPATH = ".local/state/emux/inbox"  # a REMOTE box's inbox, relative to its $HOME
 
 
@@ -847,8 +892,7 @@ def _save_registry(registry: dict[str, dict[str, Any]]) -> None:
 # emux once saw. This is what turns emux from a driver of LIVE sessions into a
 # tracker of ALL of them (running or ended). Scope is deliberate: emux tracks
 # TERMINAL sessions; searching Claude CONVERSATIONS by content is resume-resume's
-# job — compose them, don't duplicate.
-_INDEX_PATH = _STATE_DIR / "index.json"
+# job — compose them, don't duplicate. (_INDEX_PATH rebound via rebind_durable_paths)
 
 
 def _load_index() -> dict[str, dict[str, Any]]:

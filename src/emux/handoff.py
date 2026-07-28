@@ -4,15 +4,19 @@ Thin by design. See docs/handoff-procedure.md.
 
   install  — park KNOWLEDGE + this-chat-handoff + tmux + register
   verify   — structural only (no LLM)
-  boot     — optional start claude
+  boot     — optional start claude|grok (--runtime / product.json / EMUX_HANDOFF_RUNTIME)
   quiz     — optional one-shot READY token
   status   — print state
   init     — write a short KNOWLEDGE.md template if missing
+
+On install, prior KNOWLEDGE.md (≥5 lines, content differs) is archived under
+KNOWLEDGE-archive/YYYYMMDD-HHMMSS.md in repo and seat state.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -159,6 +163,33 @@ def cmd_init(product: str, repo: str | Path | None = None, force: bool = False) 
     return 0
 
 
+def _archive_knowledge_if_needed(existing: Path, incoming: Path) -> Path | None:
+    """If existing KNOWLEDGE is substantial and differs from incoming, archive it.
+
+    Returns archive path or None.
+    """
+    if not existing.is_file():
+        return None
+    try:
+        old = existing.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if len(old.splitlines()) < 5:
+        return None
+    try:
+        new = incoming.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        new = ""
+    if old == new:
+        return None
+    archive_dir = existing.parent / "KNOWLEDGE-archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    dest = archive_dir / f"{stamp}.md"
+    shutil.copy2(existing, dest)
+    return dest
+
+
 def cmd_install(
     product: str,
     *,
@@ -178,8 +209,14 @@ def cmd_install(
         return 2
 
     # Only KNOWLEDGE + handoff pointer — never clobber product CLAUDE/ALWAYS.
-    shutil.copy2(ksrc, state / "KNOWLEDGE.md")
+    # Archive prior mission packs before replace (EID-1162).
     dest_k = root / "KNOWLEDGE.md"
+    for label, prior in (("repo", dest_k), ("state", state / "KNOWLEDGE.md")):
+        archived = _archive_knowledge_if_needed(prior, ksrc)
+        if archived:
+            print(f"handoff: archived prior {label} KNOWLEDGE → {archived}")
+
+    shutil.copy2(ksrc, state / "KNOWLEDGE.md")
     if ksrc.resolve() != dest_k.resolve():
         shutil.copy2(ksrc, dest_k)
 
@@ -228,9 +265,35 @@ def _looks_like_claude_command(name: str) -> bool:
     if low in ("claude", "claude.exe") or low.startswith("claude"):
         return True
     # version-shaped process name used by Claude Code builds
-    import re
-
     return bool(re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][\w.]+)?", n))
+
+
+def _looks_like_grok_command(name: str) -> bool:
+    n = (name or "").strip().lower()
+    return n in ("grok", "grok.exe") or n.startswith("grok")
+
+
+def _pane_children_args(seat: str) -> list[tuple[str, str]]:
+    """Return (comm, args) for direct children of the seat pane shell."""
+    r = _run(["tmux", "list-panes", "-t", seat, "-F", "#{pane_pid}"])
+    ppid = (r.stdout or "").strip().splitlines()[:1]
+    if not ppid:
+        return []
+    ps = _run(["ps", "-ax", "-o", "pid=,ppid=,comm=,args="])
+    if ps.returncode != 0:
+        return []
+    parent = ppid[0]
+    out: list[tuple[str, str]] = []
+    for line in (ps.stdout or "").splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 3:
+            continue
+        _pid, p_ppid, comm = parts[0], parts[1], parts[2]
+        args = parts[3] if len(parts) > 3 else ""
+        if p_ppid != parent:
+            continue
+        out.append((comm, args))
+    return out
 
 
 def _claude_running_in_seat(seat: str) -> bool:
@@ -240,24 +303,9 @@ def _claude_running_in_seat(seat: str) -> bool:
         return True
     r = _run(["tmux", "list-panes", "-t", seat, "-F", "#{pane_pid}"])
     ppid = (r.stdout or "").strip().splitlines()[:1]
-    if not ppid:
-        return False
-    # Exact name (older builds)
-    if _run(["pgrep", "-P", ppid[0], "-x", "claude"]).returncode == 0:
+    if ppid and _run(["pgrep", "-P", ppid[0], "-x", "claude"]).returncode == 0:
         return True
-    # Children of the pane shell: match name or args containing claude CLI
-    ps = _run(["ps", "-ax", "-o", "pid=,ppid=,comm=,args="])
-    if ps.returncode != 0:
-        return False
-    parent = ppid[0]
-    for line in (ps.stdout or "").splitlines():
-        parts = line.split(None, 3)
-        if len(parts) < 3:
-            continue
-        _pid, p_ppid, comm = parts[0], parts[1], parts[2]
-        args = parts[3] if len(parts) > 3 else ""
-        if p_ppid != parent:
-            continue
+    for comm, args in _pane_children_args(seat):
         if _looks_like_claude_command(comm):
             return True
         if "/claude" in args or args.strip().startswith("claude "):
@@ -265,21 +313,92 @@ def _claude_running_in_seat(seat: str) -> bool:
     return False
 
 
-def cmd_boot(product: str, *, repo: str | Path | None = None, seat: str | None = None) -> int:
+def _grok_running_in_seat(seat: str) -> bool:
+    """True if the seat pane is already running Grok Build."""
+    cmd_r = _run(["tmux", "list-panes", "-t", seat, "-F", "#{pane_current_command}"])
+    if _looks_like_grok_command((cmd_r.stdout or "").strip()):
+        return True
+    r = _run(["tmux", "list-panes", "-t", seat, "-F", "#{pane_pid}"])
+    ppid = (r.stdout or "").strip().splitlines()[:1]
+    if ppid and _run(["pgrep", "-P", ppid[0], "-x", "grok"]).returncode == 0:
+        return True
+    for comm, args in _pane_children_args(seat):
+        if _looks_like_grok_command(comm):
+            return True
+        if "/grok" in args or args.strip().startswith("grok "):
+            return True
+    return False
+
+
+def _resolve_boot_runtime(
+    product: str,
+    *,
+    repo: str | Path | None,
+    runtime: str | None,
+) -> str:
+    """claude|grok — flag > EMUX_HANDOFF_RUNTIME > product.json runtime > claude."""
+    if runtime and str(runtime).strip():
+        r = str(runtime).strip().lower()
+    else:
+        env = (os.environ.get("EMUX_HANDOFF_RUNTIME") or "").strip().lower()
+        if env:
+            r = env
+        else:
+            r = "claude"
+            try:
+                root = resolve_repo(product, repo)
+                pj = root / "product.json"
+                if pj.is_file():
+                    data = json.loads(pj.read_text(encoding="utf-8"))
+                    raw = (data.get("runtime") or data.get("agent") or "").strip().lower()
+                    if raw in ("claude", "grok"):
+                        r = raw
+            except Exception:
+                pass
+    if r not in ("claude", "grok"):
+        raise ValueError(f"unsupported runtime {r!r}; use claude or grok")
+    return r
+
+
+def cmd_boot(
+    product: str,
+    *,
+    repo: str | Path | None = None,
+    seat: str | None = None,
+    runtime: str | None = None,
+) -> int:
     root = resolve_repo(product, repo)
     seat_n = seat_name(product, seat)
     if not _tmux_has(seat_n):
         print(f"handoff: seat missing — run install ({seat_n})", file=__import__("sys").stderr)
         return 2
-    if _claude_running_in_seat(seat_n):
-        print("handoff: claude already running")
-        return 0
+    try:
+        rt = _resolve_boot_runtime(product, repo=repo, runtime=runtime)
+    except ValueError as e:
+        print(f"handoff: {e}", file=__import__("sys").stderr)
+        return 2
+
+    if rt == "claude":
+        if _claude_running_in_seat(seat_n):
+            print("handoff: claude already running")
+            return 0
+        if not shutil.which("claude"):
+            print("handoff: claude not on PATH", file=__import__("sys").stderr)
+            return 2
+        launch = f"cd {root} && claude --dangerously-skip-permissions"
+    else:
+        if _grok_running_in_seat(seat_n):
+            print("handoff: grok already running")
+            return 0
+        if not shutil.which("grok"):
+            print("handoff: grok not on PATH", file=__import__("sys").stderr)
+            return 2
+        launch = f"cd {root} && grok"
+
     _run(["tmux", "send-keys", "-t", seat_n, "C-c"])
     time.sleep(0.2)
-    # Use send-keys with literal command
-    launch = f"cd {root} && claude --dangerously-skip-permissions"
     _run(["tmux", "send-keys", "-t", seat_n, launch, "Enter"])
-    print(f"handoff: launched claude in {seat_n}")
+    print(f"handoff: launched {rt} in {seat_n}")
     return 0
 
 
@@ -457,6 +576,13 @@ def main(argv: list[str] | None = None) -> int:
             sp.add_argument("--source-session", default=None)
         if name == "init":
             sp.add_argument("--force", action="store_true")
+        if name == "boot":
+            sp.add_argument(
+                "--runtime",
+                default=None,
+                choices=("claude", "grok"),
+                help="agent to launch (default: product.json runtime, EMUX_HANDOFF_RUNTIME, or claude)",
+            )
         if name == "quiz":
             sp.add_argument("--timeout", type=int, default=120)
     args = p.parse_args(argv)
@@ -474,7 +600,12 @@ def main(argv: list[str] | None = None) -> int:
             seat=args.seat,
         )
     if args.cmd == "boot":
-        return cmd_boot(args.product, repo=args.repo, seat=args.seat)
+        return cmd_boot(
+            args.product,
+            repo=args.repo,
+            seat=args.seat,
+            runtime=getattr(args, "runtime", None),
+        )
     if args.cmd == "verify":
         return cmd_verify(args.product, repo=args.repo, seat=args.seat)
     if args.cmd == "quiz":

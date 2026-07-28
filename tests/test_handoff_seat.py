@@ -114,3 +114,66 @@ def test_emux_handoff_init_template(tmp_path: Path) -> None:
     # second init without force leaves it
     code2 = h.cmd_init("newprod", repo=repo)
     assert code2 == 0
+
+
+def test_handoff_install_archives_prior_knowledge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from emux import handoff as h
+
+    product = "archivetest"
+    repo = tmp_path / "prod"
+    repo.mkdir()
+    old = textwrap.dedent(
+        """\
+        # Old mission
+        Finance pack line 2
+        Finance pack line 3
+        Finance pack line 4
+        Finance pack line 5
+        """
+    )
+    (repo / "KNOWLEDGE.md").write_text(old, encoding="utf-8")
+    new_k = repo / "KNOWLEDGE-new.md"
+    new_k.write_text(
+        textwrap.dedent(
+            """\
+            # New mission
+            Kids pack line 2
+            Kids pack line 3
+            Kids pack line 4
+            Kids pack line 5
+            """
+        ),
+        encoding="utf-8",
+    )
+    seat = f"test-archive-{os.getpid()}"
+    state = tmp_path / "state"
+    monkeypatch.setenv("EMUX_HANDOFF_STATE_ROOT", str(state))
+    # seed prior state knowledge too
+    (state / seat).mkdir(parents=True)
+    (state / seat / "KNOWLEDGE.md").write_text(old, encoding="utf-8")
+
+    try:
+        code = h.cmd_install(product, repo=repo, knowledge=new_k, seat=seat)
+        assert code == 0
+        assert "New mission" in (repo / "KNOWLEDGE.md").read_text(encoding="utf-8")
+        archives = list((repo / "KNOWLEDGE-archive").glob("*.md"))
+        assert archives, "expected repo KNOWLEDGE-archive"
+        assert "Old mission" in archives[0].read_text(encoding="utf-8")
+        state_archives = list((state / seat / "KNOWLEDGE-archive").glob("*.md"))
+        assert state_archives, "expected state KNOWLEDGE-archive"
+    finally:
+        subprocess.run(["tmux", "kill-session", "-t", seat], capture_output=True)
+
+
+def test_resolve_boot_runtime_flag_and_product_json(tmp_path: Path) -> None:
+    from emux import handoff as h
+
+    repo = tmp_path / "prod"
+    repo.mkdir()
+    (repo / "product.json").write_text('{"runtime": "grok"}\n', encoding="utf-8")
+    assert h._resolve_boot_runtime("x", repo=repo, runtime=None) == "grok"
+    assert h._resolve_boot_runtime("x", repo=repo, runtime="claude") == "claude"
+    with pytest.raises(ValueError):
+        h._resolve_boot_runtime("x", repo=repo, runtime="codex")

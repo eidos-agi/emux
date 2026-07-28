@@ -128,6 +128,9 @@ def _plan_prompt(transcript: list[str]) -> str:
     return (
         "You are emux's mission planner. The user describes what they want; you "
         "turn it into a tmux session spec they will confirm before anything runs.\n\n"
+        "CRITICAL: never put the mission text into `command`. emux writes a "
+        "markdown brief + jsonl log and launches the agent with a short "
+        "'load this file' instruction. Your job is name/host/cwd/agent only.\n\n"
         f"KNOWN REMOTE HOSTS (ssh destinations already used by this registry): {hosts or '(none)'}\n"
         "host must be null for the local machine, or one of the known hosts, or an "
         "ssh destination the user explicitly named.\n\n"
@@ -139,8 +142,8 @@ def _plan_prompt(transcript: list[str]) -> str:
         ' "name": "<short kebab-case registry/session name>",\n'
         ' "host": <"ssh-dest" or null>,\n'
         ' "cwd": <"absolute working dir" or null>,\n'
-        ' "command": "<the exact shell command to launch in the session, usually '
-        "claude '<mission prompt>' — single-quote the prompt>\",\n"
+        ' "command": "<agent binary only: usually claude, or grok/codex, or a '
+        'non-agent shell tool like htop — NEVER the mission prompt>",\n'
         ' "permission_mode": "<default|acceptEdits|bypassPermissions>"}\n'
         "permission_mode governs how unattended a claude mission can run: "
         '"bypassPermissions" for read-only/investigate/report missions (it can '
@@ -218,7 +221,12 @@ def _mission_path(plan: dict[str, Any]) -> str:
 
 def _new_mission_chat() -> dict[str, Any] | None:
     """Chat with `claude -p` until the user confirms a session spec. Returns the
-    confirmed plan dict, or None on abort. Fixed-cost CLI — never the API."""
+    confirmed plan dict, or None on abort. Fixed-cost CLI — never the API.
+
+    Plan includes `_transcript` and `_intent` for mission-brief registration.
+    The launch command is built later from the brief path — not from embedded
+    mission text in the model plan.
+    """
     claude = shutil.which("claude")
     if claude is None:
         print("emux: claude CLI not on PATH (needed for new-mission planning).", file=sys.stderr)
@@ -258,21 +266,25 @@ def _new_mission_chat() -> dict[str, Any] | None:
             transcript.append(f"user: {answer}")
             continue
 
-        print("\n  ━━ mission plan ━━")
-        print(f"  summary   {plan.get('summary', '?')}")
-        print(f"  name      {plan.get('name', '?')}")
-        print(f"  host      {plan.get('host') or 'local'}")
-        print(f"  cwd       {plan.get('cwd') or '(default)'}")
-        plan["command"] = _apply_permission_mode(plan)
+        # Normalize agent command to binary only (strip any accidental prompt).
+        raw_cmd = str(plan.get("command") or "claude").strip() or "claude"
+        agent_bin = (raw_cmd.split() or ["claude"])[0]
+        plan["command"] = agent_bin
         mode = str(plan.get("permission_mode") or "default")
         if mode not in _PERMISSION_MODES:
             mode = "default"
+            plan["permission_mode"] = mode
         perms_note = {
             "default": "gated — attach to approve each step",
             "acceptEdits": "edits auto-approved; shell commands still gate",
             "bypassPermissions": "fully unattended — no approval prompts",
         }[mode]
-        print(f"  command   {plan['command']}")
+        print("\n  ━━ mission plan ━━")
+        print(f"  summary   {plan.get('summary', '?')}")
+        print(f"  name      {plan.get('name', '?')}")
+        print(f"  host      {plan.get('host') or 'local'}")
+        print(f"  cwd       {plan.get('cwd') or '(default)'}")
+        print(f"  agent     {agent_bin}  (brief file + load path — not an embedded prompt)")
         print(f"  perms     {mode} ({perms_note})")
         print(f"  path      {_mission_path(plan)}")
         print(
@@ -280,24 +292,33 @@ def _new_mission_chat() -> dict[str, Any] | None:
         )
         answer = input("\n  start it? [Y/n, or type changes]: ").strip()
         if answer.lower() in {"", "y", "yes"}:
+            plan["_transcript"] = list(transcript)
+            plan["_intent"] = want
             return plan
         if answer.lower() in {"n", "no", "q"}:
             print("  aborted.")
             return None
-        transcript.append(f"planner proposed: {json.dumps(plan)}")
+        transcript.append(f"planner proposed: {json.dumps({k: v for k, v in plan.items() if not str(k).startswith('_')})}")
         transcript.append(f"user feedback: {answer}")
 
 
 def cmd_new_mission() -> int:
-    """`n` in the TUI: describe a mission, confirm the AI's spec, spawn it."""
+    """`n` in the TUI / `emux new` / `amux new`: plan → brief.md + jsonl → spawn.
+
+    The agent is kicked with a short "load this markdown" instruction. The full
+    mission lives in the product mission brief + missions.jsonl log (EID-1164).
+    """
+    from . import missions as mission_store
+    from .server import _session_exists, tmux_spawn
+
     plan = _new_mission_chat()
     if plan is None:
         return 0
-    if not plan.get("name") or not plan.get("command"):
-        print("emux: plan is missing a name or command; not starting.", file=sys.stderr)
+    if not plan.get("name"):
+        print("emux: plan is missing a name; not starting.", file=sys.stderr)
         return 1
-
-    from .server import _session_exists, tmux_spawn
+    if not plan.get("command"):
+        plan["command"] = "claude"
 
     # Name-collision guard: tmux_spawn kills any same-name session, and a live
     # agent session is state you can't respawn. Never let that happen silently.
@@ -321,14 +342,34 @@ def cmd_new_mission() -> int:
             plan["name"] = name
             print(f"  starting as '{name}'.")
 
+    intent = str(plan.get("_intent") or mission_store.intent_from_transcript(plan.get("_transcript")) or "")
+    summary = str(plan.get("summary") or intent or name)
+    registered = mission_store.register_mission(
+        name=name,
+        summary=summary,
+        intent=intent or summary,
+        host=host if isinstance(host, str) else None,
+        cwd=plan.get("cwd") or None,
+        permission_mode=str(plan.get("permission_mode") or "default"),
+        command=str(plan.get("command") or "claude"),
+        transcript=plan.get("_transcript") if isinstance(plan.get("_transcript"), list) else None,
+    )
+    launch = str(registered.get("launch_command") or "")
+    if not launch:
+        print("emux: mission register produced no launch command.", file=sys.stderr)
+        return 1
+    print(f"\n  brief     {registered['brief_path']}")
+    print(f"  log       {registered['log_path']}  (id={registered['id']})")
+    print(f"  launch    {launch[:120]}{'…' if len(launch) > 120 else ''}")
+
     result = asyncio.run(
         tmux_spawn(
             name=name,
-            command=str(plan["command"]),
+            command=launch,
             host=host,
             cwd=plan.get("cwd") or None,
-            description=plan.get("summary") or None,
-            tags=["mission"],
+            description=summary,
+            tags=["mission", f"mission-{registered['id']}"],
         )
     )
     if not result.get("ok"):
@@ -336,6 +377,7 @@ def cmd_new_mission() -> int:
         return 1
     where = f" on {result['host']}" if result.get("host") else ""
     print(f"\n  started '{result['name']}'{where}.")
+    print(f"  consult   read {registered['brief_path']}")
 
     # Liftoff proof: "tmux accepted the keys" is not "the mission is running".
     # Capture the pane after a beat so a dead command (claude not on PATH, not
@@ -1374,7 +1416,12 @@ def cmd_handoff(args: argparse.Namespace) -> int:
             seat=seat,
         )
     if sub == "boot":
-        return _handoff.cmd_boot(product_s, repo=repo, seat=seat)
+        return _handoff.cmd_boot(
+            product_s,
+            repo=repo,
+            seat=seat,
+            runtime=getattr(args, "runtime", None),
+        )
     if sub == "verify":
         return _handoff.cmd_verify(product_s, repo=repo, seat=seat)
     if sub == "quiz":
@@ -1411,7 +1458,11 @@ def cmd_head(args: argparse.Namespace) -> int:
 
 
 def cmd_schedule(args: argparse.Namespace) -> int:
-    """Cron-style message jobs stored per product (e.g. ~/.config/amux/schedule.json)."""
+    """Cron-style message jobs stored per product (e.g. ~/.config/amux/schedule.json).
+
+    Firing does not require `emux web` — use `emux schedule tick` (launchd on amux)
+    or `emux schedule run <id>`. Jobs + last_run live on disk.
+    """
     from . import schedule as _sched
 
     sub = getattr(args, "schedule_cmd", None)
@@ -1464,8 +1515,72 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             print(f"emux schedule: fire failed: {r.get('error')}", file=sys.stderr)
             return 1
         return 0 if r.get("ok") else 1
-    print("emux schedule: need list|add|rm|run", file=sys.stderr)
+    if sub == "tick":
+        # Independent of web poll — safe for launchd StartInterval.
+        fired = _sched.tick_once()
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": True, "fired": fired, "n": len(fired)}, indent=2, default=str))
+            return 0
+        if not fired:
+            print("schedule tick: nothing due")
+            return 0
+        for r in fired:
+            st = "ok" if r.get("ok") else f"err={r.get('error')}"
+            print(f"schedule tick: {r.get('id')} → {r.get('target')} ({st})")
+        return 0 if all(r.get("ok") for r in fired) else 1
+    print("emux schedule: need list|add|rm|run|tick", file=sys.stderr)
     return 2
+
+
+def cmd_durable(args: argparse.Namespace) -> int:
+    """Show product durable SSOT on disk (no web required)."""
+    from . import durable as _dur
+
+    product = getattr(args, "product", None) or None
+    if product:
+        os.environ["EMUX_PRODUCT"] = str(product).strip().lower()
+    if getattr(args, "seed", False):
+        seeded = _dur.seed_product_store(product)
+        _dur.apply_env_for_product(product)
+        if getattr(args, "json", False):
+            print(json.dumps(seeded, indent=2))
+        else:
+            print(f"durable seed: product={seeded['product']}")
+            print(f"  registry  {seeded['registry']}  seeded={seeded['registry_seeded']}")
+            print(f"  config    {seeded['config_dir']}")
+            print(f"  state     {seeded['state_dir']}")
+        return 0
+    inv = _dur.inventory(product)
+    if getattr(args, "json", False):
+        print(json.dumps(inv, indent=2))
+        return 0
+    print(f"product  {inv['product']}  — {inv['ssot']}")
+    print(f"config   {inv['config_dir']}")
+    print(f"state    {inv['state_dir']}")
+    for key in (
+        "registry",
+        "chats_db",
+        "schedule",
+        "schedule_log",
+        "missions_dir",
+        "missions_log",
+        "stream_logs",
+        "inbox",
+        "audit",
+        "signals",
+        "index",
+    ):
+        row = inv.get(key) or {}
+        mark = "✓" if row.get("exists") else "·"
+        extra = ""
+        if key == "registry" and "entries" in row:
+            extra = f"  entries={row['entries']}"
+        if key == "missions_dir" and "briefs" in row:
+            extra = f"  briefs={row['briefs']}"
+        if row.get("bytes") is not None:
+            extra += f"  {row['bytes']}B"
+        print(f"  {mark} {key:14} {row.get('path')}{extra}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1904,7 +2019,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_sched = sub.add_parser(
         "schedule",
-        help="cron-style message jobs (in-process; product-scoped schedule.json)",
+        help="cron-style message jobs (product-scoped schedule.json; tick works without web)",
     )
     sched_sub = p_sched.add_subparsers(dest="schedule_cmd")
     sched_sub.add_parser("list", help="list jobs + next fire time")
@@ -1940,6 +2055,27 @@ def main(argv: list[str] | None = None) -> int:
     p_sched_run = sched_sub.add_parser("run", help="fire a job now (does not wait for cron)")
     p_sched_run.add_argument("id", help="job id")
     p_sched_run.add_argument("--json", action="store_true", help="print result JSON")
+    p_sched_tick = sched_sub.add_parser(
+        "tick",
+        help="fire any due jobs once (no web required; for launchd StartInterval)",
+    )
+    p_sched_tick.add_argument("--json", action="store_true", help="print result JSON")
+
+    p_durable = sub.add_parser(
+        "durable",
+        help="show product durable SSOT on disk (registry/chats/schedule/missions/state)",
+    )
+    p_durable.add_argument(
+        "--product",
+        default=None,
+        help="product id (default: EMUX_PRODUCT / skin)",
+    )
+    p_durable.add_argument(
+        "--seed",
+        action="store_true",
+        help="create dirs + seed registry from shared emux if product registry missing",
+    )
+    p_durable.add_argument("--json", action="store_true", help="print JSON inventory")
 
     p_handoff = sub.add_parser(
         "handoff",
@@ -1949,7 +2085,7 @@ def main(argv: list[str] | None = None) -> int:
     for hname, hhelp in (
         ("init", "write KNOWLEDGE.md template if missing"),
         ("install", "park KNOWLEDGE.md + create/register <product>-this-chat"),
-        ("boot", "optional: start Claude in the seat"),
+        ("boot", "optional: start Claude or Grok in the seat"),
         ("verify", "structural gate (deterministic, no LLM)"),
         ("quiz", "optional one-shot LLM; sole-line READY_FOR_HANDOFF=yes"),
         ("status", "seat + knowledge + last verify/quiz"),
@@ -1969,10 +2105,27 @@ def main(argv: list[str] | None = None) -> int:
             hp.add_argument("--source-session", default=None, help="source chat id for handoff file")
         if hname == "init":
             hp.add_argument("--force", action="store_true", help="overwrite existing KNOWLEDGE.md")
+        if hname == "boot":
+            hp.add_argument(
+                "--runtime",
+                default=None,
+                choices=("claude", "grok"),
+                help="agent to launch (default: product.json runtime, EMUX_HANDOFF_RUNTIME, or claude)",
+            )
         if hname == "quiz":
             hp.add_argument("--timeout", type=int, default=120, help="emux ask timeout")
 
     args = parser.parse_args(argv)
+
+    # Product wrappers (amux/gmux/…) set EMUX_PRODUCT — bind durable disk paths
+    # before any registry/state I/O so web-down still hits product SSOT.
+    if (os.environ.get("EMUX_PRODUCT") or os.environ.get("EMUX_SKIN") or "").strip():
+        try:
+            from . import durable as _dur
+
+            _dur.apply_env_for_product()
+        except Exception:
+            pass
 
     if args.cmd is None:
         # Bare `emux` → TUI picker.
@@ -2049,6 +2202,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_head(args)
     if args.cmd == "schedule":
         return cmd_schedule(args)
+    if args.cmd == "durable":
+        return cmd_durable(args)
     if args.cmd == "doctor":
         return cmd_doctor(args)
     if args.cmd == "handoff":

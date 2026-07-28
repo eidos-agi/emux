@@ -1007,17 +1007,29 @@ def test_intent_routing_and_kickstart():
     assert web._routing_prefs()["company_host"]["eidos"] == "daniels-mac-mini"
 
 
-def test_spawn_kickstarts_the_agent_with_the_intent(monkeypatch):
+def test_spawn_kickstarts_the_agent_with_the_intent(monkeypatch, tmp_path):
+    from emux import missions as mission_store
     from emux import server, web
+
+    cfg = tmp_path / "emux"
+    cfg.mkdir()
+    monkeypatch.setattr(mission_store, "config_dir", lambda product=None: cfg)
+
     seen = {}
+
     async def fake_spawn(**kw):
         seen.update(kw)
         return {"ok": True, "name": kw["name"]}
+
     monkeypatch.setattr(server, "tmux_spawn", fake_spawn)
-    # an agent command + an intent → the intent becomes the agent's opening prompt
+    # agent + intent → brief.md + jsonl; launch embeds path only (EID-1164)
     r = web._spawn_session({"name": "x", "command": "claude", "prompt": "build the thing"})
     assert r["kickstarted"] is True
-    assert seen["command"] == "claude 'build the thing'"
+    assert r.get("brief_path")
+    assert r.get("mission_id")
+    assert "build the thing" not in seen["command"]
+    assert r["brief_path"] in seen["command"]
+    assert seen["command"].startswith("claude ")
     # a PLAIN SHELL is not an agent → no kickstart, command untouched
     seen.clear()
     r = web._spawn_session({"name": "y", "command": "", "prompt": "build the thing"})

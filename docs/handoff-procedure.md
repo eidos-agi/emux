@@ -21,6 +21,7 @@ emux handoff verify --product directmux
 
 # 4. Optional
 emux handoff boot --product directmux
+emux handoff boot --product reevux --runtime grok   # claude (default) | grok
 emux handoff quiz --product directmux   # one-shot; sole-line READY_FOR_HANDOFF=yes
 ```
 
@@ -29,8 +30,13 @@ Product wrapper: `bin/handoff` (same subcommands).
 ## What install does
 
 - Copies **only** `KNOWLEDGE.md` (+ `this-chat-handoff.md`)
+- If prior `KNOWLEDGE.md` is ≥5 lines and differs, archives it to `KNOWLEDGE-archive/YYYYMMDD-HHMMSS.md` (repo + seat state)
 - Creates/registers `<product>-this-chat` if needed  
 - **Does not** overwrite product `CLAUDE.md` / `ALWAYS.md` / `AGENTS.md`
+
+## Boot runtime
+
+Order: `--runtime` → `$EMUX_HANDOFF_RUNTIME` → `product.json` `runtime`/`agent` → `claude`.
 
 ## Structural verify (default gate)
 
