@@ -10287,12 +10287,16 @@ def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bo
                 pass
             n += 1
             if n % schedule_every == 0:
-                try:
-                    from . import schedule as _sched
+                # When an external runner owns cron (amux launchd schedule tick),
+                # skip in-process fire so we do not double-send (EID-1168).
+                ext = (os.environ.get("EMUX_SCHEDULE_EXTERNAL") or "").strip().lower()
+                if ext not in ("1", "true", "yes", "launchd"):
+                    try:
+                        from . import schedule as _sched
 
-                    _sched.tick_once()
-                except Exception:  # noqa: BLE001 — schedule must not kill the daemon
-                    pass
+                        _sched.tick_once()
+                    except Exception:  # noqa: BLE001 — schedule must not kill the daemon
+                        pass
             stop.wait(_POLL_INTERVAL)
 
     poller = threading.Thread(target=poll_loop, daemon=True)

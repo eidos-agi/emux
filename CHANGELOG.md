@@ -5,6 +5,7 @@
 ### Fixes
 - **EID-1164 — `emux new` / `amux new` mission contract:** no longer embeds the full mission as `claude 'long prompt…'`. Writes a product-scoped markdown brief (`~/.config/<product>/missions/*.md`) + durable jsonl log (`~/.config/<product>/logs/missions.jsonl`), then launches the agent with a short “load this file” instruction. Web spawn kickstart uses the same path. The brief/log is the consult for the fired-up agent.
 - **EID-1167 — durable state without web:** product-aware registry/state paths (`emux.durable`); `emux schedule tick` fires due jobs with no web process; `emux durable` inventories SSOT on disk. amux install seeds `~/.config/amux/registry.json` + launchd `com.eidos.amux-schedule` (60s).
+- **EID-1168 — state migrate + dual-tick safety:** seed copies missing historical files from `~/.local/state/emux` into product state (never overwrite). Web skips in-process schedule tick when `EMUX_SCHEDULE_EXTERNAL=1` (amux web launchd).
 
 ## v0.68.18
 

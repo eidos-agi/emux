@@ -86,10 +86,59 @@ def shared_emux_state() -> Path:
     return Path.home() / ".local" / "state" / "emux"
 
 
-def seed_product_store(product: str | None = None) -> dict[str, Any]:
-    """Ensure product config/state dirs exist; seed registry from shared emux once.
+_STATE_SEED_FILES = (
+    "audit.jsonl",
+    "signals.jsonl",
+    "signal_offsets.json",
+    "signal_seen.json",
+    "index.json",
+    "linear_evidence.jsonl",
+    "channel_informed.json",
+    "comms.jsonl",
+    "reads.json",
+    "hopper.jsonl",
+    "hopper-results.jsonl",
+)
 
-    Safe to call repeatedly. Does not overwrite a non-empty product registry.
+
+def _copy_missing_file(src: Path, dst: Path) -> bool:
+    """Copy src→dst only if dst missing. Never overwrite product truth. Returns True if copied."""
+    if not src.is_file() or dst.exists():
+        return False
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        return True
+    except OSError:
+        return False
+
+
+def _copy_missing_tree(src: Path, dst: Path, *, limit: int = 5000) -> int:
+    """Copy files under src into dst when dest path is absent. Returns count copied."""
+    if not src.is_dir():
+        return 0
+    n = 0
+    try:
+        for root, _dirs, files in os.walk(src):
+            rel_root = Path(root).relative_to(src)
+            for name in files:
+                if n >= limit:
+                    return n
+                s = Path(root) / name
+                d = dst / rel_root / name
+                if _copy_missing_file(s, d):
+                    n += 1
+    except OSError:
+        return n
+    return n
+
+
+def seed_product_store(product: str | None = None) -> dict[str, Any]:
+    """Ensure product config/state dirs exist; seed registry + historical state once.
+
+    Safe to call repeatedly. Does not overwrite a non-empty product registry or
+    existing product state files. Copies from shared `~/.local/state/emux` and
+    `~/.config/emux/registry.json` when product paths are missing (EID-1168).
     """
     pid = (product or product_id()).strip().lower() or "emux"
     cfg = _config_root(pid)
@@ -100,6 +149,7 @@ def seed_product_store(product: str | None = None) -> dict[str, Any]:
     (cfg / "logs").mkdir(parents=True, exist_ok=True)
     (st / "logs").mkdir(parents=True, exist_ok=True)
     (st / "inbox").mkdir(parents=True, exist_ok=True)
+    (st / "channels").mkdir(parents=True, exist_ok=True)
 
     reg = registry_path(pid)
     seeded_reg = False
@@ -112,6 +162,20 @@ def seed_product_store(product: str | None = None) -> dict[str, Any]:
             reg.write_text("{}\n", encoding="utf-8")
             seeded_reg = True
 
+    # Historical state: copy-missing from shared emux into product state (no deletes).
+    shared_st = shared_emux_state()
+    state_files_copied: list[str] = []
+    logs_copied = 0
+    inbox_copied = 0
+    channels_copied = 0
+    if pid not in ("emux", "") and shared_st.is_dir() and shared_st.resolve() != st.resolve():
+        for name in _STATE_SEED_FILES:
+            if _copy_missing_file(shared_st / name, st / name):
+                state_files_copied.append(name)
+        logs_copied = _copy_missing_tree(shared_st / "logs", st / "logs")
+        inbox_copied = _copy_missing_tree(shared_st / "inbox", st / "inbox")
+        channels_copied = _copy_missing_tree(shared_st / "channels", st / "channels")
+
     return {
         "ok": True,
         "product": pid,
@@ -121,6 +185,10 @@ def seed_product_store(product: str | None = None) -> dict[str, Any]:
         "registry_seeded": seeded_reg,
         "registry_exists": reg.is_file(),
         "registry_bytes": reg.stat().st_size if reg.is_file() else 0,
+        "state_files_copied": state_files_copied,
+        "logs_copied": logs_copied,
+        "inbox_copied": inbox_copied,
+        "channels_copied": channels_copied,
     }
 
 

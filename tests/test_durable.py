@@ -63,3 +63,34 @@ def test_apply_env_sets_registry_and_state(monkeypatch, tmp_path):
     assert out["EMUX_REGISTRY"].endswith("registry.json")
     assert Path(out["EMUX_REGISTRY"]).is_file()
     assert Path(out["EMUX_STATE"]).is_dir()
+
+
+def test_seed_copies_missing_historical_state(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    shared = home / ".local" / "state" / "emux"
+    prod = home / ".local" / "state" / "amux"
+    shared.mkdir(parents=True)
+    (shared / "audit.jsonl").write_text('{"op":"old"}\n', encoding="utf-8")
+    (shared / "signals.jsonl").write_text('{"t":1}\n', encoding="utf-8")
+    (shared / "logs").mkdir()
+    (shared / "logs" / "s1.log").write_text("pane\n", encoding="utf-8")
+    (shared / "inbox").mkdir()
+    (shared / "inbox" / "s1.jsonl").write_text('{"k":"IDLE"}\n', encoding="utf-8")
+
+    monkeypatch.setenv("EMUX_PRODUCT", "amux")
+    monkeypatch.setattr(durable, "_config_root", lambda product=None: home / ".config" / "amux")
+    monkeypatch.setattr(durable, "state_dir", lambda product=None: prod)
+    monkeypatch.setattr(durable, "shared_emux_state", lambda: shared)
+    monkeypatch.setattr(durable, "shared_emux_registry", lambda: home / "no-reg.json")
+
+    out = durable.seed_product_store("amux")
+    assert "audit.jsonl" in out["state_files_copied"]
+    assert out["logs_copied"] == 1
+    assert out["inbox_copied"] == 1
+    assert (prod / "audit.jsonl").read_text(encoding="utf-8").startswith('{"op":"old"}')
+    assert (prod / "logs" / "s1.log").is_file()
+    # second seed must not overwrite / re-copy
+    (prod / "audit.jsonl").write_text('{"op":"product"}\n', encoding="utf-8")
+    out2 = durable.seed_product_store("amux")
+    assert out2["state_files_copied"] == []
+    assert (prod / "audit.jsonl").read_text(encoding="utf-8").startswith('{"op":"product"}')
