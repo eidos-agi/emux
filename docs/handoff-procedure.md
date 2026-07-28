@@ -2,115 +2,93 @@
 
 **Status:** active · 2026-07-28  
 **Applies to:** every emux product (amux, gmux, reevux, directmux/directrux, bare emux, hostkey seats)  
-**Related:** hostkey dual-seat [EID-1146](https://linear.app/eidos-agi/issue/EID-1146) · Directmux rehome
+**Related:** hostkey dual-seat [EID-1146](https://linear.app/eidos-agi/issue/EID-1146)
 
-## Problem this solves
+## Problem
 
 AI chats are ephemeral. “I told the other agent” is not a handoff.  
-A handoff is **durable knowledge + a live seat + a quiz the source agent grades**.
+A handoff is **durable knowledge + a live seat + a deterministic structural check**.
 
-## Dual-seat model (product-wide)
+Optional: an LLM quiz for confidence. **Do not thrash the LLM to get green.**
+
+## Dual-seat model
 
 | Seat | Name pattern | Role |
 |------|----------------|------|
-| **Source** | wherever work happened (Grok Build, Claude Code, Slack chat seat) | Produces KNOWLEDGE.md |
-| **Home** | `<product>-this-chat` | Memory seat that owns the mission after handoff |
-| **Builder** (optional) | `<product>-build` or product-specific (e.g. `hostkey-kai-handoff`) | Write-heavy work that must not steal the chat pane |
+| **Source** | Grok Build / Claude Code / Slack chat seat | Writes `KNOWLEDGE.md` |
+| **Home** | `<product>-this-chat` | Owns the mission after handoff |
+| **Builder** (optional) | `<product>-build` or product-specific | Write-heavy work; keep chat responsive |
 
 Rules:
 
-1. Source **writes** `KNOWLEDGE.md` (authoritative). Never “trust the chat transcript alone.”
-2. Home seat **reads** KNOWLEDGE; source **verifies** with a quiz until `READY_FOR_HANDOFF=yes`.
-3. Builder seats stay separate when chat must stay responsive (Slack/hostkey pattern).
-4. Rescue/recreate of a chat seat must **not** wipe builder state.
+1. Source **writes** `KNOWLEDGE.md` (authoritative).
+2. **Structural verify** must pass (files + tmux seat). That is the ship gate.
+3. **Quiz** is optional; source agent grades substance by eye if needed.
+4. Rescue of a chat seat must not wipe builder state.
 
-## Artifacts (required)
+## Artifacts
 
-| File | Owner | Purpose |
-|------|--------|---------|
-| `KNOWLEDGE.md` | product repo root + seat state dir | Full mission memory |
-| `STANDING.md` | seat state | Short “who you are / what you own” |
-| `this-chat-handoff.md` | product repo | Human attach pointer + session ids |
-| Registry row | `emux register` | Room visibility + tags |
+| File | Purpose |
+|------|---------|
+| `KNOWLEDGE.md` | Mission memory (compass, proofs, open gaps, dogfood) |
+| `STANDING.md` / `CLAUDE.md` / `AGENTS.md` | Copies of knowledge for agents in the seat cwd |
+| `this-chat-handoff.md` | Human attach pointer |
+| Registry row | Room visibility |
 
-## Compass lines every KNOWLEDGE should carry
-
-1. What the product **is** (role, allowlist, room URL, brand vs on-disk id).
-2. What was **proved green** (commands + PASS counts / screenshots).
-3. What is **not** fixed (honest open gaps).
-4. How to **dogfood** (ensure seats → headed tester → Linear).
-5. **Do not** list (anti-patterns).
-
-## CLI (engine)
+## CLI
 
 ```bash
-# 1) Install knowledge into product home + create/register seat
+# 1) Write KNOWLEDGE.md, then install seat
 emux handoff install \
   --product directmux \
   --repo ~/repos-aic/directmux \
   --knowledge ~/repos-aic/directmux/KNOWLEDGE.md \
-  --source-session 019fa3d6-7e9b-7020-922c-21312f61cea5
+  --source-session <chat-id>
 
-# 2) Boot Claude in the seat (if shell-only)
-emux handoff boot --product directmux
-
-# 3) Verify: source agent grades the recap (blocks until READY or fail)
+# 2) Structural verify (default gate — no LLM)
 emux handoff verify --product directmux
+
+# 3) Optional: boot Claude + one-shot quiz
+emux handoff boot --product directmux
+emux handoff quiz --product directmux
 
 # 4) Status
 emux handoff status --product directmux
 ```
 
-Exit codes:
+Product wrapper: `bin/handoff` → same subcommands.
+
+### Exit codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | verify passed (`READY_FOR_HANDOFF=yes`) |
-| 2 | seat missing / knowledge missing |
-| 3 | verify failed (quiz incomplete) |
-| 4 | AI not ready in pane |
+| 0 | structural verify pass / quiz pass |
+| 2 | missing product/seat/knowledge |
+| 3 | structural or quiz fail |
 
-## Verify protocol (non-negotiable)
+### Structural verify checks
 
-Source agent **must** ask the home seat to:
+- tmux session `<seat>` exists  
+- `$STATE/KNOWLEDGE.md` and `$REPO/KNOWLEDGE.md` exist and are ≥5 lines  
+- `$REPO/this-chat-handoff.md` exists  
 
-1. Read `KNOWLEDGE.md` fully.
-2. Recap: compass, product shape, proofs, open gaps, confidence.
-3. Answer adversarial detail questions (IDs, numbers, what is NOT fixed).
-4. Emit exactly: `READY_FOR_HANDOFF=yes` only when it can operate without the source thread.
+No Claude UI sniffing. No retries. No multi-capture settle loops.
 
-Source agent **must not** mark handoff complete until those answers match known truth.
+### Quiz (optional)
 
-Reference quiz (adapt per mission):
-
-- A key constant (e.g. backlog 5→256)
-- A UI/product footgun (e.g. `#newmodal` not `#modal`)
-- Ship status (PR number + what blocks merge)
-- One “not fixed” that people mis-claim as fixed
-
-## Product install
-
-Every product package should ship:
-
-```text
-bin/handoff          # thin wrapper → emux handoff
-briefs/ALWAYS.md     # pointer: handoffs use emux handoff procedure
-docs/ or README      # link to this file
-```
-
-Directmux brand: UI says DIRECTMUX; config paths may still be `directrux` until EID-1147.
-
-## Propagation checklist (new emux product)
-
-- [ ] `bin/handoff` wrapper
-- [ ] `ALWAYS.md` mentions handoff + verify
-- [ ] `emux handoff install` dry-run succeeds
-- [ ] One live verify pass on `<product>-this-chat`
-- [ ] Room registry shows the seat
+One `emux ask`. Success only if the reply contains a **sole line**  
+`READY_FOR_HANDOFF=yes` (not mid-sentence, not from the prompt blob).  
+If flaky: fix ask/capture, or grade by hand — **do not** add thrash retries.
 
 ## What is not a handoff
 
-- Pasting a paragraph into Slack without KNOWLEDGE.md
-- Registering a session with no quiz
+- Paste without `KNOWLEDGE.md`
+- Register a session with no knowledge file
 - “Claude was in the directory once”
-- Claiming green without the product’s headed tester (Mafia for Directmux)
+- Claiming green by running quiz until it passes under load
+
+## Propagation
+
+- [ ] Product has `bin/handoff`
+- [ ] `ALWAYS.md` points here
+- [ ] `emux handoff install` + `verify` succeed

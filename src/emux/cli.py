@@ -1350,7 +1350,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_handoff(args: argparse.Namespace) -> int:
-    """Permanent handoff seat install/boot/verify (docs/handoff-procedure.md)."""
+    """Permanent handoff: install KNOWLEDGE seat; structural verify; optional quiz."""
     import subprocess
     from pathlib import Path
 
@@ -1369,7 +1369,7 @@ def cmd_handoff(args: argparse.Namespace) -> int:
         argv += ["--source-session", args.source_session]
     if getattr(args, "seat", None):
         argv += ["--seat", args.seat]
-    if getattr(args, "timeout", None) is not None and sub == "verify":
+    if getattr(args, "timeout", None) is not None and sub == "quiz":
         argv += ["--timeout", str(args.timeout)]
     return subprocess.call(argv)
 
@@ -1930,14 +1930,15 @@ def main(argv: list[str] | None = None) -> int:
 
     p_handoff = sub.add_parser(
         "handoff",
-        help="permanent handoff: install KNOWLEDGE into <product>-this-chat and verify READY_FOR_HANDOFF",
+        help="permanent handoff: install KNOWLEDGE seat; structural verify; optional LLM quiz",
     )
     handoff_sub = p_handoff.add_subparsers(dest="handoff_cmd", required=True)
     for hname, hhelp in (
         ("install", "copy KNOWLEDGE.md, create/register seat"),
-        ("boot", "start Claude in the handoff seat"),
-        ("verify", "quiz seat until READY_FOR_HANDOFF=yes"),
-        ("status", "seat + knowledge + last verify"),
+        ("boot", "start Claude in the handoff seat (optional)"),
+        ("verify", "structural gate: knowledge + tmux + handoff file (deterministic)"),
+        ("quiz", "optional one-shot LLM recap; sole-line READY_FOR_HANDOFF=yes"),
+        ("status", "seat + knowledge + last verify/quiz"),
     ):
         hp = handoff_sub.add_parser(hname, help=hhelp)
         hp.add_argument("--product", required=True, help="product id (directmux, amux, reevux, …)")
@@ -1945,8 +1946,8 @@ def main(argv: list[str] | None = None) -> int:
         hp.add_argument("--knowledge", default=None, help="path to KNOWLEDGE.md (install)")
         hp.add_argument("--source-session", default=None, help="source chat/session id for handoff file")
         hp.add_argument("--seat", default=None, help="override seat name (default <product>-this-chat)")
-        if hname == "verify":
-            hp.add_argument("--timeout", type=int, default=120, help="seconds for emux ask")
+        if hname == "quiz":
+            hp.add_argument("--timeout", type=int, default=120, help="seconds for emux ask (quiz only)")
 
     args = parser.parse_args(argv)
 

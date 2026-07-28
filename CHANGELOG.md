@@ -3,7 +3,7 @@
 ## v0.68.17
 
 ### Features
-- **Permanent handoff + verify** (`emux handoff install|boot|verify|status`, `docs/handoff-procedure.md`, `scripts/handoff-seat.sh`): dual-seat model, KNOWLEDGE.md pack, quiz until `READY_FOR_HANDOFF=yes`. Product wrappers: `directmux/bin/handoff`, `amux/bin/handoff`.
+- **Permanent handoff** (`emux handoff install|boot|verify|quiz|status`, `docs/handoff-procedure.md`): dual-seat model + `KNOWLEDGE.md`. **verify** = structural (deterministic). **quiz** = optional one-shot LLM READY token (no thrash). Product wrappers: `directmux`/`amux` `bin/handoff`.
 
 ### Fixes
 - **First paint:** shallow capture (400 lines) then deepen; `#modalscreen` shows “connecting to pane…” instead of blank white; capture errors surface in status.
