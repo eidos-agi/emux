@@ -1,11 +1,16 @@
 # Changelog
 
-## v0.68.17
+## v0.68.18
 
 ### Features
-- **Permanent handoff** (`emux handoff install|boot|verify|quiz|status`, `docs/handoff-procedure.md`): dual-seat model + `KNOWLEDGE.md`. **verify** = structural (deterministic). **quiz** = optional one-shot LLM READY token (no thrash). Product wrappers: `directmux`/`amux` `bin/handoff`.
+- **Permanent handoff** (`emux handoff install|boot|verify|quiz|status`, `docs/handoff-procedure.md`): dual-seat model + `KNOWLEDGE.md`. **verify** = structural (deterministic). **quiz** = optional one-shot LLM READY token (no thrash). Product wrappers: `directmux`/`amux` `bin/handoff`. Claude detect when argv0 is a version string.
 
 ### Fixes
+- Ruff F401 on handoff CLI (`sys` unused).
+
+## v0.68.17
+
+### Fixes (session-head UX — EID-1142 follow-on)
 - **First paint:** shallow capture (400 lines) then deepen; `#modalscreen` shows “connecting to pane…” instead of blank white; capture errors surface in status.
 - **Gist:** delayed start so capture wins the connection race; 18s client abort (no infinite “reading…”).
 - **Float chat close:** default reply is **drawer-only** (no sticky 💬 FAB). Extra side chats get a real ✕ (panel + collapsed bubble). Suggestions no longer re-open the float.

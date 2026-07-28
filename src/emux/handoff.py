@@ -443,7 +443,6 @@ def doctor_all() -> int:
 def main(argv: list[str] | None = None) -> int:
     """CLI entry for `python -m emux.handoff`."""
     import argparse
-    import sys
 
     p = argparse.ArgumentParser(prog="emux-handoff")
     sub = p.add_subparsers(dest="cmd", required=True)
