@@ -45,7 +45,15 @@ if [ -z "$SEAT" ]; then
   SEAT="${PRODUCT}-this-chat"
 fi
 
-STATE="${EMUX_HANDOFF_STATE:-$HOME_DIR/.local/share/$SEAT}"
+# EMUX_HANDOFF_STATE_ROOT = parent dir for seat state (default ~/.local/share).
+# Each seat always gets its own $ROOT/$SEAT subdirectory.
+STATE_ROOT="${EMUX_HANDOFF_STATE_ROOT:-${EMUX_HANDOFF_STATE:-$HOME_DIR/.local/share}}"
+# If caller passed a full seat path as EMUX_HANDOFF_STATE (legacy tests), use it only when
+# it already ends with the seat name; otherwise treat as root.
+case "$STATE_ROOT" in
+  */"$SEAT") STATE="$STATE_ROOT" ;;
+  *) STATE="$STATE_ROOT/$SEAT" ;;
+esac
 mkdir -p "$STATE"
 
 resolve_repo() {

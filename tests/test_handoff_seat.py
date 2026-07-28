@@ -30,10 +30,10 @@ def test_handoff_install_writes_knowledge_and_seat(tmp_path: Path, monkeypatch: 
     )
     seat = f"test-handoff-{os.getpid()}"
     state = tmp_path / "state"
-    monkeypatch.setenv("EMUX_HANDOFF_STATE", str(state / seat))
-    # Avoid polluting real tmux registry noise; still creates tmux session
+    monkeypatch.setenv("EMUX_HANDOFF_STATE_ROOT", str(state))
     env = os.environ.copy()
-    env["EMUX_HANDOFF_STATE"] = str(state / seat)
+    env["EMUX_HANDOFF_STATE_ROOT"] = str(state)
+    env.pop("EMUX_HANDOFF_STATE", None)
     r = subprocess.run(
         [
             str(SCRIPT),
