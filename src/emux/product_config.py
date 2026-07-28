@@ -39,6 +39,7 @@ _WORKER_DEFAULTS: dict[str, dict[str, str]] = {
 # managed_planes stays empty until config is installed (fail closed on "who can I manage?").
 _MANAGER_DEFAULTS: dict[str, dict[str, str]] = {
     "directrux": {"role": "manager", "chats_match": "directrux"},
+    "directmux": {"role": "manager", "chats_match": "directrux"},
 }
 
 

@@ -406,7 +406,7 @@ def _match_pattern(match: str | None) -> re.Pattern[str] | None:
         return _PERSONAL_RE
     if key in ("aic", "amux", "holdings"):
         return _AIC_RE
-    if key in ("directrux", "director", "meta"):
+    if key in ("directrux", "directmux", "director", "meta"):
         return _DIRECTRUX_RE
     return re.compile(match, re.I)
 

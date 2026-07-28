@@ -439,14 +439,14 @@ _SKINS: dict[str, Skin] = {
     ),
     "directrux": Skin(
         id="directrux",
-        brand="DIRECTRUX",
-        product="directrux",
+        brand="DIRECTMUX",
+        product="directrux",  # config dir stays ~/.config/directrux (compat)
         tagline="manager · loading allowlist…",
-        status_title="directrux status",
-        room_title="directrux — manager",
-        docs_title="directrux documentation",
+        status_title="directmux status",
+        room_title="directmux — manager",
+        docs_title="directmux documentation",
         engine_label="emux",
-        footer_note="powered by emux · manager (product.json allowlist)",
+        footer_note="powered by emux · manager (product.json allowlist) · directmux",
         light=_DIRECTRUX_LIGHT,
         dark=_DIRECTRUX_DARK,
         logo_svg=_LOGO_DIRECTRUX,
@@ -469,7 +469,8 @@ def get_skin(name: str | None) -> Skin:
         key = "reevux"
     if key in ("aic", "aic-holdings", "holdings"):
         key = "amux"
-    if key in ("director", "meta", "directrux-meta"):
+    # directmux = mux-family name for the manager (alias of directrux paths/config)
+    if key in ("director", "meta", "directrux-meta", "directmux", "direct-mux"):
         key = "directrux"
     if key in _SKINS:
         return _SKINS[key]
