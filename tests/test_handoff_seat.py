@@ -57,10 +57,12 @@ def test_handoff_install_writes_knowledge_and_seat(tmp_path: Path, monkeypatch: 
     try:
         assert r.returncode == 0, r.stderr + r.stdout
         assert (repo / "KNOWLEDGE.md").is_file()
-        assert (repo / "CLAUDE.md").is_file()
         assert (repo / "this-chat-handoff.md").is_file()
         assert "test-session-id" in (repo / "this-chat-handoff.md").read_text(encoding="utf-8")
         assert (state / seat / "KNOWLEDGE.md").is_file()
+        # Thin install: never clobber product agent briefs
+        assert not (repo / "CLAUDE.md").exists()
+        assert not (repo / "AGENTS.md").exists()
         # status
         r2 = subprocess.run(
             [str(SCRIPT), "status", "--product", product, "--seat", seat, "--repo", str(repo)],
