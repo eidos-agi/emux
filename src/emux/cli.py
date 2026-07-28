@@ -1357,31 +1357,32 @@ def cmd_handoff(args: argparse.Namespace) -> int:
     if sub == "doctor":
         return _handoff.doctor_all()
     product = getattr(args, "product", None)
-    if not product and sub != "doctor":
+    if not product:
         print("emux handoff: --product required", file=sys.stderr)
         return 2
+    product_s = str(product)
     repo = getattr(args, "repo", None)
     seat = getattr(args, "seat", None)
     if sub == "init":
-        return _handoff.cmd_init(product, repo, force=bool(getattr(args, "force", False)))
+        return _handoff.cmd_init(product_s, repo, force=bool(getattr(args, "force", False)))
     if sub == "install":
         return _handoff.cmd_install(
-            product,
+            product_s,
             repo=repo,
             knowledge=getattr(args, "knowledge", None),
             source_session=getattr(args, "source_session", None),
             seat=seat,
         )
     if sub == "boot":
-        return _handoff.cmd_boot(product, repo=repo, seat=seat)
+        return _handoff.cmd_boot(product_s, repo=repo, seat=seat)
     if sub == "verify":
-        return _handoff.cmd_verify(product, repo=repo, seat=seat)
+        return _handoff.cmd_verify(product_s, repo=repo, seat=seat)
     if sub == "quiz":
         return _handoff.cmd_quiz(
-            product, repo=repo, seat=seat, timeout=int(getattr(args, "timeout", 120) or 120)
+            product_s, repo=repo, seat=seat, timeout=int(getattr(args, "timeout", 120) or 120)
         )
     if sub == "status":
-        return _handoff.cmd_status(product, repo=repo, seat=seat)
+        return _handoff.cmd_status(product_s, repo=repo, seat=seat)
     print(f"emux handoff: unknown subcommand {sub}", file=sys.stderr)
     return 2
 
