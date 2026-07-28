@@ -2,6 +2,9 @@
 
 ## v0.68.17
 
+### Features
+- **Permanent handoff + verify** (`emux handoff install|boot|verify|status`, `docs/handoff-procedure.md`, `scripts/handoff-seat.sh`): dual-seat model, KNOWLEDGE.md pack, quiz until `READY_FOR_HANDOFF=yes`. Product wrappers: `directmux/bin/handoff`, `amux/bin/handoff`.
+
 ### Fixes
 - **First paint:** shallow capture (400 lines) then deepen; `#modalscreen` shows “connecting to pane…” instead of blank white; capture errors surface in status.
 - **Gist:** delayed start so capture wins the connection race; 18s client abort (no infinite “reading…”).

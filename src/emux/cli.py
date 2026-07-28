@@ -1349,6 +1349,31 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if result.get("ok") else 1
 
 
+def cmd_handoff(args: argparse.Namespace) -> int:
+    """Permanent handoff seat install/boot/verify (docs/handoff-procedure.md)."""
+    import subprocess
+    from pathlib import Path
+
+    # src/emux/cli.py → parents[0]=emux, [1]=src, [2]=repo root
+    script = Path(__file__).resolve().parents[2] / "scripts" / "handoff-seat.sh"
+    if not script.is_file():
+        print(f"emux handoff: script missing at {script}", file=sys.stderr)
+        return 2
+    sub = getattr(args, "handoff_cmd", None) or "status"
+    argv = [str(script), sub, "--product", args.product]
+    if getattr(args, "repo", None):
+        argv += ["--repo", args.repo]
+    if getattr(args, "knowledge", None):
+        argv += ["--knowledge", args.knowledge]
+    if getattr(args, "source_session", None):
+        argv += ["--source-session", args.source_session]
+    if getattr(args, "seat", None):
+        argv += ["--seat", args.seat]
+    if getattr(args, "timeout", None) is not None and sub == "verify":
+        argv += ["--timeout", str(args.timeout)]
+    return subprocess.call(argv)
+
+
 def cmd_head(args: argparse.Namespace) -> int:
     """Open a real terminal head for a registered name by default. Remote
     sessions attach via `ssh -t` — same one-command feel as local."""
@@ -1903,6 +1928,26 @@ def main(argv: list[str] | None = None) -> int:
     p_sched_run.add_argument("id", help="job id")
     p_sched_run.add_argument("--json", action="store_true", help="print result JSON")
 
+    p_handoff = sub.add_parser(
+        "handoff",
+        help="permanent handoff: install KNOWLEDGE into <product>-this-chat and verify READY_FOR_HANDOFF",
+    )
+    handoff_sub = p_handoff.add_subparsers(dest="handoff_cmd", required=True)
+    for hname, hhelp in (
+        ("install", "copy KNOWLEDGE.md, create/register seat"),
+        ("boot", "start Claude in the handoff seat"),
+        ("verify", "quiz seat until READY_FOR_HANDOFF=yes"),
+        ("status", "seat + knowledge + last verify"),
+    ):
+        hp = handoff_sub.add_parser(hname, help=hhelp)
+        hp.add_argument("--product", required=True, help="product id (directmux, amux, reevux, …)")
+        hp.add_argument("--repo", default=None, help="product repo path")
+        hp.add_argument("--knowledge", default=None, help="path to KNOWLEDGE.md (install)")
+        hp.add_argument("--source-session", default=None, help="source chat/session id for handoff file")
+        hp.add_argument("--seat", default=None, help="override seat name (default <product>-this-chat)")
+        if hname == "verify":
+            hp.add_argument("--timeout", type=int, default=120, help="seconds for emux ask")
+
     args = parser.parse_args(argv)
 
     if args.cmd is None:
@@ -1982,6 +2027,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_schedule(args)
     if args.cmd == "doctor":
         return cmd_doctor(args)
+    if args.cmd == "handoff":
+        return cmd_handoff(args)
     if args.cmd == "gates":
         return cmd_gates(args)
     if args.cmd == "signal":
