@@ -219,21 +219,59 @@ def cmd_install(
     return 0
 
 
+def _looks_like_claude_command(name: str) -> bool:
+    """Claude Code often renames argv0 to its version (e.g. 2.1.220)."""
+    n = (name or "").strip()
+    if not n:
+        return False
+    low = n.lower()
+    if low in ("claude", "claude.exe") or low.startswith("claude"):
+        return True
+    # version-shaped process name used by Claude Code builds
+    import re
+
+    return bool(re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][\w.]+)?", n))
+
+
+def _claude_running_in_seat(seat: str) -> bool:
+    """True if the seat pane is already running Claude Code (any argv0)."""
+    cmd_r = _run(["tmux", "list-panes", "-t", seat, "-F", "#{pane_current_command}"])
+    if _looks_like_claude_command((cmd_r.stdout or "").strip()):
+        return True
+    r = _run(["tmux", "list-panes", "-t", seat, "-F", "#{pane_pid}"])
+    ppid = (r.stdout or "").strip().splitlines()[:1]
+    if not ppid:
+        return False
+    # Exact name (older builds)
+    if _run(["pgrep", "-P", ppid[0], "-x", "claude"]).returncode == 0:
+        return True
+    # Children of the pane shell: match name or args containing claude CLI
+    ps = _run(["ps", "-ax", "-o", "pid=,ppid=,comm=,args="])
+    if ps.returncode != 0:
+        return False
+    parent = ppid[0]
+    for line in (ps.stdout or "").splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 3:
+            continue
+        _pid, p_ppid, comm = parts[0], parts[1], parts[2]
+        args = parts[3] if len(parts) > 3 else ""
+        if p_ppid != parent:
+            continue
+        if _looks_like_claude_command(comm):
+            return True
+        if "/claude" in args or args.strip().startswith("claude "):
+            return True
+    return False
+
+
 def cmd_boot(product: str, *, repo: str | Path | None = None, seat: str | None = None) -> int:
     root = resolve_repo(product, repo)
     seat_n = seat_name(product, seat)
     if not _tmux_has(seat_n):
         print(f"handoff: seat missing — run install ({seat_n})", file=__import__("sys").stderr)
         return 2
-    # Pane pid children named claude?
-    r = _run(["tmux", "list-panes", "-t", seat_n, "-F", "#{pane_pid}"])
-    ppid = (r.stdout or "").strip().splitlines()[:1]
-    if ppid:
-        if _run(["pgrep", "-P", ppid[0], "-x", "claude"]).returncode == 0:
-            print("handoff: claude already running")
-            return 0
-    cmd_r = _run(["tmux", "list-panes", "-t", seat_n, "-F", "#{pane_current_command}"])
-    if (cmd_r.stdout or "").strip() == "claude":
+    if _claude_running_in_seat(seat_n):
         print("handoff: claude already running")
         return 0
     _run(["tmux", "send-keys", "-t", seat_n, "C-c"])
