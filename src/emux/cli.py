@@ -1350,28 +1350,40 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_handoff(args: argparse.Namespace) -> int:
-    """Permanent handoff: install KNOWLEDGE seat; structural verify; optional quiz."""
-    import subprocess
-    from pathlib import Path
+    """Native handoff for every product skin (see docs/handoff-procedure.md)."""
+    from . import handoff as _handoff
 
-    # src/emux/cli.py → parents[0]=emux, [1]=src, [2]=repo root
-    script = Path(__file__).resolve().parents[2] / "scripts" / "handoff-seat.sh"
-    if not script.is_file():
-        print(f"emux handoff: script missing at {script}", file=sys.stderr)
-        return 2
     sub = getattr(args, "handoff_cmd", None) or "status"
-    argv = [str(script), sub, "--product", args.product]
-    if getattr(args, "repo", None):
-        argv += ["--repo", args.repo]
-    if getattr(args, "knowledge", None):
-        argv += ["--knowledge", args.knowledge]
-    if getattr(args, "source_session", None):
-        argv += ["--source-session", args.source_session]
-    if getattr(args, "seat", None):
-        argv += ["--seat", args.seat]
-    if getattr(args, "timeout", None) is not None and sub == "quiz":
-        argv += ["--timeout", str(args.timeout)]
-    return subprocess.call(argv)
+    if sub == "doctor":
+        return _handoff.doctor_all()
+    product = getattr(args, "product", None)
+    if not product and sub != "doctor":
+        print("emux handoff: --product required", file=sys.stderr)
+        return 2
+    repo = getattr(args, "repo", None)
+    seat = getattr(args, "seat", None)
+    if sub == "init":
+        return _handoff.cmd_init(product, repo, force=bool(getattr(args, "force", False)))
+    if sub == "install":
+        return _handoff.cmd_install(
+            product,
+            repo=repo,
+            knowledge=getattr(args, "knowledge", None),
+            source_session=getattr(args, "source_session", None),
+            seat=seat,
+        )
+    if sub == "boot":
+        return _handoff.cmd_boot(product, repo=repo, seat=seat)
+    if sub == "verify":
+        return _handoff.cmd_verify(product, repo=repo, seat=seat)
+    if sub == "quiz":
+        return _handoff.cmd_quiz(
+            product, repo=repo, seat=seat, timeout=int(getattr(args, "timeout", 120) or 120)
+        )
+    if sub == "status":
+        return _handoff.cmd_status(product, repo=repo, seat=seat)
+    print(f"emux handoff: unknown subcommand {sub}", file=sys.stderr)
+    return 2
 
 
 def cmd_head(args: argparse.Namespace) -> int:
@@ -1930,24 +1942,34 @@ def main(argv: list[str] | None = None) -> int:
 
     p_handoff = sub.add_parser(
         "handoff",
-        help="permanent handoff: install KNOWLEDGE seat; structural verify; optional LLM quiz",
+        help="native product handoff for all skins: install KNOWLEDGE seat; structural verify; optional quiz",
     )
     handoff_sub = p_handoff.add_subparsers(dest="handoff_cmd", required=True)
     for hname, hhelp in (
-        ("install", "copy KNOWLEDGE.md, create/register seat"),
-        ("boot", "start Claude in the handoff seat (optional)"),
-        ("verify", "structural gate: knowledge + tmux + handoff file (deterministic)"),
-        ("quiz", "optional one-shot LLM recap; sole-line READY_FOR_HANDOFF=yes"),
+        ("init", "write KNOWLEDGE.md template if missing"),
+        ("install", "park KNOWLEDGE.md + create/register <product>-this-chat"),
+        ("boot", "optional: start Claude in the seat"),
+        ("verify", "structural gate (deterministic, no LLM)"),
+        ("quiz", "optional one-shot LLM; sole-line READY_FOR_HANDOFF=yes"),
         ("status", "seat + knowledge + last verify/quiz"),
+        ("doctor", "scan all skins: repo / knowledge / seat"),
     ):
         hp = handoff_sub.add_parser(hname, help=hhelp)
-        hp.add_argument("--product", required=True, help="product id (directmux, amux, reevux, …)")
-        hp.add_argument("--repo", default=None, help="product repo path")
-        hp.add_argument("--knowledge", default=None, help="path to KNOWLEDGE.md (install)")
-        hp.add_argument("--source-session", default=None, help="source chat/session id for handoff file")
-        hp.add_argument("--seat", default=None, help="override seat name (default <product>-this-chat)")
+        if hname != "doctor":
+            hp.add_argument(
+                "--product",
+                required=True,
+                help="skin/product id (amux, gmux, reevux, directmux, emux, …)",
+            )
+            hp.add_argument("--repo", default=None, help="product repo (else product.json repo= or defaults)")
+            hp.add_argument("--seat", default=None, help="default <product>-this-chat")
+        if hname in ("init", "install"):
+            hp.add_argument("--knowledge", default=None, help="path to KNOWLEDGE.md")
+            hp.add_argument("--source-session", default=None, help="source chat id for handoff file")
+        if hname == "init":
+            hp.add_argument("--force", action="store_true", help="overwrite existing KNOWLEDGE.md")
         if hname == "quiz":
-            hp.add_argument("--timeout", type=int, default=120, help="seconds for emux ask (quiz only)")
+            hp.add_argument("--timeout", type=int, default=120, help="emux ask timeout")
 
     args = parser.parse_args(argv)
 
