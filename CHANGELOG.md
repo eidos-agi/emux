@@ -7,6 +7,8 @@
 
 ### Fixes
 - Ruff F401 on handoff CLI (`sys` unused).
+- Pyright-clean handoff `--product` str narrowing.
+- Pin `mcp>=1.2.0,<2` so CI does not resolve mcp 2.0 (drops `mcp.server.fastmcp`).
 
 ## v0.68.17
 
