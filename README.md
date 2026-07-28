@@ -113,6 +113,8 @@ a Linear RVS issue can discover the RVS channel without one channel per ticket.
 
 **For agents:** When an agent in one Claude Code session needs to inspect, prompt, or steer a session running in another tmux pane — for handoff, debate, monitoring, or autonomous round-trip testing of marketplace installs — it needs structured access to send keys and read the result. emux's MCP server gives that without the agent owning session lifecycle.
 
+**Permanent product handoff:** write `KNOWLEDGE.md`, then `emux handoff install|boot|verify --product <id>` until `READY_FOR_HANDOFF=yes`. Full protocol: [`docs/handoff-procedure.md`](docs/handoff-procedure.md).
+
 The registry is the same surface for both. Register once interactively, drive forever from agents. Or vice versa.
 
 ## Install

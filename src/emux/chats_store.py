@@ -54,7 +54,7 @@ def _config_root_for_skin(skin_id: str) -> Path:
         return Path.home() / ".config" / "reevux"
     if sid in ("amux", "aic", "aic-holdings", "holdings"):
         return Path.home() / ".config" / "amux"
-    if sid in ("directrux", "director", "meta"):
+    if sid in ("directrux", "directmux", "director", "meta"):
         return Path.home() / ".config" / "directrux"
     return Path.home() / ".config" / "emux"
 
@@ -75,6 +75,7 @@ def default_chats_db_path() -> str:
         "aic-holdings",
         "holdings",
         "directrux",
+        "directmux",
         "director",
         "meta",
     ):
@@ -93,7 +94,7 @@ def default_chats_db_path() -> str:
             root = Path.home() / ".config" / "reevux"
         elif prod in ("amux", "aic", "aic-holdings", "holdings"):
             root = Path.home() / ".config" / "amux"
-        elif prod in ("directrux", "director", "meta"):
+        elif prod in ("directrux", "directmux", "director", "meta"):
             root = Path.home() / ".config" / "directrux"
         else:
             try:
@@ -431,7 +432,7 @@ class ChatStore:
             pat = _PERSONAL_RE
         elif mkey in ("aic", "amux", "holdings"):
             pat = _AIC_RE
-        elif mkey in ("directrux", "director", "meta"):
+        elif mkey in ("directrux", "directmux", "director", "meta"):
             pat = _DIRECTRUX_RE
         else:
             pat = re.compile(match or "", re.I)
@@ -463,7 +464,7 @@ class ChatStore:
                 " AND (cwd LIKE '%repos-personal%' OR cwd LIKE '%reeves%' "
                 "OR path LIKE '%repos-personal%' OR path LIKE '%reeves%')"
             )
-        elif mkey in ("directrux", "director", "meta"):
+        elif mkey in ("directrux", "directmux", "director", "meta"):
             sql += (
                 " AND (cwd LIKE '%directrux%' OR path LIKE '%directrux%' "
                 "OR title LIKE '%directrux%' OR summary LIKE '%directrux%')"
