@@ -131,14 +131,36 @@ do_install() {
 do_boot() {
   REPO="$(resolve_repo)"
   tmux has-session -t "$SEAT" 2>/dev/null || die "seat missing — run install first"
-  # Already Claude?
+  # Already Claude? pane_current_command is often the version string (e.g. 2.1.220),
+  # not "claude" — also check process tree + recent capture for Claude Code UI.
   cmd="$(tmux list-panes -t "$SEAT" -F '#{pane_current_command}' 2>/dev/null | head -1)"
+  ppid="$(tmux list-panes -t "$SEAT" -F '#{pane_pid}' 2>/dev/null | head -1)"
+  has_claude=0
   case "$cmd" in
-    claude|node|python*)
-      echo "handoff-seat: pane already running $cmd"
-      return 0
-      ;;
+    claude|node|python*) has_claude=1 ;;
   esac
+  if [ "$has_claude" -eq 0 ] && [ -n "$ppid" ]; then
+    if pgrep -P "$ppid" -lf claude >/dev/null 2>&1 || \
+       pgrep -lf "claude" 2>/dev/null | grep -q " $SEAT\|--dangerously-skip\|Claude Code"; then
+      # Prefer pane capture: Claude TUI chrome
+      if command -v emux >/dev/null 2>&1; then
+        cap="$(emux capture "$SEAT" --lines 15 2>/dev/null || true)"
+        if printf '%s' "$cap" | grep -Eiq 'Claude Code|bypass permissions|PONYTAIL'; then
+          has_claude=1
+        fi
+      fi
+    fi
+  fi
+  if [ "$has_claude" -eq 0 ] && command -v emux >/dev/null 2>&1; then
+    cap="$(emux capture "$SEAT" --lines 15 2>/dev/null || true)"
+    if printf '%s' "$cap" | grep -Eiq 'Claude Code|bypass permissions|PONYTAIL'; then
+      has_claude=1
+    fi
+  fi
+  if [ "$has_claude" -eq 1 ]; then
+    echo "handoff-seat: pane already has Claude Code (cmd=$cmd)"
+    return 0
+  fi
   tmux send-keys -t "$SEAT" C-c
   sleep 0.2
   tmux send-keys -t "$SEAT" "cd $(printf %q "$REPO") && claude --dangerously-skip-permissions" Enter
@@ -154,21 +176,37 @@ do_verify() {
     die "emux CLI required for verify"
   fi
 
-  quiz="Read KNOWLEDGE.md fully in the repo root. Answer structured: 1. Compass four bullets. 2. Product role and what it manages and room. 3. What was proved green with commands and numbers. 4. What is NOT fixed honest. 5. Dogfood commands. End with exactly READY_FOR_HANDOFF=yes or READY_FOR_HANDOFF=no. Use =yes only if you can operate without the source chat thread."
+  # Put the success token instruction mid-sentence so shell echo of the quiz
+  # never produces a sole-line READY_FOR_HANDOFF=yes (false PASS).
+  quiz="Read KNOWLEDGE.md fully in the repo root. Answer with: 1. Compass four bullets. 2. Product role room managed planes. 3. Proved green with commands and numbers. 4. Honest not-fixed list. 5. Dogfood commands. After the recap, put the token READY_FOR_HANDOFF=yes alone on its own final line if and only if you can operate without the source chat; otherwise put READY_FOR_HANDOFF=no alone on its own final line."
 
   echo "handoff-seat: verifying $SEAT (timeout ${TIMEOUT}s)…"
   out="$(emux ask "$SEAT" "$quiz" 2>&1)" || true
-  printf '%s\n' "$out" | tail -60
-  printf '%s\n' "$out" > "$STATE/last-verify.txt"
+  # emux ask sometimes returns a truncated tail; also scan live pane capture.
+  cap="$(emux capture "$SEAT" --lines 100 2>/dev/null || true)"
+  combined="${out}
+${cap}"
+  printf '%s\n' "$out" | tail -40
+  printf '%s\n' "$combined" > "$STATE/last-verify.txt"
 
-  if printf '%s\n' "$out" | grep -q 'READY_FOR_HANDOFF=yes'; then
+  # Sole-line token only (never mid-prompt). Prefer the *last* occurrence.
+  last_yes=$(printf '%s\n' "$combined" | grep -n -E '^[[:space:]]*READY_FOR_HANDOFF=yes[[:space:]]*$' | tail -1 | cut -d: -f1)
+  last_no=$(printf '%s\n' "$combined" | grep -n -E '^[[:space:]]*READY_FOR_HANDOFF=no[[:space:]]*$' | tail -1 | cut -d: -f1)
+  if [ -n "$last_no" ] && { [ -z "$last_yes" ] || [ "$last_no" -gt "$last_yes" ]; }; then
+    echo "handoff-seat: VERIFY FAIL (seat said READY_FOR_HANDOFF=no)" >&2
+    echo "fail" > "$STATE/verify-status"
+    date -u +%Y-%m-%dT%H:%M:%SZ > "$STATE/verified-at"
+    exit 3
+  fi
+  if [ -n "$last_yes" ]; then
     echo "handoff-seat: VERIFY PASS"
     echo "pass" > "$STATE/verify-status"
     date -u +%Y-%m-%dT%H:%M:%SZ > "$STATE/verified-at"
     exit 0
   fi
-  echo "handoff-seat: VERIFY FAIL (no READY_FOR_HANDOFF=yes)" >&2
+  echo "handoff-seat: VERIFY FAIL (no sole-line READY_FOR_HANDOFF=yes)" >&2
   echo "fail" > "$STATE/verify-status"
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$STATE/verified-at"
   exit 3
 }
 
