@@ -3801,6 +3801,127 @@ async def agent_advice(scenario: str = "") -> dict[str, Any]:
     return {"ok": True, **_agents.advise(scenario)}
 
 
+_UNIVERSAL_VERBS = """\
+Universal emux verbs (same on every plane, via that plane's CLI):
+  <cli> ls                          registered names + live tmux sessions
+  <cli> capture <name> --lines 40   tail any session's chat (no attach, no resize)
+  <cli> log <name> --lines 200      durable history — proof of what the pane got
+  <cli> send <name> 'text'          send keys/text (--no-enter to hold Enter)
+  <cli> run <name> 'cmd' --wait 10  send, wait, capture — the workhorse
+  <cli> ask -n <name> 'prompt'      talk to an AI in a session, await reply
+  <cli> interrupt <name>            C-c
+  <cli> doctor <name>               diagnose one session
+Semantics: capture/log/send/run talk to the tmux SERVER — no client, no pane
+resize. Attaching (head) resizes the pane. Sessions live on the plane's host
+and survive any local window/ssh close. Habit: capture to look, head to type.
+"""
+
+
+def _fleet_roster_path() -> Path:
+    return Path(
+        os.environ.get("DIRECTRUX_PRODUCT_JSON", "~/.config/directrux/product.json")
+    ).expanduser()
+
+
+def _fleet_roster() -> tuple[dict[str, Any], str | None]:
+    """The manager's product.json — the fleet's single source of truth.
+
+    Plane roster is DATA, never hardcoded: `managed_planes` (steerable
+    workers) plus optional `fleet_extra_planes` (discovery-only entries such
+    as the base engine plane or the manager itself, never health-probed)."""
+    try:
+        return json.loads(_fleet_roster_path().read_text()), None
+    except Exception as exc:  # missing/unreadable roster is a real answer
+        return {}, str(exc)
+
+
+def _fleet_entries(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    planes = list(cfg.get("managed_planes") or [])
+    planes += list(cfg.get("fleet_extra_planes") or [])
+    return [p for p in planes if isinstance(p, dict) and p.get("id")]
+
+
+def _plane_skill(p: dict[str, Any]) -> str:
+    """One plane's drive skill. Verified folklore lives in the roster's
+    per-plane `how` field (data, not code); otherwise generate a skeleton."""
+    how = (p.get("how") or "").strip()
+    if how:
+        return how
+    pid, host = p["id"], p.get("host", "?")
+    lines = [f"{pid} — lane={p.get('lane', '?')} (host: {host})."]
+    ctl = p.get("controller") or {}
+    if ctl.get("cli"):
+        lines.append(
+            f"  drive via controller CLI: {ctl['cli']} capture|send {pid} <session>"
+            f" (endpoint {ctl.get('endpoint', '?')})"
+        )
+    else:
+        lines.append(f"  on {host}: {pid} <verb> ...")
+        lines.append(f"  from elsewhere: ssh {host} '~/.local/bin/{pid} <verb> ...'")
+    if p.get("room"):
+        lines.append(f"Room: {p['room']}")
+    if p.get("notes"):
+        lines.append(str(p["notes"]))
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@audited
+async def emux_planes() -> dict[str, Any]:
+    """List every emux plane in the fleet: id, lane, host, room URL.
+
+    Read live from the manager's product.json (`managed_planes` +
+    `fleet_extra_planes`) — never hardcoded. Default roster:
+    ~/.config/directrux/product.json, override with $DIRECTRUX_PRODUCT_JSON.
+    Call emux_how with a plane id for the exact drive commands.
+    """
+    cfg, err = _fleet_roster()
+    planes = [
+        {
+            "id": p["id"],
+            "lane": p.get("lane"),
+            "role": p.get("role"),
+            "host": p.get("host"),
+            "room": p.get("room"),
+        }
+        for p in _fleet_entries(cfg)
+    ]
+    out: dict[str, Any] = {
+        "ok": err is None,
+        "source": str(_fleet_roster_path()),
+        "planes": planes,
+        "hint": "Call emux_how(plane=<id>) for the exact drive commands.",
+    }
+    if err:
+        out["error"] = f"could not read roster: {err}"
+    return out
+
+
+@mcp.tool()
+@audited
+async def emux_how(plane: str = "") -> dict[str, Any]:
+    """Drive skill for a plane: exact commands to list sessions, tail any
+    agent's chat, send/run/ask — plus the universal emux verbs.
+
+    Folklore (verified command paths from the calling machine) comes from the
+    roster's per-plane `how` field; a generic skeleton is generated when a
+    plane has none. Omit `plane` to get every plane's skill at once.
+    """
+    cfg, err = _fleet_roster()
+    if err:
+        return {"ok": False, "error": f"could not read roster: {err}"}
+    entries = {p["id"]: p for p in _fleet_entries(cfg)}
+    if plane and plane not in entries:
+        return {
+            "ok": False,
+            "error": f"unknown plane '{plane}'",
+            "known": sorted(entries),
+        }
+    picked = [entries[plane]] if plane else list(entries.values())
+    text = "\n\n".join(_plane_skill(p) for p in picked) + "\n\n" + _UNIVERSAL_VERBS
+    return {"ok": True, "plane": plane or None, "text": text}
+
+
 def _session_cwd(sid: str) -> str | None:
     """The working directory a Claude Code session ran in, read from its own
     transcript (~/.claude/projects/<slug>/<sid>.jsonl). Robust where slug→path

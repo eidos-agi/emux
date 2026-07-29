@@ -1446,6 +1446,21 @@ def cmd_head(args: argparse.Namespace) -> int:
         print(_head_attach_command(session, host))
         return 0
 
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+        # Forwarded over ssh (e.g. a product wrapper exec'ing head on the
+        # plane's host): a GUI head would open on THIS box, not the caller's
+        # screen. Behave like --print-command so the caller (human or wrapper)
+        # can wrap the attach in `ssh -t <this-plane's-host>` and open locally.
+        print(_head_attach_command(session, host))
+        print(
+            "emux head: running over ssh — printed the attach command instead of "
+            "opening a window on the wrong machine. Run it from your local "
+            "terminal via `ssh -t <host> ...`, or have your wrapper use "
+            "--print-command and open a local window.",
+            file=sys.stderr,
+        )
+        return 0
+
     ok, app_name, err = _open_terminal_head(
         session, terminal=args.terminal, new_window=args.window, host=host
     )

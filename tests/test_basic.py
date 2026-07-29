@@ -881,6 +881,8 @@ def test_cmd_head_opens_iterm_for_raw_session(monkeypatch, capsys):
     from emux import server
 
     monkeypatch.setattr(server, "_session_exists", lambda session, host=None: True)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
 
     def fake_open(session, terminal="auto", new_window=False, host=None):
         calls.append((session, terminal, new_window))
@@ -901,6 +903,43 @@ def test_cmd_head_opens_iterm_for_raw_session(monkeypatch, capsys):
     assert rc == 0
     assert calls == [("raw-session", "iterm", True)]
     assert "opened iTerm head for raw-session -> raw-session" in capsys.readouterr().out
+
+
+def test_cmd_head_over_ssh_prints_command_not_gui(monkeypatch, capsys):
+    """Forwarded head (product wrapper ssh-ing to the plane's host) must never
+    open a terminal on the REMOTE box — print the attach command instead so
+    the caller can run it locally via `ssh -t <host>`."""
+    import argparse
+
+    from emux import cli, server
+
+    monkeypatch.setattr(
+        cli,
+        "_load_registry",
+        lambda: {"alpha": {"session": "real-session", "description": None, "tags": []}},
+    )
+    monkeypatch.setattr(server, "_session_exists", lambda session, host=None: True)
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.2 50000 10.0.0.1 22")
+
+    def boom(*a, **k):
+        raise AssertionError("GUI head must not open over ssh")
+
+    monkeypatch.setattr(cli, "_open_terminal_head", boom)
+
+    rc = cli.cmd_head(
+        argparse.Namespace(
+            target="alpha",
+            session=False,
+            terminal="auto",
+            window=False,
+            print_command=False,
+        )
+    )
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert captured.out == "tmux attach -t real-session\n"
+    assert "running over ssh" in captured.err
 
 
 def test_open_iterm_head_builds_command_file(monkeypatch, tmp_path):

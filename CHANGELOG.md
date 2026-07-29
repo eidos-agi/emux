@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.68.20
+
+### Features
+- **ENG-20260729-01 — fleet discovery in `emux mcp`:** new tools `emux_planes` (live plane roster from the manager's product.json `managed_planes` + optional `fleet_extra_planes` — never hardcoded; override path with `$DIRECTRUX_PRODUCT_JSON`) and `emux_how` (per-plane drive skill: verified folklore from the roster's per-plane `how` field, generated skeleton otherwise, plus the universal emux verbs). Upstreams the laptop `emux-mcp` shim (greenmark-cockpit `100e6fb`, `751c05d`) — the shim can be retired.
+
+### Fixes
+- **ENG-20260729-01 — `emux head` forwarded to a remote host:** when head runs over ssh (`SSH_CONNECTION`/`SSH_TTY` set — e.g. a product wrapper exec'ing head on the plane's host), it no longer opens a terminal on the wrong machine; it prints the attach command (like `--print-command`) with a hint so the caller opens a local `ssh -t` window. Proven client-side in greenmark-cockpit `tools/gmux` (`2a47976`).
+
 ## v0.68.19
 
 ### Fixes
