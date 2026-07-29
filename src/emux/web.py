@@ -1942,6 +1942,40 @@ def _hancock_approve(req_id: str) -> dict[str, Any]:
     return {"ok": p.returncode == 0, "output": (p.stdout or p.stderr or "").strip()[:600]}
 
 
+def _hancock_retract(req_id: str, reason: str) -> dict[str, Any]:
+    """Withdraw a request emux itself filed, because the condition that caused it
+    is gone (the session ungated before a human looked).
+
+    This is NOT a denial. It used to call _hancock_deny, so the ledger recorded
+    verdict='deny' with a NULL approver — indistinguishable from a human refusing,
+    and it buried real denials: 22 of 32 `emux head` denials were retractions,
+    several alive for under 2 seconds.
+
+    Recorded as skip/skipped, which already means "withdrawn without a verdict"
+    and is already in hancock's terminal-state list (mcp.go), so an agent blocked
+    in `wait` still unblocks immediately. A dedicated 'retracted' state would read
+    better but needs a CHECK-constraint rebuild in hancock plus that terminal list
+    — until both ship, a new status would hang every waiting agent."""
+    import sqlite3
+    import uuid
+    db = _hancock_db()
+    if not db.is_file():
+        return {"ok": False, "error": "no_db"}
+    try:
+        con = sqlite3.connect(str(db), timeout=5)
+        con.execute(
+            "INSERT INTO decision (id, request_id, verdict, reason) VALUES (?,?,?,?)",
+            (uuid.uuid4().hex[:16], req_id, "skip", reason))
+        con.execute(
+            "UPDATE request SET status='skipped', updated_at=datetime('now') "
+            "WHERE id=? AND status='pending'", (req_id,))
+        con.commit()
+        con.close()
+    except sqlite3.Error as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True}
+
+
 def _hancock_deny(req_id: str, reason: str = "denied from emux") -> dict[str, Any]:
     """Deny a request. Hancock has no CLI deny, so record the decision + mark the
     request denied directly (so the agent blocked in `wait` sees the verdict)."""
@@ -2052,7 +2086,7 @@ def _retract_stale_escalations() -> None:
             continue
         # Stale iff: NOT gated AND has been observed
         if sess not in _ESCALATED and sess in observed:
-            _hancock_deny(row[0], reason="auto-retracted: session no longer gated")
+            _hancock_retract(row[0], reason="retracted: session no longer gated")
 
 
 def _capture_and_observe(session: str, lines: int, host: str | None = None) -> str:
@@ -8741,7 +8775,7 @@ class EmuxWebHandler(BaseHTTPRequestHandler):
                 # Approve only the first (newest); deny the rest as redundant
                 result = _hancock_approve(ids[0])
                 for rid in ids[1:]:
-                    _hancock_deny(rid, reason="redundant duplicate")
+                    _hancock_retract(rid, reason="retracted: redundant duplicate")
                 self._json(result)
             else:
                 # Deny all ids in the group
