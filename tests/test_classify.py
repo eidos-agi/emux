@@ -50,6 +50,30 @@ def test_failing_tests_is_error_with_count():
     assert "3 test(s) failing" in r["evidence"]
 
 
+def test_fatal_startup_banner_as_last_line_is_error_needs_reseed():
+    """EID-1172: `claude --continue` with no conversation leaves its fatal
+    banner as the last line and an otherwise quiet screen — this seat is dead
+    and must classify as error/needs_reseed, never healthy/idle."""
+    cap = "$ claude --continue\nNo conversation found to continue\n"
+    r = classify(cap, [], _meta(last_change_age=600.0))
+    assert r["state"] == "error"
+    assert "needs_reseed" in r["flags"]
+    assert "fatal startup banner" in r["evidence"]
+
+
+def test_quoted_fatal_phrase_above_last_line_does_not_trip_reseed():
+    """A healthy chat QUOTING the phrase (with the composer below it) must not
+    classify as dead."""
+    cap = (
+        "the seat was dead-looping on 'No conversation found to continue'\n"
+        "fixed in ensure-engine\n"
+        "❯ \n"
+    )
+    r = classify(cap, [], _meta())
+    assert "needs_reseed" not in r["flags"]
+    assert r["state"] != "error"
+
+
 def test_shell_prompt_after_success_is_done_idle():
     cap = (
         "pytest -q\n"

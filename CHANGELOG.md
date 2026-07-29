@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.68.21
+
+### Fixes
+- **EID-1172 — classifier: fatal agent-startup banner is `error`, not idle:** a seat whose LAST pane line is a fatal startup banner (e.g. `claude --continue` with no conversation to resume) now classifies as `error` with a `needs_reseed` flag and a reseed recommendation, instead of drifting to done_idle/stuck while the fleet's seat is silently dead. Last-line-only match so a chat quoting the phrase never trips it. Companion fix in directrux `bin/ensure-engine` (dead-loop detection + fresh-seed fallback that actually fires).
+
 ## v0.68.20
 
 ### Features

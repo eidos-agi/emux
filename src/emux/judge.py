@@ -99,6 +99,11 @@ _BUILD_FAIL_RE = re.compile(
     re.M | re.I,
 )
 _TEST_FAILED_RE = re.compile(r"(\d+)\s+(?:failed|failing)", re.I)
+# An agent that died at startup and left its fatal banner as the final line
+# (e.g. `claude --continue` with no conversation to resume). Matched against
+# the LAST non-blank line only, so a chat merely quoting the phrase higher up
+# never trips it.
+_AGENT_FATAL_RE = re.compile(r"No conversation found to continue")
 _SUCCESS_RE = re.compile(
     r"All tests passed"
     r"|Build succeeded"
@@ -417,6 +422,17 @@ def classify(capture_text: str, activity: list[dict], meta: dict) -> dict:
         return _result("waiting_external", _confidence(2),
                        "Waiting for provider quota or context capacity.",
                        "explicit quota/context exhaustion text on screen", flags)
+
+    # A fatal agent-startup banner as the LAST line (e.g. `claude --continue`
+    # with no conversation): a process may still sit there but the seat is
+    # dead — reseed, don't inspect. Checked early because the screen is
+    # otherwise quiet and would misread as done_idle/stuck. (EID-1172)
+    if _AGENT_FATAL_RE.search(last_nonblank):
+        flags.append("needs_reseed")
+        return _result("error", 0.9,
+                       "Agent dead at startup — fatal banner is the last line; "
+                       "reseed the seat (fresh start, not --continue).",
+                       f"fatal startup banner: {last_nonblank.strip()[:80]!r}", flags)
 
     # 2. thrashing — busy, but cycling with no net progress. Checked BEFORE error:
     #    a command re-run producing the SAME failure over and over is thrash (more
